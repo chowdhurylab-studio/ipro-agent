@@ -253,13 +253,21 @@ def build_tables(
     deliberately if you want rotamer-probability-like behaviour.
 
     ``reference_energies`` adds a per-amino-acid constant to the self energy.
-    Real design codes use such a term to correct for unfolded-state propensity:
-    IPRO carries a hardcoded 20-entry amino-acid reference-energy table, and
-    Rosetta's ref2015 includes a ``ref`` term, which the PyRosetta backend
-    therefore gets for free. Without one, identities are decided by packing
-    alone, which on a fixed backbone is biased against large side chains at
-    buried positions -- a cavity sized for the native residue has no room for a
-    bigger one, and nothing in the energy rewards filling space.
+    This is a **Rosetta-style** correction, not an IPRO feature: Rosetta's
+    ref2015 includes a ``ref`` term for unfolded-state propensity, which the
+    PyRosetta backend therefore gets for free. The released IPRO source has no
+    such per-residue-type term -- what it adds per rotamer is ``-ln(p)``, a
+    rotamer *probability* penalty read from ``.prob`` files in its rotamer
+    library, and that term is 0 for GLY and ALA, so it pushes toward small
+    residues rather than away from them.
+
+    Without any such constant, identities are decided by packing alone, which on
+    a fixed backbone is biased against large side chains at buried positions: a
+    cavity sized for the native residue has no room for a bigger one, and
+    nothing in the energy rewards filling space. That bias matters most when the
+    objective *is* the packing (``stabilize``); it matters much less when the
+    objective is an interaction energy with a target, which is what IPRO
+    optimizes.
 
     No default table is supplied here, because inventing one would put
     unsourced numbers at the centre of the objective. Supply your own (via

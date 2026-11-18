@@ -446,11 +446,13 @@ Two traps specific to the fallback stack:
 
 1. **Without reference energies, nothing corrects for unfolded-state
    propensity**, so identities are decided by packing alone and large side
-   chains are disfavoured at buried positions. The loop emits a note when this
-   applies. Fix it by setting `goal_options.reference_energies`, or by using the
-   PyRosetta backend (whose ref2015 score function includes the term). If a run
-   returns only small residues at buried positions, treat that as the missing
-   term rather than as a result.
+   chains are disfavoured at buried positions. The loop says so. Set
+   `goal_options.reference_energies`, or use the PyRosetta backend (ref2015
+   includes the term). How much this matters depends on the goal: it bites hard
+   when the objective *is* the packing (`stabilize`), and much less when it is
+   an interaction energy with a target, which is what IPRO itself optimizes. If
+   a `stabilize` run returns only small residues at buried positions, treat that
+   as the missing term rather than as a result.
 2. **Without a MILP solver, the fallback is a heuristic that does not prove
    optimality.** Check `proven_optimal` in the ensemble entries. If it is false,
    say the packing is heuristic.
