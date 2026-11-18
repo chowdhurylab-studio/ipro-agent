@@ -292,9 +292,11 @@ class ReshapeChannel(Goal):
                 "reshape_channel has no probe molecule and no target_radius, so "
                 "the objective is degenerate: it minimizes the design molecule's "
                 "own packing energy and the residue-class constraint does the "
-                "real work. This is NOT the published pore objective. Supply a "
-                "probe molecule as a target/anti_target, or a target_radius, to "
-                "optimize the channel itself."
+                "real work. This is NOT the published pore objective. Give the "
+                "probe molecule role 'target' (the direction option, not the "
+                "role, sets whether its interaction is strengthened or "
+                "weakened), or set a target_radius, to optimize the channel "
+                "itself."
             )
 
     @property

@@ -27,7 +27,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+import itertools
+
 import numpy as np
+
+#: Marker and counter for atoms supplied without residue keys; see
+#: :meth:`AtomSet.__post_init__`.
+_UNKEYED = "__unkeyed__"
+_KEY_COUNTER = itertools.count()
 
 
 @dataclass
@@ -54,7 +61,15 @@ class AtomSet:
         if not self.resnames:
             self.resnames = [""] * n
         if not self.reskeys:
-            self.reskeys = [()] * n
+            # Each atom gets a distinct placeholder key rather than a shared
+            # empty tuple. With a shared key the backend's same-residue
+            # exclusion either skipped everything or -- worse, when the guard
+            # treated the empty tuple as "no information" -- let an atom be
+            # scored against itself, which made internal() report a large
+            # repulsion for atoms that were simply the same atom. Distinct keys
+            # mean an atom never pairs with itself, and two separately
+            # constructed sets never collide.
+            self.reskeys = [(_UNKEYED, next(_KEY_COUNTER)) for _ in range(n)]
 
     def __len__(self) -> int:
         return len(self.coords)

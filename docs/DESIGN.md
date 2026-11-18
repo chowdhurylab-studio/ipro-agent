@@ -109,7 +109,7 @@ specified, and this table is the record of what that changes.
 | **Pore / channel geometry measurement** | Not implemented. `geometry["min_pore_radius"]` is never populated, so `reshape_channel`'s radius term is inert and PoreDesigner's hard bottleneck filter cannot be applied. The goal reports this. | PoreDesigner measured the bottleneck by fitting ellipses to ~16 slices through the constriction, outside the optimization loop. |
 | **Vina re-docking inside the loop** | `dock.py` exists and is tested in dry-run; it is not wired into the iteration. | Vina is not installed in this environment, so a wired-in untested path would be a liability. When wiring it: re-score Vina poses with the energy backend, and **never** add Vina affinities to the objective — the scales are unrelated. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
-| **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without them, a rigid-backbone search of buried positions drifts to the smallest allowed residue — the loop emits a note when this applies, and the all-alanine answer it produces must not be reported as a design. |
+| **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
 
 ---
@@ -178,3 +178,42 @@ describe the suite as freely available to academic users. **No upstream code is
 reproduced in this repo** — the implementation was written from the published
 formulations, which is the defensible route given that licence ambiguity. This
 repo has no licence chosen yet; add one before sharing it.
+
+---
+
+## 7. Defects found by audit, and fixed
+
+The implementation was reviewed independently against the three places the
+program is encoded (the LP text, the PuLP builder, and the heuristic's
+feasibility check). Twelve defects were confirmed by execution. They are
+recorded here because every one produced a plausible-looking wrong answer
+*without raising*, which is the failure mode this kind of code is most prone to,
+and because anyone comparing results from an earlier checkout needs to know.
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | Pair energies below `pair_eps` were dropped **individually**, leaving incomplete `w` blocks | The linearization `Σ_s w[i,r,j,s] = y[i,r]` is only valid over a complete block. Partial blocks forced `y[j,s'] = y[i,r]`, making the dropped rotamers unselectable: the solver returned a suboptimal design **marked proven optimal** (measured: +91.08 against a true optimum of +87.41), or called a feasible program infeasible. Blocks are now kept or dropped whole. |
+| 2 | Rotamer atoms carried a synthetic residue key, not their position's | The design position's own backbone is in the fixed template, so the same-residue exclusion never fired and **every rotamer was scored against its own backbone**. This added roughly +30 to +50 kcal/mol per rotamer, scaling with side-chain size, biasing the whole objective toward small residues and pruning large side chains at the default clash threshold. Measured on 1CRN A16: ALA self-energy +27.8 → −0.07 after the fix. |
+| 3 | `min_class` / `require` naming an identity no rotamer has were emitted only as an LP comment | The solver returned a design that violated the stated constraint, proven optimal. Reachable from `reshape_channel`'s automatic W/F/Y/M constraint. Now raises `Infeasible`. |
+| 4 | Any `milp_solver` name other than `pulp`/`binary`/`greedy` fell through to the heuristic | Every documented choice (`cbc`, `glpk`, `cplex`, `gurobi`, `highs`) and every typo silently ran the heuristic. Now the name is honoured or an error is raised. |
+| 5 | The heuristic had no repair branch for `max_class` or `max_energy` | It rejected every move and the loop reported a false "design space exhausted". |
+| 6 | The H-bond well applied to every N/O–N/O pair | Two ARG NH1 at 3.4 Å scored **−0.83 (attractive)** instead of +0.67 — a sign flip on like charges — and a salt bridge was rewarded twice for one contact. The term is now restricted to pairs where neither atom carries a formal charge. |
+| 7 | `max_energy`'s cap went through `int()` | A −12.5 kcal/mol cap became −12, and −0.5 became 0. |
+| 8 | `proven_optimal` accepted any status containing "optimal" | GLPK's `INTEGER NON-OPTIMAL` read as proven. |
+| 9 | Self energies were keyed by `(position, aa, state)` | A library with a duplicated `(aa, state)` collapsed two rotamers onto one energy. |
+| 10 | Atoms supplied without residue keys shared one empty-tuple key | `internal()` scored each atom **against itself** at a clamped 0.3 Å, inventing a large repulsion. |
+| 11 | Integer cuts used `len(assignment) - 1` | A visited sequence naming a position absent from the tables left the cut slack by one, so the sequence could return. |
+| 12 | A position with no rotamers emitted no assignment row; CBC's status was read only from line 0 | A program with an undefined position; an infeasible CBC result degraded to a generic error. |
+
+Two earlier rounds of testing had already found and fixed: a solver proving
+infeasibility while still writing a zeros solution file (so an assignment was
+fabricated), the heuristic returning a sequence an integer cut forbade, a
+position string like `"115"` parsing as chain 1 residue 15, and PyMOL's
+`do_select` deleting the loaded object for insertion-coded positions.
+
+Each has a regression test in `tests/test_ipro.py` named
+`test_regression_*`. The suite is 39 tests.
+
+**Consequence for anyone comparing runs:** results from a checkout before these
+fixes are not trustworthy, particularly any that reported small residues at
+buried positions.

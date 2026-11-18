@@ -138,13 +138,22 @@ class BuiltinBackend(EnergyBackend):
         if not within.any():
             return 0.0
 
-        # Exclude same-residue pairs.
-        if any(a.reskeys) and any(b.reskeys):
-            ak = np.array([hash(k) for k in a.reskeys])
-            bk = np.array([hash(k) for k in b.reskeys])
-            within &= ak[:, None] != bk[None, :]
-            if not within.any():
-                return 0.0
+        # Exclude same-residue pairs. Keys are mapped to small integers through
+        # a dict rather than hashed: a hash collision would silently drop a real
+        # interaction, and silently dropping terms is exactly the failure mode
+        # this function must not have. Residue keys are always populated (see
+        # AtomSet.__post_init__), so this is unconditional -- in particular it
+        # guarantees an atom is never scored against itself.
+        ids: dict[object, int] = {}
+        ak = np.fromiter(
+            (ids.setdefault(k, len(ids)) for k in a.reskeys), dtype=np.int64, count=len(a)
+        )
+        bk = np.fromiter(
+            (ids.setdefault(k, len(ids)) for k in b.reskeys), dtype=np.int64, count=len(b)
+        )
+        within &= ak[:, None] != bk[None, :]
+        if not within.any():
+            return 0.0
 
         # Guard against exactly coincident atoms (duplicate input coordinates):
         # they would give inf and silently poison the objective.
@@ -163,26 +172,38 @@ class BuiltinBackend(EnergyBackend):
 
         total = float(lj[within].sum())
 
-        if self.coulomb:
-            qa = self._charges(a)
-            qb = self._charges(b)
-            if np.any(qa) and np.any(qb):
-                qq = qa[:, None] * qb[None, :]
-                nz = within & (qq != 0.0)
-                if nz.any():
-                    # eps(r) = 4r  =>  E = k q1 q2 / (4 r^2)
-                    total += float((COULOMB_K * qq[nz] / (4.0 * d[nz] ** 2)).sum())
+        qa = self._charges(a)
+        qb = self._charges(b)
+        qq = qa[:, None] * qb[None, :]
+
+        if self.coulomb and np.any(qa) and np.any(qb):
+            nz = within & (qq != 0.0)
+            if nz.any():
+                # eps(r) = 4r  =>  E = k q1 q2 / (4 r^2)
+                total += float((COULOMB_K * qq[nz] / (4.0 * d[nz] ** 2)).sum())
 
         if self.hbond_weight:
             ha = self._is_hbond(a)
             hb = self._is_hbond(b)
             if ha.any() and hb.any():
-                mask = within & ha[:, None] & hb[None, :]
-                # Flat-bottomed well over 2.6-3.4 A, tapering to zero by 4.0 A.
-                dd = d[mask]
-                w = np.clip((4.0 - dd) / 0.6, 0.0, 1.0)
-                w = np.where(dd < 2.4, 0.0, w)  # too close: LJ already penalizes
-                total -= float(self.hbond_weight * w.sum())
+                # The H-bond bonus applies only where neither atom's formal
+                # charge already decides the interaction:
+                #   qq > 0  like-charged (e.g. two ARG NH1). A bonus here flips
+                #           the sign of a repulsion -- two ARG nitrogens at
+                #           3.4 A came out attractive.
+                #   qq < 0  oppositely charged. The Coulomb term already
+                #           rewards it; adding an H-bond well double counts the
+                #           same physical contact.
+                # What is left is the neutral polar donor/acceptor pairs the
+                # term is actually meant for. This remains a distance-only
+                # approximation with no angular dependence.
+                mask = within & ha[:, None] & hb[None, :] & (qq == 0.0)
+                if mask.any():
+                    # Flat-bottomed well over 2.4-3.4 A, tapering out by 4.0 A.
+                    dd = d[mask]
+                    w = np.clip((4.0 - dd) / 0.6, 0.0, 1.0)
+                    w = np.where(dd < 2.4, 0.0, w)  # too close: LJ penalizes
+                    total -= float(self.hbond_weight * w.sum())
 
         return total
 

@@ -50,3 +50,18 @@ Treat this as a **worked example of the machinery**, and as a faithful
 transcription of the paper's *design space and constraints* — not as a
 reproduction of the paper's results. `EXPECTED.md` sets out which comparisons
 are meaningful.
+
+## What the smoke spec actually returns
+
+With the shipped settings it **retains all four native residues** (V18, L20,
+M38, Y40) and improves the score only by repacking their rotamers. That is a
+real outcome, not a failure: all four natives are inside the paper's nine-residue
+alphabet, so "do not mutate" is a legal answer, and on a fixed backbone with no
+probe molecule and no reference-energy table there is nothing pushing toward a
+larger side chain.
+
+It is *not* the published answer (all four go to Trp in CSD, UCD and
+OCD-TFTrp). Reproducing that direction needs the pieces this tool does not
+have: the water-wire probe, a pore-geometry filter, and a reference-energy term
+or PyRosetta. Treat the smoke run as evidence the machinery turns over, and
+`EXPECTED.md` for what a real comparison would require.

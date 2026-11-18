@@ -152,8 +152,24 @@ def harvest(
         )
     data = json.loads(out_path.read_text())
 
+    # A rotamer's atoms must carry the residue key of the position they sit at,
+    # NOT a synthetic key. The design position's own backbone (N, CA, C, O) is
+    # part of the fixed template, so if the keys do not match, the energy
+    # backend's same-residue exclusion never fires and every rotamer is scored
+    # against its own backbone as though it were a different residue. That adds
+    # a spurious +30 to +50 kcal/mol per rotamer, scaling with side-chain size,
+    # which biases the whole objective toward the smallest residue and prunes
+    # large side chains at the default clash threshold.
+    key_of = {p.label: (p.chain, p.number, p.insertion_code) for p in positions}
+
     rotamers: dict[str, list[Rotamer]] = {}
     for pos_label, by_aa in data.get("rotamers", {}).items():
+        reskey = key_of.get(pos_label)
+        if reskey is None:
+            raise RotamerError(
+                f"harvest returned position {pos_label!r} which was not requested; "
+                "cannot determine its residue key"
+            )
         flat: list[Rotamer] = []
         for aa, rots in by_aa.items():
             for rec in rots:
@@ -168,7 +184,7 @@ def harvest(
                             names=names,
                             coords=coords,
                             resnames=[aa] * len(names),
-                            reskeys=[("ROT", pos_label, "")] * len(names),
+                            reskeys=[reskey] * len(names),
                         ),
                         strain=rec.get("strain"),
                     )

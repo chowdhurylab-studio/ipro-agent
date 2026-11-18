@@ -93,7 +93,8 @@ molecules:
   # - name: water_wire_1
   #   path: water_wire_1.pdb
   #   kind: ligand            # an all-atom water column, not a polymer
-  #   role: anti_target
+  #   role: target             # role 'target'; `direction: narrow` below is
+  #                            # what weakens this interaction, not the role
   #   redock: true            # the paper re-placed the wire every iteration
   #
   # ...and change `goal:` above to whatever your goals module calls

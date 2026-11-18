@@ -68,7 +68,8 @@ molecules:
   # - name: water_wire_1
   #   path: water_wire_1.pdb
   #   kind: ligand
-  #   role: anti_target
+  #   role: target             # role 'target'; `direction: narrow` below is
+  #                            # what weakens this interaction, not the role
   #   redock: true
   #
   # The paper ran four such wires independently and kept the designs that were

@@ -76,8 +76,10 @@ are applied before the program is written, each reported in the result:
 * **position-pair pruning** -- two positions whose rotamer clouds cannot reach
   each other (centroid separation beyond the sum of their radii plus the energy
   cutoff) contribute no pair variables at all;
-* **pair-term pruning** -- individual pair energies with ``|E| < eps`` are
-  dropped, since they cannot change the optimum materially.
+* **negligible-block pruning** -- a position pair is dropped only when *every*
+  interaction in its block is below ``pair_eps``. Individual terms are never
+  dropped from a surviving block: the linearization requires a complete block
+  (see :func:`build_tables`).
 """
 
 from __future__ import annotations
@@ -97,6 +99,19 @@ from .config import AA_GROUPS, THREE_TO_ONE
 from .energy.base import AtomSet, EnergyBackend
 
 log = logging.getLogger(__name__)
+
+#: Solvers a user may name in ``backends.milp_solver``, mapped to the PuLP
+#: class that drives them and the binary ``_solve_binary`` can read a solution
+#: from (None where this code cannot parse that solver's output directly).
+NAMED_SOLVERS: dict[str, tuple[str, str | None]] = {
+    "cplex": ("CPLEX_CMD", None),
+    "gurobi": ("GUROBI_CMD", None),
+    "cbc": ("PULP_CBC_CMD", "cbc"),
+    "coin": ("COIN_CMD", "cbc"),
+    "highs": ("HiGHS", None),
+    "scip": ("SCIP_CMD", None),
+    "glpk": ("GLPK_CMD", "glpsol"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +164,24 @@ class Constraint:
     label: str = ""
 
     def resolve_count(self, n_positions: int) -> int:
+        """A whole number of positions. Only for counting constraints."""
         if self.count is not None:
             return int(self.count)
         if self.fraction is not None:
             return int(math.ceil(self.fraction * n_positions))
+        raise ValueError(f"constraint {self.kind} needs 'count' or 'fraction'")
+
+    def resolve_value(self, n_positions: int) -> float:
+        """A real-valued right-hand side, for ``max_energy``.
+
+        Separate from :meth:`resolve_count` because an energy cutoff is an
+        energy, not a count: ``int()`` would turn a -12.5 kcal/mol cap into
+        -12, and a -0.5 cap into 0, silently changing a documented threshold.
+        """
+        if self.count is not None:
+            return float(self.count)
+        if self.fraction is not None:
+            return float(self.fraction) * n_positions
         raise ValueError(f"constraint {self.kind} needs 'count' or 'fraction'")
 
     def residue_set(self) -> set[str]:
@@ -220,15 +249,13 @@ def build_tables(
     deliberately if you want rotamer-probability-like behaviour.
 
     ``reference_energies`` adds a per-amino-acid constant to the self energy.
-    **Read this before interpreting a design.** With no reference energies, a
-    rigid-backbone search of buried positions reliably collapses to the
-    smallest residue available -- usually all-alanine -- because a large side
-    chain in a cavity sized for the native one simply clashes, and nothing in
-    the energy rewards filling space. That is not a bug in the search; it is
-    what the energy function says. Real design codes correct for it with an
-    unfolded-state reference term per residue type: IPRO carries a hardcoded
-    20-entry amino-acid reference-energy table, and Rosetta's ref2015 includes
-    a ``ref`` term, which the PyRosetta backend therefore gets for free.
+    Real design codes use such a term to correct for unfolded-state propensity:
+    IPRO carries a hardcoded 20-entry amino-acid reference-energy table, and
+    Rosetta's ref2015 includes a ``ref`` term, which the PyRosetta backend
+    therefore gets for free. Without one, identities are decided by packing
+    alone, which on a fixed backbone is biased against large side chains at
+    buried positions -- a cavity sized for the native residue has no room for a
+    bigger one, and nothing in the energy rewards filling space.
 
     No default table is supplied here, because inventing one would put
     unsourced numbers at the centre of the objective. Supply your own (via
@@ -267,14 +294,18 @@ def build_tables(
             else:
                 n_pruned += 1
         tab.rotamers[pos] = kept
-        by_key = {rot.key: e for e, rot in scored}
+        # Keyed by object identity, not by (position, aa, state): a library
+        # with a duplicate (aa, state) would otherwise collapse two distinct
+        # rotamers onto one energy.
+        by_id = {id(rot): e for e, rot in scored}
         for idx, rot in enumerate(kept):
-            tab.self_energy[(pos, idx)] = by_key[rot.key]
+            tab.self_energy[(pos, idx)] = by_id[id(rot)]
 
     # -- pair energies, with position-pair and term pruning ---------------
     n_pairs_possible = 0
     n_pairs_kept = 0
     n_pos_pairs_skipped = 0
+    n_blocks_dropped = 0
     for a in range(len(positions)):
         for b in range(a + 1, len(positions)):
             pi, pj = positions[a], positions[b]
@@ -292,18 +323,37 @@ def build_tables(
                 n_pos_pairs_skipped += 1
                 continue
 
+            # A position-pair block is kept or dropped WHOLE. Dropping
+            # individual terms within a block is unsound: the linearization
+            # constraint sum_s w[i,r,j,s] = y[i,r] is only valid when every
+            # rotamer s of position j has a w variable. With a partial block the
+            # two orientations of that constraint force y[j,s'] = y[i,r] for the
+            # surviving s', which makes the rotamers whose terms were dropped
+            # unselectable -- the solver then returns a suboptimal assignment
+            # and reports it as proven optimal, or declares a feasible program
+            # infeasible.
+            block: dict[tuple[str, int, str, int], float] = {}
+            largest = 0.0
             for ri, rot_i in enumerate(Ri):
                 for rj, rot_j in enumerate(Rj):
                     e = backend.interaction(rot_i.atoms, rot_j.atoms)
-                    if abs(e) >= pair_eps:
-                        tab.pair_energy[(pi, ri, pj, rj)] = e
-                        n_pairs_kept += 1
+                    block[(pi, ri, pj, rj)] = e
+                    largest = max(largest, abs(e))
+            if largest < pair_eps:
+                # Every interaction in this block is negligible, so the two
+                # positions are effectively independent; dropping the whole
+                # block emits no constraint for the pair at all, which is sound.
+                n_blocks_dropped += 1
+                continue
+            tab.pair_energy.update(block)
+            n_pairs_kept += len(block)
 
     tab.stats = {
         "rotamers_in": n_in,
         "rotamers_pruned": n_pruned,
         "rotamers_kept": sum(len(v) for v in tab.rotamers.values()),
         "position_pairs_skipped": n_pos_pairs_skipped,
+        "negligible_blocks_dropped": n_blocks_dropped,
         "pair_terms_possible": n_pairs_possible,
         "pair_terms_kept": n_pairs_kept,
     }
@@ -434,8 +484,16 @@ class RotamerMILP:
         L.append("\\ (2) exactly one rotamer per design position")
         for p in t.positions:
             vs = [self._y(p, r) for r in range(len(t.rotamers[p]))]
-            if vs:
-                L.append(f" one_{self._pi[p]}: " + _wrap_terms([f"+1 {v}" for v in vs]) + " = 1")
+            if not vs:
+                # Emitting no row for a rotamer-less position would silently
+                # produce a program with no assignment constraint there, whose
+                # "solution" leaves that position undefined.
+                raise Infeasible(
+                    f"design position {p} has no rotamers, so no residue can be "
+                    "assigned there. Check that its allowed residues are valid "
+                    "and that PyMOL could build them (scripts/doctor.py)."
+                )
+            L.append(f" one_{self._pi[p]}: " + _wrap_terms([f"+1 {v}" for v in vs]) + " = 1")
 
         L.append("\\ (3) pair-variable linearization: sum_s w[i,r,j,s] = y[i,r]")
         # Group pair terms by (i,r,j) so each group yields one constraint. Only
@@ -460,9 +518,14 @@ class RotamerMILP:
             vs = self._cut_vars(assignment)
             if not vs:
                 continue
+            # The right-hand side counts the positions actually constrained, not
+            # the length of the caller's dict: a visited assignment naming a
+            # position absent from these tables would otherwise leave the cut
+            # slack by one and let the sequence come back.
+            covered = len({p for p in assignment if p in self.t.rotamers})
             L.append(
                 f" cut{n}: " + _wrap_terms([f"+1 {v}" for v in vs])
-                + f" <= {len(assignment) - 1}"
+                + f" <= {covered - 1}"
             )
 
         # -- variable declarations
@@ -515,10 +578,11 @@ class RotamerMILP:
             if vs:
                 out.append(f" {tag}: " + _wrap_terms([f"+1 {v}" for v in vs]) + f" {rel} {k}")
             elif con.kind == "min_class" and k > 0:
-                out.append(
-                    f"\\ WARNING: no rotamer anywhere has an identity in {{{short}}}; "
-                    "this constraint cannot be satisfied and is omitted so the "
-                    "infeasibility is reported here rather than by the solver"
+                raise Infeasible(
+                    f"constraint {tag} requires at least {k} position(s) with an "
+                    f"identity in {{{short}}}, but no rotamer at any design "
+                    "position has one. Widen the allowed residues, or drop the "
+                    "constraint."
                 )
 
         elif con.kind in ("require", "forbid"):
@@ -532,13 +596,19 @@ class RotamerMILP:
                     if rot.aa in want
                 ]
                 if not vs:
-                    continue
+                    if con.kind == "require":
+                        raise Infeasible(
+                            f"constraint {tag} requires {p} to take an identity in "
+                            f"{sorted(want)}, but no rotamer there has one. Add it "
+                            f"to that position's allowed residues."
+                        )
+                    continue   # 'forbid' with nothing to forbid is satisfied
                 rel, rhs = ("= 1", 1) if con.kind == "require" else ("= 0", 0)
                 out.append(f"\\ (7) {con.kind} at {p}: {sorted(want)}")
                 out.append(f" {tag}_{self._pi[p]}: " + _wrap_terms([f"+1 {v}" for v in vs]) + f" {rel}")
 
         elif con.kind == "max_energy":
-            cap = con.resolve_count(npos)
+            cap = con.resolve_value(npos)
             terms: list[str] = []
             for p in t.positions:
                 for r in range(len(t.rotamers[p])):
@@ -548,9 +618,9 @@ class RotamerMILP:
             for (pi, r, pj, s), c in sorted(t.pair_energy.items()):
                 if c:
                     terms.append(f"{c:+.6g} {self._w(pi, r, pj, s)}")
-            out.append(f"\\ (8) IPRO stability constraint: assignment energy <= {cap}")
+            out.append(f"\\ (8) IPRO stability constraint: assignment energy <= {cap:.6g}")
             if terms:
-                out.append(f" {tag}: " + _wrap_terms(terms) + f" <= {cap}")
+                out.append(f" {tag}: " + _wrap_terms(terms) + f" <= {cap:.6g}")
 
         else:
             out.append(f"\\ WARNING: unknown constraint kind {con.kind!r}, ignored")
@@ -598,18 +668,33 @@ class RotamerMILP:
             lp_path.parent.mkdir(parents=True, exist_ok=True)
             lp_path.write_text(lp_text)
 
-        order = (
-            ["pulp", "binary", "greedy"]
-            if solver == "auto"
-            else ([solver] if solver != "greedy" else ["greedy"])
-        )
+        # A named solver must actually be tried. Previously any name that was
+        # not "pulp" or "binary" fell through to the greedy heuristic, so every
+        # documented choice ("cbc", "glpk", "cplex", "gurobi", "highs") and
+        # every typo silently ran the heuristic and reported a design that no
+        # solver had endorsed.
+        want = (solver or "auto").strip().lower()
+        if want in ("auto", ""):
+            order, prefer = ["pulp", "binary", "greedy"], None
+        elif want == "greedy":
+            order, prefer = ["greedy"], None
+        elif want in ("pulp", "binary"):
+            order, prefer = [want], None
+        elif want in NAMED_SOLVERS:
+            # Either route can drive these; PuLP first, then an LP file.
+            order, prefer = ["pulp", "binary"], want
+        else:
+            raise ValueError(
+                f"unknown milp_solver {solver!r}. Choose 'auto', 'greedy', "
+                f"'pulp', 'binary', or one of: {', '.join(sorted(NAMED_SOLVERS))}"
+            )
         last_err: Exception | None = None
         for which in order:
             try:
                 if which == "pulp":
-                    sol = self._solve_pulp(time_limit)
+                    sol = self._solve_pulp(time_limit, prefer=prefer)
                 elif which == "binary":
-                    sol = self._solve_binary(lp_text, time_limit)
+                    sol = self._solve_binary(lp_text, time_limit, prefer=prefer)
                 else:
                     sol = self._solve_greedy()
                 sol.lp_path = lp_path
@@ -627,7 +712,7 @@ class RotamerMILP:
 
     # -- solver implementations -------------------------------------------
 
-    def _solve_pulp(self, time_limit: float | None) -> MILPSolution:
+    def _solve_pulp(self, time_limit: float | None, prefer: str | None = None) -> MILPSolution:
         import pulp  # noqa: F401  (raises if absent)
 
         t = self.t
@@ -663,16 +748,20 @@ class RotamerMILP:
                 if rot.aa == aa
             ]
             if vs:
-                prob += pulp.lpSum(vs) <= len(assignment) - 1
+                covered = len({p for p in assignment if p in t.rotamers})
+                prob += pulp.lpSum(vs) <= covered - 1
 
         solver_obj = None
         # Order: commercial first (IPRO itself used CPLEX), then open solvers.
         # HiGHS is included because PuLP 4.x no longer bundles CBC, so a modern
         # `pip install pulp` may have HiGHS and nothing else.
-        for name in (
-            "CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD",
-            "HiGHS", "HiGHS_CMD", "SCIP_CMD", "GLPK_CMD",
-        ):
+        candidates = (
+            (NAMED_SOLVERS[prefer][0],) if prefer else (
+                "CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD",
+                "HiGHS", "HiGHS_CMD", "SCIP_CMD", "GLPK_CMD",
+            )
+        )
+        for name in candidates:
             if name in pulp.listSolvers(onlyAvailable=True):
                 kw = {"msg": False}
                 if time_limit:
@@ -680,7 +769,10 @@ class RotamerMILP:
                 solver_obj = getattr(pulp, name)(**kw)
                 break
         if solver_obj is None:
-            raise RuntimeError("pulp has no available solver")
+            raise RuntimeError(
+                f"pulp cannot provide solver {prefer!r}" if prefer
+                else "pulp has no available solver"
+            )
         prob.solve(solver_obj)
         status = pulp.LpStatus[prob.status]
         if status not in ("Optimal",):
@@ -710,7 +802,7 @@ class RotamerMILP:
                         t.self_energy.get((p, r), 0.0) * v for (p, r), v in y.items()
                     )
                     + pulp.lpSum(t.pair_energy[k] * v for k, v in w.items())
-                ) <= con.resolve_count(npos)
+                ) <= con.resolve_value(npos)
                 continue
             if con.kind == "max_mutations":
                 k = con.resolve_count(npos)
@@ -749,10 +841,28 @@ class RotamerMILP:
                     if vs:
                         prob += pulp.lpSum(vs) == (1 if con.kind == "require" else 0)
 
-    def _solve_binary(self, lp_text: str, time_limit: float | None) -> MILPSolution:
-        """Solve by handing an LP file to a solver binary (glpsol / cbc / cplex)."""
-        glpsol = shutil.which("glpsol")
-        cbc = shutil.which("cbc")
+    def _solve_binary(
+        self, lp_text: str, time_limit: float | None, prefer: str | None = None
+    ) -> MILPSolution:
+        """Solve by handing an LP file to a solver binary (glpsol or cbc).
+
+        Only these two have solution formats this code parses; a user who names
+        another solver gets a clear error rather than a heuristic answer.
+        """
+        if prefer:
+            binary = NAMED_SOLVERS[prefer][1]
+            if binary is None:
+                raise RuntimeError(
+                    f"solver {prefer!r} cannot be driven through an LP file here "
+                    "(its solution format is not parsed); install pulp to use it"
+                )
+            if shutil.which(binary) is None:
+                raise RuntimeError(f"solver binary {binary!r} for {prefer!r} not on PATH")
+            glpsol = shutil.which(binary) if binary == "glpsol" else None
+            cbc = shutil.which(binary) if binary == "cbc" else None
+        else:
+            glpsol = shutil.which("glpsol")
+            cbc = shutil.which("cbc")
         if not (glpsol or cbc):
             raise RuntimeError("no solver binary (glpsol, cbc) on PATH")
 
@@ -761,7 +871,7 @@ class RotamerMILP:
             out = Path(td) / "model.sol"
             lp.write_text(lp_text)
             if glpsol:
-                cmd = ["glpsol", "--lp", str(lp), "-o", str(out)]
+                cmd = [glpsol, "--lp", str(lp), "-o", str(out)]
                 if time_limit:
                     cmd += ["--tmlim", str(int(time_limit))]
                 name = "glpsol"
@@ -816,8 +926,11 @@ class RotamerMILP:
         # glpsol reports "INTEGER OPTIMAL" for a MIP and "OPTIMAL" for an LP;
         # CBC reports "Optimal". Anything else (time limit, feasible-only) must
         # not be reported as proven optimal.
-        s = status.lower()
-        proven = "optimal" in s and "not" not in s
+        s = status.lower().replace("-", " ")
+        # "INTEGER NON-OPTIMAL" contains "optimal"; so does "not optimal".
+        proven = "optimal" in s and not any(
+            w in s for w in ("non optimal", "not optimal", "suboptimal", "sub optimal")
+        )
         return MILPSolution(
             choices=choices, objective=obj, status=status, solver=name,
             proven_optimal=proven,
@@ -922,7 +1035,7 @@ class RotamerMILP:
                     if p in ids and ids[p] in want:
                         return False
             elif con.kind == "max_energy":
-                if self.evaluate(choices) > con.resolve_count(npos):
+                if self.evaluate(choices) > con.resolve_value(npos):
                     return False
         # Integer cuts: an assignment matching a visited sequence at every
         # position is forbidden.
@@ -972,6 +1085,53 @@ class RotamerMILP:
                         if alts:
                             choices[p] = min(alts)[1]
                             return True
+            if con.kind == "max_class":
+                # Too many positions in the class: move the costliest member
+                # out to its cheapest non-member rotamer.
+                want = con.residue_set()
+                k = con.resolve_count(npos)
+                members = [p for p, r in choices.items() if t.rotamers[p][r].aa in want]
+                if len(members) <= k:
+                    continue
+                best: tuple[float, str, int] | None = None
+                for p in members:
+                    alts = [
+                        (t.self_energy.get((p, r), 0.0), p, r)
+                        for r, rot in enumerate(t.rotamers[p])
+                        if rot.aa not in want
+                    ]
+                    if alts:
+                        cand = min(alts)
+                        if best is None or cand[0] < best[0]:
+                            best = cand
+                if best is None:
+                    return False
+                choices[best[1]] = best[2]
+                return True
+
+            if con.kind == "max_energy":
+                # Nothing to swap *to*: the violation is the objective value
+                # itself. Take the single-position change that lowers it most,
+                # which is progress toward the cap even while still above it.
+                if self.evaluate(choices) <= con.resolve_value(npos):
+                    continue
+                cur = self.evaluate(choices)
+                best_move: tuple[float, str, int] | None = None
+                for p in t.positions:
+                    keep = choices[p]
+                    for r in range(len(t.rotamers[p])):
+                        if r == keep:
+                            continue
+                        choices[p] = r
+                        e = self.evaluate(choices)
+                        if e < cur - 1e-12 and (best_move is None or e < best_move[0]):
+                            best_move = (e, p, r)
+                    choices[p] = keep
+                if best_move is None:
+                    return False
+                choices[best_move[1]] = best_move[2]
+                return True
+
             if con.kind == "max_mutations":
                 k = con.resolve_count(npos)
                 muts = [p for p, r in choices.items()
@@ -1050,12 +1210,13 @@ def _parse_cbc_solution(text: str) -> tuple[dict[str, float], str]:
     """Parse CBC ``solu`` output: an optional status line then ``idx name value``."""
     vals: dict[str, float] = {}
     status = "unknown"
-    for i, line in enumerate(text.splitlines()):
+    for line in text.splitlines():
         toks = line.split()
         if not toks:
-            continue
-        if i == 0 and not toks[0].isdigit():
-            status = " ".join(toks[:2])
+            continue   # a leading blank line must not lose the status
+        if not toks[0].isdigit():
+            if status == "unknown":
+                status = " ".join(toks[:2])
             continue
         if len(toks) >= 3 and toks[0].isdigit():
             try:

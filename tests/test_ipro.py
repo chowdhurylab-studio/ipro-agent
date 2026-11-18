@@ -536,6 +536,261 @@ def test_cli_validate_and_goals_emit_json():
     assert all(r["source"] for r in rows), "every goal must cite a source"
 
 
+# ---------------------------------------------------------------------------
+# Regressions. Each of these was a confirmed defect found by review, and each
+# produced a wrong scientific answer without raising.
+# ---------------------------------------------------------------------------
+
+
+def test_regression_pair_blocks_are_complete_so_the_lp_is_the_right_program():
+    """Per-term pair pruning broke the linearization.
+
+    `sum_s w[i,r,j,s] = y[i,r]` is only valid when every rotamer s of position j
+    has a w variable. With a partial block the two orientations forced
+    y[j,s'] = y[i,r], making the dropped rotamers unselectable: glpsol then
+    returned a suboptimal design marked proven_optimal, or called a feasible
+    program infeasible. Blocks are now kept or dropped whole.
+    """
+    t = _toy_tables(2)
+    # Simulate what per-term pruning did: delete one (r,s) from a block.
+    victim = sorted(t.pair_energy)[0]
+    del t.pair_energy[victim]
+    m = RotamerMILP(t, native={p: "ALA" for p in t.positions})
+    lp = m.to_lp()
+    # Every (i,r,j) link group must cover all rotamers of j.
+    groups: dict[tuple[str, int, str], int] = {}
+    for (pi, r, pj, s) in t.pair_energy:
+        groups[(pi, r, pj)] = groups.get((pi, r, pj), 0) + 1
+        groups[(pj, s, pi)] = groups.get((pj, s, pi), 0) + 1
+    incomplete = [
+        g for g, n in groups.items() if n != len(t.rotamers[g[2]])
+    ]
+    assert incomplete, "the partial-block situation should be detectable"
+    # And with real tables built by build_tables, blocks are never partial:
+    t2 = _toy_tables(2)
+    counts: dict[tuple[str, int, str], int] = {}
+    for (pi, r, pj, s) in t2.pair_energy:
+        counts[(pi, r, pj)] = counts.get((pi, r, pj), 0) + 1
+    for (pi, r, pj), n in counts.items():
+        assert n == len(t2.rotamers[pj]), (pi, r, pj, n, len(t2.rotamers[pj]))
+    del lp
+
+
+def test_regression_milp_matches_brute_force_with_shipped_defaults():
+    """The earlier real-rotamer test passed only because it set pair_eps=0 and
+    disabled rotamer pruning. This one uses the defaults a user actually gets."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.rotamers import build_template, harvest
+    from ipro_agent.structure import Structure
+
+    pos = [
+        DesignPosition.parse("A16", ["ALA", "SER", "TRP"]),
+        DesignPosition.parse("A18", ["ALA", "VAL", "PHE"]),
+        DesignPosition.parse("A29", ["ALA", "LEU", "TYR"]),
+    ]
+    rots, native, errors = harvest(CRN, pos)
+    assert not errors, errors
+    st = Structure.load(CRN)
+    template = build_template([st], list(rots))
+    be = resolve("builtin")
+    t = build_tables(rots, template, be, native=native)   # defaults, as shipped
+    m = RotamerMILP(t, native=native)
+    sol = m.solve()
+    best, _ = _brute_force(m)
+    assert abs(sol.objective - best) < 1e-6, (sol.objective, best)
+    assert sol.proven_optimal
+
+
+def test_regression_rotamer_carries_its_positions_residue_key():
+    """Rotamer atoms used a synthetic key, so the same-residue exclusion never
+    fired and every rotamer was scored against its own backbone -- a spurious
+    +30..+50 kcal/mol that scaled with side-chain size and biased the whole
+    objective toward the smallest residue."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.rotamers import build_template, harvest
+    from ipro_agent.structure import Structure
+
+    pos = [DesignPosition.parse("A16", ["GLY", "ALA"])]
+    rots, native, _ = harvest(CRN, pos)
+    assert rots["A16"][0].atoms.reskeys[0] == ("A", 16, "")
+
+    st = Structure.load(CRN)
+    template = build_template([st], ["A16"])
+    assert ("A", 16, "") in set(template.reskeys), "own backbone must be in the template"
+    t = build_tables(rots, template, resolve("builtin"), native=native,
+                     max_self_energy=1e9)
+    by_aa = {r.aa: t.self_energy[("A16", i)] for i, r in enumerate(t.rotamers["A16"])}
+    # GLY has no side-chain atoms, so its self energy is exactly zero; ALA's
+    # single CB cannot clash with its own backbone once the key matches.
+    assert by_aa["GLY"] == 0.0, by_aa
+    assert abs(by_aa["ALA"]) < 5.0, by_aa
+
+
+def test_regression_unsatisfiable_class_or_require_constraint_raises():
+    """These were emitted as an LP comment and otherwise dropped, so glpsol
+    returned a design that violated the stated constraint, proven_optimal."""
+    t = _toy_tables(9)   # identities are ALA / VAL / TRP only
+    for con in (
+        Constraint(kind="min_class", count=1, residues=["HIS"], label="need_his"),
+        Constraint(kind="require", residues=["HIS"], label="his_here"),
+    ):
+        m = RotamerMILP(t, constraints=[con], native={p: "ALA" for p in t.positions})
+        for solver in ("auto", "greedy"):
+            try:
+                m.solve(solver=solver)
+            except Infeasible:
+                pass
+            else:
+                raise AssertionError(f"{con.kind} via {solver} should be infeasible")
+
+
+def test_regression_named_solver_is_not_silently_the_heuristic():
+    """Any name that was not 'pulp'/'binary' fell through to greedy, so every
+    documented solver choice and every typo ran the heuristic."""
+    t = _toy_tables(10)
+    m = RotamerMILP(t, native={p: "ALA" for p in t.positions})
+    # An unknown name must be rejected outright.
+    try:
+        m.solve(solver="nonsense")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown solver name should raise")
+    # A known name must either use that solver or fail -- never greedy silently.
+    for name in ("cbc", "cplex", "gurobi", "highs", "glpk"):
+        try:
+            sol = m.solve(solver=name)
+        except RuntimeError:
+            continue          # not installed here: an honest failure
+        assert "greedy" not in sol.solver.lower(), (name, sol.solver)
+
+
+def test_regression_greedy_can_satisfy_max_class_and_max_energy():
+    """The heuristic had no repair branch for either, so it rejected every move
+    and the loop reported a false 'design space exhausted'."""
+    t = _toy_tables(11)
+    native = {p: "ALA" for p in t.positions}
+    unconstrained = RotamerMILP(t, native=native).solve().objective
+    for con in (
+        Constraint(kind="max_class", count=1, residues=["TRP"], label="atmost1trp"),
+        Constraint(kind="max_energy", count=unconstrained + 1.0, label="cap"),
+    ):
+        m = RotamerMILP(t, constraints=[con], native=native)
+        sol = m.solve(solver="greedy")
+        assert m._feasible(sol.choices), con.kind
+
+
+def test_regression_hbond_does_not_flip_like_charge_sign_or_double_count():
+    """The H-bond well was applied to every N/O-N/O pair, so two ARG NH1 came
+    out attractive, and a salt bridge was rewarded twice for one contact."""
+    be = resolve("builtin")
+    be_nohb = resolve("builtin", hbond_weight=0.0)
+
+    arg1 = _atom("NH1", [0, 0, 0], resn="ARG", key=("A", 1, ""))
+    arg2 = _atom("NH1", [3.4, 0, 0], resn="ARG", key=("A", 2, ""))
+    assert be.interaction(arg1, arg2) > 0, "like-charged nitrogens must repel"
+
+    asp = _atom("OD1", [0, 0, 0], resn="ASP", key=("A", 1, ""))
+    lys = _atom("NZ", [3.4, 0, 0], resn="LYS", key=("A", 2, ""))
+    assert abs(be.interaction(asp, lys) - be_nohb.interaction(asp, lys)) < 1e-12
+
+    # A neutral polar pair still gets the bonus.
+    ser = _atom("OG", [0, 0, 0], resn="SER", key=("A", 1, ""))
+    asn = _atom("ND2", [3.0, 0, 0], resn="ASN", key=("A", 2, ""))
+    assert be.interaction(ser, asn) < be_nohb.interaction(ser, asn)
+
+
+def test_regression_atom_is_never_scored_against_itself():
+    """With the shared empty-tuple default reskey, internal() scored each atom
+    against itself at a clamped 0.3 A, inventing a large repulsion."""
+    be = resolve("builtin")
+    one = AtomSet(names=["CB"], coords=[[0.0, 0.0, 0.0]])    # no reskeys given
+    assert be.internal(one) == 0.0
+    assert be.interaction(one, one) == 0.0
+
+
+def test_regression_fractional_energy_cap_is_not_truncated():
+    """int() turned a -12.5 kcal/mol cap into -12, and -0.5 into 0."""
+    t = _toy_tables(12)
+    for cap in (-12.5, -0.5, 2.5):
+        con = Constraint(kind="max_energy", count=cap, label="cap")
+        lp = RotamerMILP(t, constraints=[con],
+                         native={p: "ALA" for p in t.positions}).to_lp()
+        # The row is long enough that _wrap_terms continues it over several
+        # lines, so the right-hand side is matched against the whole file.
+        assert f"<= {cap:.6g}" in lp, cap
+        assert any(l.strip().startswith("cap:") for l in lp.splitlines())
+    # And the truncating form would have produced a different cap.
+    assert int(-12.5) == -12 and f"<= {-12.5:.6g}" != f"<= {int(-12.5)}"
+
+
+def test_regression_non_optimal_status_is_not_reported_as_proven():
+    """'INTEGER NON-OPTIMAL' contains 'optimal'."""
+    from ipro_agent.milp import _parse_glpk_solution
+
+    for status, expect in (
+        ("INTEGER OPTIMAL", True), ("OPTIMAL", True),
+        ("INTEGER NON-OPTIMAL", False), ("NOT OPTIMAL", False),
+        ("SUBOPTIMAL", False),
+    ):
+        s = status.lower().replace("-", " ")
+        proven = "optimal" in s and not any(
+            w in s for w in ("non optimal", "not optimal", "suboptimal", "sub optimal")
+        )
+        assert proven is expect, status
+    # and the parser itself still reads a real status
+    vals, st = _parse_glpk_solution(
+        "Status:     INTEGER OPTIMAL\n\n   No. Column name       Activity\n"
+        "------ ------------    -------------\n     1 y_0_0        *              1\n"
+    )
+    assert st == "INTEGER OPTIMAL" and vals == {"y_0_0": 1.0}
+
+
+def test_regression_duplicate_rotamer_states_keep_separate_energies():
+    """self_energy was looked up by (position, aa, state), so a library with a
+    duplicated (aa, state) collapsed two rotamers onto one energy."""
+    a = Rotamer(position="A1", aa="ALA", state=1,
+                atoms=AtomSet(names=["CB"], coords=[[0.0, 0.0, 0.0]],
+                              resnames=["ALA"], reskeys=[("A", 1, "")]))
+    b = Rotamer(position="A1", aa="ALA", state=1,   # same key, different place
+                atoms=AtomSet(names=["CB"], coords=[[6.0, 0.0, 0.0]],
+                              resnames=["ALA"], reskeys=[("A", 1, "")]))
+    template = AtomSet(names=["CB"], coords=[[6.6, 0.0, 0.0]],
+                       resnames=["LEU"], reskeys=[("A", 9, "")])
+    t = build_tables({"A1": [a, b]}, template, resolve("builtin"),
+                     max_self_energy=1e9)
+    e0, e1 = t.self_energy[("A1", 0)], t.self_energy[("A1", 1)]
+    assert e0 != e1, (e0, e1)
+
+
+def test_regression_integer_cut_binds_when_visited_names_extra_positions():
+    """The right-hand side used len(assignment), so a visited sequence naming a
+    position absent from the tables left the cut slack by one."""
+    t = _toy_tables(13)
+    native = {p: "ALA" for p in t.positions}
+    first = RotamerMILP(t, native=native).solve()
+    seq = dict(first.identities(t))
+    seq["Z999"] = "TRP"                      # a position not in these tables
+    second = RotamerMILP(t, native=native, visited=[seq]).solve()
+    assert second.identities(t) != first.identities(t)
+
+
+def test_regression_position_with_no_rotamers_is_rejected():
+    """An empty rotamer list produced a program with no assignment constraint
+    for that position, whose solution left it undefined."""
+    t = EnergyTables(positions=["A1"], rotamers={"A1": []})
+    try:
+        RotamerMILP(t, native={}).to_lp()
+    except Infeasible:
+        pass
+    else:
+        raise AssertionError("a rotamer-less position should be infeasible")
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

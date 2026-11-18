@@ -300,10 +300,12 @@ class IPROLoop:
         if not spec.goal_options.get("reference_energies") and not self.backend.can_relax:
             self.notes.append(
                 "no amino-acid reference energies were supplied and the backend has "
-                "no built-in reference term, so a rigid-backbone search of buried "
-                "positions will tend to pick the smallest allowed residue. Set "
-                "goal_options.reference_energies, or use the PyRosetta backend, "
-                "before treating identities as a design result."
+                "no built-in reference term. Nothing then corrects for "
+                "unfolded-state propensity, so identities are decided by packing "
+                "alone and the search is biased against large side chains at buried "
+                "positions. Set goal_options.reference_energies, or use the "
+                "PyRosetta backend (whose ref2015 includes the term), before "
+                "treating identities as a design result."
             )
 
         # -- starting point: the native sequence, repacked --------------------

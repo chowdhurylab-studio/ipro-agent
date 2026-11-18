@@ -236,13 +236,13 @@ The loop reports `mode` in `state.json` and in the run summary.
 
 Two traps specific to the fallback stack:
 
-1. **Without reference energies, a rigid-backbone search of buried positions
-   drifts to the smallest allowed residue** — often all-alanine. That is not a
-   bug; it is what the energy function says when nothing rewards filling space.
-   The loop emits a note when this applies. Fix it by setting
-   `goal_options.reference_energies`, or by using the PyRosetta backend (whose
-   ref2015 score function includes the term). Do not report an all-alanine
-   answer as a design.
+1. **Without reference energies, nothing corrects for unfolded-state
+   propensity**, so identities are decided by packing alone and large side
+   chains are disfavoured at buried positions. The loop emits a note when this
+   applies. Fix it by setting `goal_options.reference_energies`, or by using the
+   PyRosetta backend (whose ref2015 score function includes the term). If a run
+   returns only small residues at buried positions, treat that as the missing
+   term rather than as a result.
 2. **Without a MILP solver, the fallback is a heuristic that does not prove
    optimality.** Check `proven_optimal` in the ensemble entries. If it is false,
    say the packing is heuristic.
@@ -272,7 +272,7 @@ Before reporting a design, confirm:
 | run stops early, note says "no unvisited assignment remained" | the reachable design space was exhausted by the integer cuts | expected for a small design space; widen `allowed`, add positions, or accept the enumeration is complete |
 | every iteration rejected | the acceptance temperature is low relative to the score scale, or the energy units differ from kcal/mol | check `loop.temperature_k` (IPRO's default 3640 K ⇒ kT ≈ 7.2 kcal/mol) against the score magnitudes in `iterations.jsonl` |
 | interaction energy ≈ 0 | the partner is not in contact with the design molecule | the structures are not in a common frame; superpose them first, or dock |
-| all-alanine answer | no reference energies (see *Degraded modes*) | set `goal_options.reference_energies` or use PyRosetta |
+| design drifts to small residues | no reference energies, so nothing corrects for unfolded-state propensity (see *Degraded modes*) | set `goal_options.reference_energies` or use PyRosetta |
 | MILP huge / slow | design space too large | fewer positions, smaller `allowed` sets, or raise `pair_eps` to prune weak pair terms |
 
 ## Reference index
