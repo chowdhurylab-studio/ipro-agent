@@ -56,7 +56,7 @@ paper justifies it. Pick deliberately; do not rely on keyword matching.
 |---|---|---|
 | "bind X more tightly", "improve this interface" | `bind_tighter` | IE(design, X) |
 | "prefer X over Y", "stop it binding Y", "change its specificity" | `switch_specificity` | IE(X) − w·IE(Y) |
-| "widen the channel", "narrow the pore", "let bigger substrates through" | `reshape_channel` | ±IE(probe), plus an optional radius target |
+| "widen the channel", "narrow the pore", "let bigger substrates through" | `reshape_channel` | the measured bottleneck against `target_radius`, and/or ±IE(probe) |
 | "make it a better catalyst", "improve kcat/KM", "lower KM" | `improve_catalysis` | IE with a transition-state analogue, or with the substrate |
 | "make it more stable" | `stabilize` | energy of the design molecule alone |
 
@@ -173,6 +173,40 @@ Three things to understand before reaching for this:
 
 Every molecule must belong to an assembly — one left out would be silently
 unscored, so the spec is rejected instead.
+
+### 2a2. Channel goals: set a size, and check the positions line the bottleneck
+
+`reshape_channel` can optimize the **measured** bottleneck, and apply
+PoreDesigner's hard filter:
+
+```yaml
+goal_options:
+  direction: narrow          # or widen
+  target_radius: 2.0         # aim for a ~4 A bottleneck
+  pore_diameter_max: 4.0     # hard filter: discard anything wider
+  pore_diameter_min: 2.0     #              or narrower
+  # pore_axis: ["A18:CA", "A119:CA"]   # two atoms spanning the channel
+```
+
+The filter *discards* a candidate before its energy counts, as published — a
+design with a great energy and the wrong pore size is not a candidate.
+
+Two things to check, both of which will otherwise waste a long run:
+
+- **Do the design positions line the bottleneck?** If the constriction is set by
+  residues you are not designing, the geometric term is constant and only the
+  composition constraint does anything. Measured on the OmpF example: 4
+  positions → the bottleneck is identical in every candidate; all 25 → it moves.
+  Look at `min_pore_diameter` in the iteration components; if it never changes,
+  that is the reason.
+- **Is the axis sensible?** It is fitted through your design positions, so they
+  need to be roughly coplanar around the lumen. The run warns if they are not —
+  then give `pore_axis` explicitly. Never trust a bottleneck from a protein's
+  principal axis; for a barrel that is not the channel axis at all.
+
+The number is an inscribed **circle**, so for a slit-like pore it reads closer to
+the minor axis than to the major axis a fitted ellipse would give. Comparable
+between runs of this tool; not the same quantity as a paper's.
 
 ### 2b. Add restraints when geometry must be preserved
 

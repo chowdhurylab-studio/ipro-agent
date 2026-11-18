@@ -107,8 +107,23 @@ class Goal:
     def validate(self) -> None:
         """Raise :class:`SpecError` if the spec cannot support this goal."""
 
+    #: True when the goal reads ``ScoreContext.geometry``. Measuring a channel
+    #: costs 0.1-0.6 s per iteration, so goals that do not need it do not pay.
+    wants_geometry: bool = False
+
     def score(self, ctx: ScoreContext) -> float:
         raise NotImplementedError
+
+    def filter_reject(self, ctx: ScoreContext) -> str | None:
+        """A reason to discard this candidate outright, or None.
+
+        Distinct from a bad score: PoreDesigner discards any redesign whose
+        bottleneck falls outside the requested window *before* evaluating its
+        interaction energy, rather than letting a good energy outweigh a pore of
+        the wrong size. Returning a reason here rejects the iteration however
+        good its score was.
+        """
+        return None
 
     def components(self, ctx: ScoreContext) -> dict[str, float]:
         """Named parts of the score, so a design can be explained."""
@@ -270,8 +285,9 @@ class ReshapeChannel(Goal):
     """
 
     kind = GoalKind.RESHAPE_CHANNEL
-    objective_text = "narrow or widen a lumen via a probe-molecule interaction energy"
+    objective_text = "narrow or widen a lumen via a probe interaction energy and/or its measured radius"
     source = "PoreDesigner (Chowdhury et al., Nat Commun 2018)"
+    wants_geometry = True
 
     def validate(self) -> None:
         d = str(self.options.get("direction", "narrow")).lower()
@@ -279,7 +295,12 @@ class ReshapeChannel(Goal):
             raise SpecError(
                 f"goal_options.direction must be 'narrow' or 'widen'; got {d!r}"
             )
-        if not self.spec.targets and self.options.get("target_radius") is None:
+        has_geometry = (
+            self.options.get("target_radius") is not None
+            or self.options.get("pore_diameter_min") is not None
+            or self.options.get("pore_diameter_max") is not None
+        )
+        if not self.spec.targets and not has_geometry:
             # Constraint-only mode. This is a real situation, not a misuse:
             # PoreDesigner's probe was a water wire taken from an MD trajectory
             # that was never deposited, and this tool implements no pore-geometry
@@ -289,19 +310,35 @@ class ReshapeChannel(Goal):
             # optimize -- but it is a weaker statement than the paper's, so it is
             # recorded loudly rather than failing or pretending otherwise.
             self.notes.append(
-                "reshape_channel has no probe molecule and no target_radius, so "
-                "the objective is degenerate: it minimizes the design molecule's "
-                "own packing energy and the residue-class constraint does the "
-                "real work. This is NOT the published pore objective. Give the "
-                "probe molecule role 'target' (the direction option, not the "
-                "role, sets whether its interaction is strengthened or "
-                "weakened), or set a target_radius, to optimize the channel "
-                "itself."
+                "reshape_channel has no probe molecule and no geometric target, "
+                "so the objective is degenerate: it minimizes the design "
+                "molecule's own packing energy and the residue-class constraint "
+                "does the real work. Set goal_options.target_radius (to aim at a "
+                "radius), or pore_diameter_min/max (the published hard filter), "
+                "or give a probe molecule role 'target'."
             )
 
     @property
     def direction(self) -> str:
         return str(self.options.get("direction", "narrow")).lower()
+
+    def filter_reject(self, ctx: ScoreContext) -> str | None:
+        """PoreDesigner's acceptance filter: discard a pore of the wrong size.
+
+        Applied before the energy matters, as published -- a design with a
+        wonderful interaction energy and a bottleneck outside the requested
+        window is not a candidate at all.
+        """
+        d = ctx.geometry.get("min_pore_diameter")
+        if d is None:
+            return None
+        lo = self.options.get("pore_diameter_min")
+        hi = self.options.get("pore_diameter_max")
+        if lo is not None and d < float(lo):
+            return f"bottleneck {d:.2f} A is below pore_diameter_min {float(lo):.2f} A"
+        if hi is not None and d > float(hi):
+            return f"bottleneck {d:.2f} A is above pore_diameter_max {float(hi):.2f} A"
+        return None
 
     def score(self, ctx: ScoreContext) -> float:
         tgt = self.options.get("target_radius")

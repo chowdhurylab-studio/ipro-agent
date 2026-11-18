@@ -34,6 +34,7 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Channel bottleneck measurement, and the hard filter on it | `pore.py`, `goals.ReshapeChannel.filter_reject` | PoreDesigner's acceptance filter: slices every 0.5 A through the constriction, largest inscribed figure per slice, discard a design outside the requested window |
 | Backbone perturbation (1-5 consecutive residues, phi/psi ~ N(0, 1.5 deg) truncated to +/-5 deg) | `perturb.py`, `loop.perturb_backbone` | IPRO Suite step 2 and the released source's `random.gauss(0, 1.5)` rejection-truncated to +/-5 deg; the 2006 paper reports sigma 1.65 deg |
 | Designed coordinates written out (best, and per iteration) | `output.py` | Deliverable in its own right: a design that exists only as a sequence and a score cannot be inspected or taken to the bench |
 | Re-placing partner molecules each Nth iteration | `docking.py` (local MC), `dock.py` (Vina), chosen by `backends.dock` | IPRO Suite step 3: "a local, rigid-body redocking of the TMs ... uses the same energy functions as the rotamer selection step", 500 moves, sigma 0.2 A / 2.0 deg, annealed 3640 K to 2190 K |
@@ -339,6 +340,54 @@ distinct: a partner that reuses the design molecule's chain id is remapped and
 the mapping is reported, because merging them would describe a different
 molecule than the one scored.
 
+### 1h. Measuring the channel
+
+PoreDesigner's filter is geometric: a redesign is kept only if the bottleneck
+falls inside a requested window, decided *before* the interaction energy
+matters. That is now implemented.
+
+**What is measured.** Slices every 0.5 A along the channel axis; in each, the
+largest circle that overlaps no atom's van der Waals sphere (Bondi radii); the
+bottleneck is the smallest of those. The paper fits an **ellipse** and reports
+its major axis, so the numbers are not the same quantity: an inscribed circle is
+bounded by the *narrow* direction, so for a slit-like lumen this reports
+something closer to the minor axis. Comparable across runs of this tool, not
+identical to the paper's.
+
+**Where the axis comes from.** This matters more than the measurement. A
+barrel's axis is *not* its largest-variance direction, so guessing from the
+protein fails outright: on OmpF the whole-protein principal axis measures the
+eyelet at **1.4 A**. The default instead fits a plane through the **design
+positions**, which line the constriction, and takes its normal. On 2OMF chain A
+the 25 published positions give singular values (37.9, 31.6, 16.8) and an eyelet
+of **8.1 A**, against the published 11 x 7 A — the right ballpark for a circle
+bounded by a 7 A minor axis, from an independent reimplementation.
+`goal_options.pore_axis: ["A18:CA", "A119:CA"]` overrides it with two atoms
+spanning the channel, and the run warns when the lining residues are too far
+from coplanar for the fitted axis to mean anything.
+
+**The measurement had a bug worth recording**, because the symptom was subtle.
+The first version let the circle's centre range freely within a wide radius of
+the axis. In unbounded space the largest circle overlapping no atom is out in
+the solvent, so the search walked off the protein and reported the distance to
+the bulk — placing the bottleneck one slice away from the real one while looking
+entirely plausible. The centre is now hard-constrained to
+`max_centre_offset` of the axis, and that constraint *is* the measurement: it is
+what makes the question "how wide is the lumen" rather than "how far is the
+nearest atom". There is a regression test.
+
+**A geometric objective only bites if the design positions line the
+bottleneck.** Measured on the OmpF example: with the 4-position smoke spec the
+bottleneck is 5.69 A for *every* candidate and the score is identically 0.716,
+because residues outside the design set control the constriction. With all 25
+positions it responds — 5.65 vs 6.41 A between candidates, and the objective
+improved from 1.102 to 0.678. Worth checking before concluding a run failed to
+optimize.
+
+**Cost.** 127 ms per measurement over an 8 A constriction window on a
+2627-atom structure (555 ms over the whole barrel), and only goals that declare
+`wants_geometry` pay it.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -408,7 +457,6 @@ specified, and this table is the record of what that changes.
 | Capability | Status | Why, and what it would take |
 |---|---|---|
 | **Insertions and deletions** | **Not implemented.** A spec containing `indels:` raises `NotImplementedError` with a pointer to the alternative. | Changing chain length needs loop closure after the edit. Protein-InDelMaker does this with PyRosetta's GeneralizedKIC over a 6-residue window followed by Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. No loop-closure backend is available here. `config.IndelSpec` models the input so the schema is ready. Workaround: build the variant with Protein-InDelMaker, then design on that structure. |
-| **Pore / channel geometry measurement** | Not implemented. `geometry["min_pore_radius"]` is never populated, so `reshape_channel`'s radius term is inert and PoreDesigner's hard bottleneck filter cannot be applied. The goal reports this. | PoreDesigner measured the bottleneck by fitting ellipses to ~16 slices through the constriction, outside the optimization loop. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |

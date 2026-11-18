@@ -210,6 +210,8 @@ class IPROLoop:
         self._dock_backend: str = "none"
         #: Keys for notes that should be emitted at most once per run.
         self._once: set[str] = set()
+        #: Most recent pore profile, kept for reporting.
+        self._last_pore = None
 
     # -- setup -------------------------------------------------------------
 
@@ -343,6 +345,8 @@ class IPROLoop:
                 self.backend.internal(self._partner_atoms(a.name, m.name))
                 for m in partners if m.name in self._partners
             )
+            if getattr(self.goal, "wants_geometry", False):
+                ctx.geometry.update(self._measure_geometry(design_all))
             per[a.name] = ctx
             # Each partner is scored in its own assembly, so the merged view has
             # exactly one interaction energy per molecule -- which is what the
@@ -350,6 +354,10 @@ class IPROLoop:
             merged.interaction.update(ctx.interaction)
             merged.design_only += weights[a.name] * ctx.design_only
             merged.total += weights[a.name] * ctx.total
+            # The channel is a property of the design molecule, which is shared,
+            # so the first assembly's measurement stands for all of them.
+            for k, v in ctx.geometry.items():
+                merged.geometry.setdefault(k, v)
         return merged, per
 
     def _context_for(self, chosen: dict[str, Rotamer]) -> ScoreContext:
@@ -365,6 +373,116 @@ class IPROLoop:
         structures.
         """
         return self._contexts_for(chosen)[0]
+
+    # -- measuring the channel ----------------------------------------------
+
+    def _pore_axis(self):
+        """Origin and direction of the channel being designed.
+
+        Taken from ``goal_options.pore_axis`` when given -- two atom references
+        spanning the channel, e.g. ``["A18:CA", "A119:CA"]`` -- and otherwise
+        from the plane of the design positions themselves, which line the
+        constriction. The latter reproduces OmpF's published eyelet; the
+        protein's own principal axis does not, so it is never used.
+        """
+        import numpy as _np
+
+        from .config import AtomRef
+        from .pore import axis_from_lining, ring_flatness
+
+        assert self._design_st is not None
+        spec = self.spec
+        given = spec.goal_options.get("pore_axis")
+        if given:
+            if len(given) != 2:
+                raise ValueError(
+                    "goal_options.pore_axis takes exactly two atom references "
+                    f"spanning the channel, e.g. ['A18:CA', 'A119:CA']; got {given!r}"
+                )
+            pts = []
+            for ref_text in given:
+                ref = AtomRef.parse(ref_text)
+                res = self._design_st.find(ref.chain, ref.number, ref.insertion_code)
+                match = [a for a in res if a.get_name().strip().upper() == ref.atom]
+                if not match:
+                    raise ValueError(f"pore_axis: {ref} is not in the design molecule")
+                pts.append(_np.asarray(match[0].coord, dtype=float))
+            direction = pts[1] - pts[0]
+            return (pts[0] + pts[1]) / 2.0, direction, 0.0
+
+        cas = []
+        for p in spec.positions:
+            try:
+                res = self._design_st.find(p.chain, p.number, p.insertion_code)
+            except Exception:
+                continue
+            match = [a for a in res if a.get_name().strip().upper() == "CA"]
+            if match:
+                cas.append(_np.asarray(match[0].coord, dtype=float))
+        if len(cas) < 3:
+            raise ValueError(
+                "a channel axis needs at least three design positions to fit a "
+                "plane through, or goal_options.pore_axis given explicitly"
+            )
+        ring = _np.array(cas)
+        origin, direction = axis_from_lining(ring)
+        return origin, direction, ring_flatness(ring)
+
+    def _measure_geometry(self, design_atoms: AtomSet) -> dict[str, float]:
+        """Bottleneck of the channel through the designed side chains."""
+        from .pore import pore_profile
+
+        opts = self.spec.goal_options
+        try:
+            origin, direction, flatness = self._pore_axis()
+        except Exception as exc:
+            if "pore_axis" not in self._once:
+                self._once.add("pore_axis")
+                self.notes.append(
+                    f"channel geometry not measured: {exc}. Any goal option that "
+                    "depends on a pore radius is therefore inactive."
+                )
+            return {}
+
+        if flatness > float(opts.get("pore_axis_flatness_warn", 0.7)):
+            if "pore_flat" not in self._once:
+                self._once.add("pore_flat")
+                self.notes.append(
+                    f"the design positions are not close to coplanar (flatness "
+                    f"{flatness:.2f}, 0 = a flat ring), so the channel axis fitted "
+                    "through them is unreliable. Give goal_options.pore_axis as two "
+                    "atoms spanning the channel."
+                )
+
+        window = opts.get("pore_window")
+        if window is None:
+            # Centre an 8 A window on the lining residues, as PoreDesigner
+            # measured only the constriction rather than the whole barrel.
+            import numpy as _np
+
+            proj = (design_atoms.coords - origin) @ direction
+            lo = float(proj.min())
+            half = float(opts.get("pore_window_half", 4.0))
+            window = (-lo - half, -lo + half)
+        else:
+            window = (float(window[0]), float(window[1]))
+
+        prof = pore_profile(
+            design_atoms.coords, list(design_atoms.names),
+            axis_origin=origin, axis_direction=direction,
+            spacing=float(opts.get("pore_spacing", 0.5)),
+            window=window,
+            max_centre_offset=float(opts.get("pore_max_centre_offset", 6.0)),
+        )
+        if not prof.radii:
+            return {}
+        self._last_pore = prof
+        return {
+            "min_pore_radius": prof.min_radius,
+            "min_pore_diameter": prof.min_diameter,
+            "max_pore_radius": float(max(prof.radii)),
+            "pore_axis_flatness": flatness,
+        }
 
     # -- moving the backbone -------------------------------------------------
 
@@ -1110,6 +1228,12 @@ class IPROLoop:
                 ok, reason = metropolis_accept(
                     delta, spec.loop.kt, self.rng.random(), greedy=greedy
                 )
+            # A geometric filter discards a candidate before its energy counts
+            # (PoreDesigner rejects a pore of the wrong size outright).
+            veto = self.goal.filter_reject(ctx)
+            if veto:
+                ok, reason = False, f"filtered: {veto}"
+
             # IPRO: "all BAs must pass the selection criteria for the results of
             # the iteration to be retained." Applied as an extra gate on top of
             # the objective test, and only when there is more than one assembly,
@@ -1154,7 +1278,10 @@ class IPROLoop:
                 score=score,
                 accepted=ok,
                 mutations=mutations,
-                components={k: float(v) for k, v in self.goal.components(ctx).items()},
+                components={
+                    **{k: float(v) for k, v in self.goal.components(ctx).items()},
+                    **{k: float(v) for k, v in ctx.geometry.items()},
+                },
                 sequence=self._sequence_string(identities),
                 reason=(
                     f"{reason}; redesigned {','.join(window)}{dock_note}"

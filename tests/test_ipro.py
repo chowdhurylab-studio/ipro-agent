@@ -1644,6 +1644,187 @@ def test_run_writes_designed_coordinates_that_contain_the_mutation():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Channel geometry
+# ---------------------------------------------------------------------------
+
+
+def _tube(radius: float, z_lo: float = -10.0, z_hi: float = 10.0, narrow=None):
+    """Atoms on a cylinder, optionally with a narrow ring, for exact checks."""
+    pts = []
+    for z in np.arange(z_lo, z_hi + 0.01, 1.0):
+        r = radius
+        if narrow is not None and abs(z - narrow[0]) < narrow[1]:
+            r = narrow[2]
+        for th in np.linspace(0, 2 * np.pi, 48, endpoint=False):
+            pts.append([r * np.cos(th), r * np.sin(th), z])
+    return np.array(pts), ["C"] * len(pts)
+
+
+def test_inscribed_radius_is_exact_on_a_cylinder():
+    """A tube of carbons of radius R admits a circle of radius R - r_vdw."""
+    from ipro_agent.pore import VDW, pore_profile
+
+    for R in (5.0, 8.0, 12.0):
+        coords, names = _tube(R)
+        prof = pore_profile(
+            coords, names, axis_origin=np.zeros(3),
+            axis_direction=np.array([0.0, 0.0, 1.0]),
+            spacing=1.0, max_centre_offset=min(2.0, R / 2),
+        )
+        assert abs(prof.min_radius - (R - VDW["C"])) < 0.15, (R, prof.min_radius)
+
+
+def test_constriction_is_found_where_it_is():
+    from ipro_agent.pore import pore_profile
+
+    # a narrow ring of radius 5 at z=+3 inside a tube of radius 9
+    coords, names = _tube(9.0, narrow=(3.0, 1.5, 5.0))
+    prof = pore_profile(
+        coords, names, axis_origin=np.zeros(3),
+        axis_direction=np.array([0.0, 0.0, 1.0]),
+        spacing=0.5, max_centre_offset=2.0,
+    )
+    assert abs(prof.min_radius - (5.0 - 1.70)) < 0.2, prof.min_radius
+    # The ring spans z in {2,3,4}, i.e. axis offsets 12-14; any is correct.
+    assert 11.5 <= prof.bottleneck_position <= 14.5, prof.bottleneck_position
+
+
+def test_regression_measurement_cannot_escape_into_solvent():
+    """The centre must stay near the axis.
+
+    In unbounded space the largest circle overlapping no atom is out in the
+    bulk, so an unconstrained search reports the distance to the solvent instead
+    of the width of the lumen. The first version of this code did exactly that
+    and placed the bottleneck one slice away from the real one.
+    """
+    from ipro_agent.pore import pore_profile
+
+    coords, names = _tube(9.0, narrow=(3.0, 1.5, 5.0))
+    tight = pore_profile(
+        coords, names, axis_origin=np.zeros(3),
+        axis_direction=np.array([0.0, 0.0, 1.0]),
+        spacing=0.5, max_centre_offset=2.0,
+    )
+    loose = pore_profile(
+        coords, names, axis_origin=np.zeros(3),
+        axis_direction=np.array([0.0, 0.0, 1.0]),
+        spacing=0.5, max_centre_offset=40.0,
+    )
+    assert abs(tight.min_radius - 3.3) < 0.2, tight.min_radius
+    # With the constraint lifted the answer becomes about the bulk, not the pore.
+    assert loose.min_radius > tight.min_radius + 1.0, (
+        loose.min_radius, tight.min_radius,
+        "a wide max_centre_offset should visibly stop measuring the lumen",
+    )
+
+
+def test_axis_from_lining_reproduces_the_published_ompf_eyelet():
+    """Validation against a number from the literature.
+
+    PoreDesigner reports the wild-type OmpF eyelet as 11 x 7 A. An inscribed
+    circle is bounded by the narrow direction, so ~7 A is the comparison. The
+    axis is fitted from the 25 published constriction positions; the protein's
+    own principal axis is not the barrel axis and gives ~1.4 A.
+    """
+    pdb = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not pdb.exists():
+        print("    (skipped: example structure not present)")
+        return
+    from ipro_agent.pore import axis_from_lining, pore_profile, principal_axis, ring_flatness
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(pdb)
+    atoms = st.all_atoms()
+    coords = np.array([a.coord for a in atoms])
+    names = [a.get_name() for a in atoms]
+
+    lining = [18, 20, 38, 40, 42, 62, 64, 82, 83, 109, 110, 113, 114, 115,
+              117, 118, 119, 120, 121, 123, 124, 125, 130, 131, 132]
+    ring = []
+    for n in lining:
+        try:
+            ring.append(st.find("A", n).child_dict["CA"].coord)
+        except Exception:
+            pass
+    assert len(ring) >= 20, len(ring)
+    ring = np.array(ring)
+    assert ring_flatness(ring) < 0.7, "the lining should be roughly coplanar"
+
+    origin, direction = axis_from_lining(ring)
+    good = pore_profile(
+        coords, names, axis_origin=origin, axis_direction=direction,
+        spacing=0.5, max_centre_offset=6.0,
+    )
+    assert 5.5 < good.min_diameter < 10.0, (
+        good.min_diameter, "expected roughly the published 7 A minor axis"
+    )
+
+    # The whole-protein principal axis is NOT the barrel axis, which is why the
+    # lining normal is the default.
+    bad = pore_profile(
+        coords, names, axis_origin=coords.mean(axis=0),
+        axis_direction=principal_axis(
+            np.array([a.coord for a in atoms if a.get_name().strip() == "CA"])
+        ),
+        spacing=0.5, max_centre_offset=6.0,
+    )
+    assert bad.min_diameter < good.min_diameter, (bad.min_diameter, good.min_diameter)
+
+
+def test_pore_filter_discards_a_pore_of_the_wrong_size():
+    """PoreDesigner's filter rejects outright, before the energy counts."""
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.goals import ScoreContext, build_goal
+
+    spec = DesignSpec.from_dict({
+        "goal": "reshape_channel", "goal_statement": "narrow it",
+        "molecules": [{"name": "m", "path": str(CRN), "role": "design",
+                       "kind": "protein", "chains": ["A"]}],
+        "positions": ["A16", "A18", "A20"],
+        "goal_options": {"pore_diameter_max": 4.0, "pore_diameter_min": 2.0},
+    })
+    goal = build_goal(spec)
+    assert goal.wants_geometry
+
+    inside = ScoreContext(geometry={"min_pore_diameter": 3.0})
+    assert goal.filter_reject(inside) is None
+
+    too_wide = ScoreContext(geometry={"min_pore_diameter": 8.0})
+    why = goal.filter_reject(too_wide)
+    assert why and "above" in why, why
+
+    too_narrow = ScoreContext(geometry={"min_pore_diameter": 1.0})
+    why = goal.filter_reject(too_narrow)
+    assert why and "below" in why, why
+
+    # With nothing measured there is nothing to filter on.
+    assert goal.filter_reject(ScoreContext()) is None
+
+
+def test_only_channel_goals_pay_for_geometry():
+    """Measuring a channel costs 0.1-0.6 s per iteration, so goals that do not
+    read it must not trigger it."""
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.goals import build_goal
+
+    def goal_for(kind: str, options: dict | None = None):
+        return build_goal(DesignSpec.from_dict({
+            "goal": kind, "goal_statement": "x",
+            "molecules": [
+                {"name": "m", "path": str(CRN), "role": "design",
+                 "kind": "protein", "chains": ["A"]},
+                {"name": "L", "path": str(CRN), "role": "target", "kind": "ligand"},
+            ],
+            "positions": ["A16", "A18", "A20"],
+            "goal_options": options or {},
+        }))
+
+    assert goal_for("reshape_channel", {"target_radius": 3.0}).wants_geometry
+    for kind in ("bind_tighter", "stabilize"):
+        assert not goal_for(kind).wants_geometry, kind
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

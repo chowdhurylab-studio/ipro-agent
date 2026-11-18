@@ -241,12 +241,21 @@ goal_options:
   direction: narrow
   long_fraction: 0.5
 
-  # NOT IMPLEMENTED HERE, and therefore inert: `pore_diameter_max` /
-  # `pore_diameter_min` below. This tool ships no pore-geometry measurement, so
-  # `geometry["min_pore_radius"]` is never populated and the paper's hard
-  # bottleneck filter cannot be applied. The geometric half of the published
-  # protocol is absent; only the composition constraint and the probe-interaction
-  # objective are expressible. See EXPECTED.md.
+  # Aim for a ~4 A bottleneck (radius 2 A). With all 25 positions the geometric
+  # term does respond to the design: a 4-iteration run moved the objective from
+  # 1.102 to 0.678 and the bottleneck between 6.41 and 5.65 A. Budget about
+  # 85 s/iteration at this size (25 positions x 9 residues).
+  target_radius: 2.0
+
+  # LIVE since the pore-geometry measurement landed: `pore_diameter_min` /
+  # `pore_diameter_max` below are the paper's hard acceptance filter -- a design
+  # whose bottleneck falls outside the window is discarded before its energy is
+  # considered. `target_radius` additionally puts the radius in the objective.
+  #
+  # The axis is fitted as the normal to the plane of the design positions, which
+  # line the constriction; on this structure that measures the wild-type eyelet
+  # at 8.1 A against the published 11 x 7 A (an inscribed circle is bounded by
+  # the narrow direction, so ~7 A is the comparison). See docs/DESIGN.md 1h.
   # Acceptance filter, SI section 3 step 3 "Check 1": keep a redesign only if
   # the pore bottleneck is below 4 A. Applied BEFORE the interaction energy is
   # computed, so most proposals die here -- this is what sets the run length.
