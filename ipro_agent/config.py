@@ -266,31 +266,82 @@ class IndelSpec:
 # ---------------------------------------------------------------------------
 
 
+#: Gas constant in kcal/(mol K). IPRO's acceptance temperature is quoted in
+#: kelvin, so converting it to a kT in kcal/mol needs this.
+R_KCAL = 1.987e-3
+
+
 @dataclass
 class LoopSettings:
     """Controls for the IPRO iteration loop.
 
-    Defaults are the values reported for stock IPRO where a published value
-    exists; every one is cited in docs/DESIGN.md. They are deliberately exposed
-    because the right number of iterations is case-dependent, and because an
-    agent running a smoke test needs to be able to ask for a very short run.
+    Defaults are stock IPRO's published values wherever one exists; each is
+    cited in docs/DESIGN.md. They are exposed because the right iteration count
+    is case-dependent and because an agent running a smoke test must be able to
+    ask for a very short run.
     """
 
+    #: Published cap is 10,000; the default here is small enough to be a
+    #: deliberate choice rather than an accidental multi-day run.
     iterations: int = 100
-    #: Residues within this distance (A) of a target molecule are included in
-    #: the MILP as repackable neighbours even if they are not design positions.
-    neighbour_cutoff: float = 8.0
-    #: Non-bonded energy cutoff (A).
+    #: Stop early once this many designs have been accepted (IPRO's other
+    #: termination condition). None means "run to the iteration cap".
+    stop_after_accepted: int | None = None
+
+    #: Residues within this distance (A) of a perturbed/mutated position are
+    #: repacked alongside it, even if not design positions. IPRO uses a 4.5 A
+    #: shell around the perturbation window.
+    neighbour_cutoff: float = 4.5
+    #: Non-bonded energy cutoff (A). IPRO: 12 A vdW.
     energy_cutoff: float = 12.0
-    #: Backbone perturbation magnitude (degrees, uniform in +/- this value).
-    perturbation_degrees: float = 5.0
-    #: Accept/reject: Metropolis temperature in kcal/mol units (see goals.py).
-    metropolis_kt: float = 0.6
+
+    #: How many contiguous positions are re-designed per iteration. IPRO
+    #: re-designs 1-3 contiguous residues, not the whole set at once.
+    design_per_iteration: tuple[int, int] = (1, 3)
+    #: Backbone perturbation: phi/psi offsets ~ N(0, sigma), truncated at +/-cap.
+    #: IPRO Suite reports sigma = 1.5 deg; the 2006 paper reports 1.65 deg.
+    perturbation_sigma_deg: float = 1.5
+    perturbation_cap_deg: float = 5.0
+    #: Half-width (residues) of the perturbation window either side of the
+    #: chosen segment.
+    perturbation_flank: int = 5
+
+    #: Rigid-body redocking of target molecules every Nth iteration.
+    redock_every: int = 3
+    redock_moves: int = 500
+    redock_sigma_angstrom: float = 0.2
+    redock_sigma_deg: float = 2.0
+
+    #: Metropolis acceptance temperature in kelvin. IPRO's default, 3640 K,
+    #: is calibrated so that a 10 kcal/mol worsening is accepted 25% of the
+    #: time: exp(-10 / (R*3640)) = 0.251. Verified in tests/test_loop.py.
+    temperature_k: float = 3640.0
+
+    #: Forbid revisiting an already-evaluated sequence, via an integer ("no
+    #: good") cut added to the MILP. This is IPRO's own behaviour.
+    integer_cuts: bool = True
+
     #: Keep this many best designs as an ensemble rather than only the single best.
     ensemble_size: int = 10
     random_seed: int = 0
     #: Optional wall-clock budget; the loop checkpoints and stops cleanly.
     max_minutes: float | None = None
+    #: Write the accepted structure of every iteration (costs disk).
+    keep_structures: bool = False
+
+    @property
+    def kt(self) -> float:
+        """Acceptance kT in kcal/mol (the energy scale of the backend)."""
+        return R_KCAL * self.temperature_k
+
+    def __post_init__(self) -> None:
+        if isinstance(self.design_per_iteration, list):
+            self.design_per_iteration = tuple(self.design_per_iteration)  # from YAML
+        lo, hi = self.design_per_iteration
+        if lo < 1 or hi < lo:
+            raise SpecError(f"design_per_iteration must be (lo<=hi, lo>=1); got {(lo, hi)}")
+        if self.temperature_k <= 0:
+            raise SpecError("temperature_k must be positive")
 
 
 @dataclass
