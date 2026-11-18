@@ -116,7 +116,24 @@ def check() -> dict:
 
     # -- AutoDock Vina: docking ------------------------------------------
     vina: dict = {"available": False, "how": None, "detail": ""}
-    exe = shutil.which("vina") or shutil.which("vina_1.2.5") or shutil.which("vina.exe")
+    # Vina's GitHub releases ship versioned, platform-tagged names (e.g.
+    # vina_1.2.7_mac_aarch64), which users often keep as-is on PATH.
+    exe = next(
+        (
+            p
+            for p in (
+                shutil.which("vina"),
+                shutil.which("vina.exe"),
+                *(
+                    shutil.which(f"vina_1.2.{minor}{suffix}")
+                    for minor in range(9, -1, -1)
+                    for suffix in ("", "_mac_aarch64", "_mac_x86_64", "_linux_x86_64")
+                ),
+            )
+            if p
+        ),
+        None,
+    )
     if exe:
         rc, out = _run([exe, "--version"])
         vina.update(available=rc == 0, how="binary", binary=exe, detail=out.splitlines()[0] if out else "")
@@ -159,14 +176,29 @@ def check() -> dict:
         p = shutil.which(exe)
         if p:
             milp.setdefault("binaries", []).append({"name": name, "path": p})
-    # Preference order: a commercial solver if present (IPRO used CPLEX), then
-    # open ones. 'greedy' is the always-available fallback (see milp.py).
-    for want in ("CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD", "HiGHS", "HiGHS_CMD", "GLPK_CMD"):
+    # Preference order must match milp.py's, or this reports a solver the code
+    # will not actually use. Solvers reachable only through PuLP are listed
+    # first (PuLP drives them directly); otherwise only the solver binaries
+    # milp.py can parse an LP solution from count.
+    for want in (
+        "CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD",
+        "HiGHS", "HiGHS_CMD", "SCIP_CMD", "GLPK_CMD",
+    ):
         if want in milp.get("solvers", []):
-            milp["preferred"] = want
+            milp["preferred"] = f"{want} (via pulp)"
             break
-    if milp["preferred"] is None and milp.get("binaries"):
-        milp["preferred"] = f"{milp['binaries'][0]['name']} (via LP file)"
+    if milp["preferred"] is None:
+        # Without PuLP, milp.py shells out to an LP file and can only read
+        # glpsol's and cbc's solution formats.
+        usable = [b for b in milp.get("binaries", []) if b["name"] in ("glpk", "cbc")]
+        if usable:
+            milp["preferred"] = f"{usable[0]['name']} (via LP file)"
+        elif milp.get("binaries"):
+            others = ", ".join(b["name"] for b in milp["binaries"])
+            milp["preferred"] = (
+                f"greedy (built-in; NOT a proof of optimality) -- {others} found but "
+                "unusable without pulp: install pulp to drive it"
+            )
     if milp["preferred"] is None:
         milp["preferred"] = "greedy (built-in; NOT a proof of optimality)"
     milp["available"] = pulp_ok or bool(milp.get("binaries"))

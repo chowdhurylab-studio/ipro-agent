@@ -57,6 +57,14 @@ from typing import Any
 # the applied side chain is the one that was asked for.
 BACKBONE = {"N", "CA", "C", "O", "OXT"}
 
+#: The wizard is always handed a named selection, never a selection expression,
+#: because ``do_select`` finishes with ``cmd.delete(selection)``: given the
+#: expression ``prot and chain A and resi 16A`` that call matches and deletes
+#: the object ``prot`` itself, leaving nothing to mutate (verified on PyMOL
+#: 3.1.0: 327 atoms to 0, then "Mutagenesis: object not found" from apply()).
+#: With a name, the same call removes only this temporary selection.
+POS_SELE = "_ipro_mut_pos"
+
 
 def _selection(chain: str, number: int, icode: str, obj: str = "prot") -> str:
     """PyMOL selection for one residue.
@@ -131,7 +139,8 @@ def apply_design(job_path: str, out_path: str) -> int:
             w = cmd.get_wizard()
             cmd.refresh_wizard()
             w.set_mode(aa)
-            w.do_select(sel)
+            cmd.select(POS_SELE, sel)
+            w.do_select(POS_SELE)
             cmd.refresh_wizard()
 
             n_states = cmd.count_states("mutation")
@@ -158,7 +167,13 @@ def apply_design(job_path: str, out_path: str) -> int:
 
             # The wizard reports failures by leaving the residue alone, so read
             # the identity back rather than trusting apply().
-            got = cmd.get_model(f"({sel}) and name CA").atom[0].resn
+            ca = cmd.get_model(f"({sel}) and name CA").atom
+            if not ca:
+                raise RuntimeError(
+                    f"the residue is not selectable after apply(): "
+                    f"{sel!r} matches nothing"
+                )
+            got = ca[0].resn
             if got != aa:
                 raise RuntimeError(
                     f"wizard left {got} in place of the requested {aa}"

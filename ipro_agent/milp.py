@@ -666,7 +666,13 @@ class RotamerMILP:
                 prob += pulp.lpSum(vs) <= len(assignment) - 1
 
         solver_obj = None
-        for name in ("CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD", "GLPK_CMD"):
+        # Order: commercial first (IPRO itself used CPLEX), then open solvers.
+        # HiGHS is included because PuLP 4.x no longer bundles CBC, so a modern
+        # `pip install pulp` may have HiGHS and nothing else.
+        for name in (
+            "CPLEX_CMD", "GUROBI_CMD", "PULP_CBC_CMD", "COIN_CMD",
+            "HiGHS", "HiGHS_CMD", "SCIP_CMD", "GLPK_CMD",
+        ):
             if name in pulp.listSolvers(onlyAvailable=True):
                 kw = {"msg": False}
                 if time_limit:

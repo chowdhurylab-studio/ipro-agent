@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ipro-agent"
+version = "0.1.0"
+description = "Agent-drivable Iterative Protein Redesign and Optimization (IPRO), generalized to an arbitrary protein and a stated design goal"
+readme = "README.md"
+requires-python = ">=3.10"
+# Only what the loop cannot run without. PyMOL, PyRosetta, AutoDock Vina and a
+# MILP solver are optional at install time and resolved at run time; see
+# docs/INSTALL.md for what each unlocks and scripts/doctor.py to check.
+dependencies = [
+    "numpy>=1.24",
+    "biopython>=1.81",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# PuLP 4.x no longer bundles CBC, hence the extra.
+solver = ["pulp[cbc]>=3.0"]
+dock = ["meeko>=0.5"]
+
+[project.scripts]
+ipro-agent = "ipro_agent.cli:main"
+
+[tool.setuptools]
+packages = ["ipro_agent", "ipro_agent.energy"]
