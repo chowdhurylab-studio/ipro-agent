@@ -96,6 +96,10 @@ class Goal:
     def __init__(self, spec: DesignSpec) -> None:
         self.spec = spec
         self.options: dict[str, Any] = dict(spec.goal_options)
+        #: Qualifications the goal wants carried into the run's report -- a
+        #: degenerate objective, a missing molecule, an unused option. The loop
+        #: collects these into state.json notes.
+        self.notes: list[str] = []
         self.validate()
 
     # -- interface ---------------------------------------------------------
@@ -275,11 +279,22 @@ class ReshapeChannel(Goal):
             raise SpecError(
                 f"goal_options.direction must be 'narrow' or 'widen'; got {d!r}"
             )
-        if not self.spec.targets and "target_radius" not in self.options:
-            raise SpecError(
-                "goal 'reshape_channel' needs either a probe molecule with role "
-                "'target' (e.g. a water wire or the substrate) or a "
-                "goal_options.target_radius to aim at"
+        if not self.spec.targets and self.options.get("target_radius") is None:
+            # Constraint-only mode. This is a real situation, not a misuse:
+            # PoreDesigner's probe was a water wire taken from an MD trajectory
+            # that was never deposited, and this tool implements no pore-geometry
+            # measurement, so neither half of the published objective is
+            # available. What remains is the composition constraint (>= half the
+            # positions long) plus packing quality, which is a coherent thing to
+            # optimize -- but it is a weaker statement than the paper's, so it is
+            # recorded loudly rather than failing or pretending otherwise.
+            self.notes.append(
+                "reshape_channel has no probe molecule and no target_radius, so "
+                "the objective is degenerate: it minimizes the design molecule's "
+                "own packing energy and the residue-class constraint does the "
+                "real work. This is NOT the published pore objective. Supply a "
+                "probe molecule as a target/anti_target, or a target_radius, to "
+                "optimize the channel itself."
             )
 
     @property
@@ -287,15 +302,28 @@ class ReshapeChannel(Goal):
         return str(self.options.get("direction", "narrow")).lower()
 
     def score(self, ctx: ScoreContext) -> float:
+        tgt = self.options.get("target_radius")
+        if not self.spec.targets and tgt is None:
+            # Constraint-only mode; see validate(). Packing energy stands in.
+            return ctx.design_only if ctx.design_only else ctx.total
         s = 0.0
         if self.spec.targets:
             ie = self._sum_ie(ctx, self.spec.targets)
             # 'narrow' wants IE to go UP, so minimize its negation.
             s += -ie if self.direction == "narrow" else ie
-        tgt = self.options.get("target_radius")
         if tgt is not None:
             r = ctx.geometry.get("min_pore_radius")
-            if r is not None:
+            if r is None:
+                # Asked to hit a radius, but nothing measures one. Silently
+                # dropping the term would make the score mean something other
+                # than what was requested.
+                if not any("target_radius" in n for n in self.notes):
+                    self.notes.append(
+                        "goal_options.target_radius was set but no pore-geometry "
+                        "measurement is available, so the radius term is not in "
+                        "the score; only the probe-interaction term is active"
+                    )
+            else:
                 s += float(self.options.get("radius_weight", 1.0)) * (r - float(tgt)) ** 2
         return s
 

@@ -134,7 +134,8 @@ class IPROLoop:
         self.rng = random.Random(spec.loop.random_seed)
         self.constraints = list(self.goal.default_constraints()) + list(extra_constraints)
         self.mode = "full" if self.backend.can_relax else "fixed-backbone"
-        self.notes: list[str] = []
+        # Qualifications the goal raised at construction travel with the run.
+        self.notes: list[str] = list(getattr(self.goal, "notes", []))
         if self.mode == "fixed-backbone":
             self.notes.append(
                 f"backbone perturbation and relaxation skipped: energy backend "

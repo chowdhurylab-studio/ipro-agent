@@ -43,7 +43,7 @@ goal_statement: >
 # with the water wire", and its pore-size criterion was a separate hard filter.
 # Without the wire (not shipped -- see below) only the geometric half of that
 # is expressible here.
-goal: shrink_pore
+goal: reshape_channel
 
 # -----------------------------------------------------------------------------
 # molecules
@@ -230,6 +230,22 @@ backends:
 # goal_options -- read by the goal implementation, NOT validated by config.py
 # -----------------------------------------------------------------------------
 goal_options:
+
+  # --- keys this implementation actually reads -------------------------------
+  # `reshape_channel` (ipro_agent/goals.py) reads `direction`, `long_fraction`,
+  # `long_residues`, `target_radius` and `radius_weight`. The names below were
+  # written against the paper's vocabulary; these are the equivalents in this
+  # tool. PoreDesigner narrowed the pore, so direction is "narrow", which is
+  # also what makes the >=50% long-residue constraint fire automatically.
+  direction: narrow
+  long_fraction: 0.5
+
+  # NOT IMPLEMENTED HERE, and therefore inert: `pore_diameter_max` /
+  # `pore_diameter_min` below. This tool ships no pore-geometry measurement, so
+  # `geometry["min_pore_radius"]` is never populated and the paper's hard
+  # bottleneck filter cannot be applied. The geometric half of the published
+  # protocol is absent; only the composition constraint and the probe-interaction
+  # objective are expressible. See EXPECTED.md.
   # Acceptance filter, SI section 3 step 3 "Check 1": keep a redesign only if
   # the pore bottleneck is below 4 A. Applied BEFORE the interaction energy is
   # computed, so most proposals die here -- this is what sets the run length.
