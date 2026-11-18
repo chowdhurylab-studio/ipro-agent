@@ -722,7 +722,7 @@ independent reviews were run in parallel over everything left: `energy/*.py`,
 measurement per finding. **Thirty-one more defects were confirmed**, all in the
 same family: every one ran clean and returned a plausible wrong answer.
 
-The suite is now **136 tests** (94 before), one per fix.
+The suite is now **141 tests** (94 before), one per fix.
 
 #### The energy function (`energy/base.py`, `energy/builtin.py`)
 
@@ -823,11 +823,12 @@ radius from a spec whose design positions do not surround the channel as
 meaningless, and give `goal_options.pore_axis` explicitly.** The numbers §1h and
 both example specs quote are corrected below.
 
-### 7e. The PyRosetta and Vina paths: one closed, one declared
+### 7e. The PyRosetta and Vina paths, both now executed
 
 Both were listed as implemented and **neither had ever executed**, because
-neither was installed. They are now in different states, and the difference is
-recorded rather than blurred.
+neither was installed. Both have now been installed and run, and between them
+they held **seven more defects** -- which is the whole argument for not trusting
+a path because it reads correctly.
 
 **AutoDock Vina: installed, and the path was broken.** Vina 1.2.7 and Open Babel
 3.2.1 were installed from conda-forge (`/opt/miniconda3/envs/ipro_vina`), and the
@@ -846,30 +847,60 @@ not Meeko's); what makes that acceptable here is that Vina's affinity never
 enters the objective — the *pose* is taken and re-scored with this tool's
 backend.
 
-**PyRosetta: still unexercised, and now declared.** It needs a licence (free for
-academics, but it must be obtained and accepted by the user), so it was not
-installed. `energy/pyrosetta_backend.UNEXERCISED` names every path that has
-never run and what could be wrong with each, and a test keeps that declaration
-honest: each name must still exist on the class, and the test **fails loudly
-once PyRosetta is importable**, so the list cannot outlive its reason. The
-specific unknowns are recorded there: FastRelax's MoveMap constrains
-*minimization*, while its ramped repack cycles take their rotamer set from a
-PackerTask, so residues named `fixed` may still be repacked; and
-`-ignore_unrecognized_res` silently drops any HETATM Rosetta lacks parameters
-for, which `relax` would then write back as the truncated structure (now guarded
-by a residue count, itself unexercised).
+**PyRosetta: installed, and three of the five declared paths were defective.**
+PyRosetta **2026.29+releasequarterly** (native arm64, 1.5 GB wheel, 3.0 GB
+installed) went into the conda env `ipro_rosetta` on the user's instruction,
+under their own licence. Every path named in the old `UNEXERCISED` list was then
+run. What it found:
 
-What was *not* unexercised, and was wrong: **`relax()` had no call site anywhere
+| # | Defect | Measured |
+|---|---|---|
+| 1 | **`relax(fixed=[...])` did not hold anything.** The MoveMap idiom is right for *minimization*, but FastRelax ramps repack cycles whose rotamer set comes from a PackerTask -- and fixing a residue's own torsions does not fix its Cartesian position anyway, because the fold tree translates it when an upstream torsion moves. | On 1crn A16, side-chain displacement after one cycle: MoveMap only **0.866 Å** (2.922 Å on another seed); MoveMap + `PreventRepacking` **2.200 Å**; adding **coordinate constraints 0.0001 Å**. So a `fix` restraint on a design position -- which the run reports as enforced, and whose own note promises it is "held during relaxation in 'full' mode" -- was silently violated by the relaxation step. Now held with coordinate constraints, with the MoveMap and `PreventRepacking` kept for what each is right about, `RestrictToRepacking` so relaxation can never change an identity, and the displacement **measured and checked** afterwards: a violation raises (the loop then reports a failed relaxation and downgrades the mode) rather than writing a structure that breaks the restraint. Re-measured: held 0.0 Å, a free residue moves 0.376 Å. |
+| 2 | **`interface_energy` raised `TypeError` on every call.** `InterfaceAnalyzerMover("A_B")` is not a constructor this PyRosetta has. | Its overloads take a jump index, a set of chain indices, or a `DockingPartners`; `DockingPartners` has only a default and a copy constructor; `set_interface` takes one too. The string is parsed by the free function `docking_partners_from_string`, which is what it now uses. It had no call site, so nothing downstream noticed. Re-measured: returns `dG_separated`, `interface_dSASA` and `total_score`. |
+| 3 | **A second backend's `init_flags` were silently ignored.** The guard was a bare "have we initialized" boolean. | Rosetta's re-initialization does work and is reversible: `init("-ex1")` then reading `packing:ex1` gives True where the default gives False, and initializing again without it returns to False. The guard is now keyed on the flag string, so a repeat still costs nothing and a genuine change takes effect. |
+| 4 | **The relax score was contaminable.** Setting `coordinate_constraint` on `self._sfxn` would have added a restraint penalty to every later `score_structure`. | The constraint weight now goes on a per-call copy of the score function, and the returned score comes from the unconstrained one. Verified: `coordinate_constraint` weight on `self._sfxn` is **0.0** after a relax, and the 0.04 REU gap between the returned score and a re-score of the written PDB is write precision, not a restraint term. |
+| 5 | **The deliverable PDB was not a valid PDB.** The REMARK carrying the score embedded the backend's full `units` sentence. | With the PyRosetta backend that made one line **230 characters** where a PDB record is 80 columns. A short `units_short` label now goes in the header; the long form stays in `best/design.json`, which has no column limit. |
+| 6 | **`doctor.py` reported a backend the run could not use.** Unlike PyMOL — driven as a subprocess, so any environment will do — PyRosetta must be importable *in process*, because `energy.resolve()` imports it directly. doctor searched the conda environments and counted a hit as available. | With PyRosetta installed only in `ipro_rosetta`, doctor run under the base interpreter printed `energy -> pyrosetta` and left PyRosetta out of `degraded`, while a run started with that same interpreter silently used the built-in screening function. The mode is reported with every design, so this was a scientific misstatement. Finding it elsewhere is now a hint (`how: "elsewhere"`, `available: False`) that names the interpreter to use instead. |
+| 7 | **A module's `version` *function* was printed instead of called.** | doctor's probe did `getattr(m, "__version__", "") or getattr(m, "version", "")`; PyRosetta's `version` is a callable, so the mode report read `[import] <function version at 0x1644d8040>`. It now calls it, and prints the real build string. |
+
+**One declared suspicion was wrong, and the truth is different.** The old entry
+said `-ignore_unrecognized_res` "silently drops any HETATM Rosetta lacks
+parameters for", which `relax` would write back truncated. Measured on four
+cases, that is not what happens: an unrecognized residue of one *or* two atoms
+makes `pose_from_pdb` **fail loudly** (`too many tries in fill_missing_atoms`),
+a zinc is **kept** (47 residues for a 46-residue protein plus ion), and what is
+silently dropped is **water** -- which `Structure.hetero_residues()` already
+excludes, so the residue-count guard's two sides agree and it does not
+false-fire. The guard stays as a cheap check; the claim is corrected.
+
+**What is still unexercised**, and now the whole of `UNEXERCISED`: the
+Rosetta-scored pair table behind `exact_pairs=True` (which raises by design, so
+it does not exist to be run), and `relax` on anything other than a
+single-chain protein -- several chains, a parameterized ligand, or
+`relax_cycles > 1` are untested.
+
+And before any of that could be reached: **`relax()` had no call site anywhere
 in the package**, and neither did `RestraintPlan.relax_fixed_positions`, which
-is collected for exactly that argument and whose own note promises those
-positions are "held during relaxation in `full` mode". So a run with a relaxing
-backend reported mode **`full`** — documented as "perturb + relax + repack" —
-while doing no relaxation at all; and because `can_relax` was true it also
+is collected for exactly that argument. So a run with a relaxing backend
+reported mode **`full`** — documented as "perturb + relax + repack" — while
+doing no relaxation at all; and because `can_relax` was true it also
 **suppressed** the note saying the reported energies were screening energies,
 writing screening kcal/mol into the deliverable PDB under a "Rosetta Energy
-Units (REU)" heading. Both are fixed and both are tested with a counting
-stand-in backend, so the wiring is covered without PyRosetta: `relax` is called
-once per perturbed iteration with the fixed-position list, a failure is reported
-and downgrades the mode, and the screening caveat now follows **where the
+Units (REU)" heading. Both were fixed with a counting stand-in backend standing
+in for Rosetta, and the real backend has now confirmed the wiring end to end: a
+2-iteration `perturb_backbone` run with `backends.energy: pyrosetta` reports
+`backbone relaxation ran on 2 of 2 iteration(s)`, mode `full`, and a REMARK
+whose units name the screening scale — the pair tables really are the screening
+terms unless `exact_pairs` is set, so the caveat now follows **where the
 pairwise numbers came from** (`screening_pairwise`) rather than whether the
 backend can relax.
+
+Four of the regression tests for this section run only when PyRosetta is
+importable, and are skipped otherwise, following the repo's existing convention
+for PyMOL-gated tests. The suite is **141 tests** either way: 137 run
+everywhere, and those four add real coverage in an environment that has the
+licence. Both were run: 141 passed under `python3` (PyRosetta absent, so the
+fallbacks are exercised) and 141 under the `ipro_rosetta` interpreter.
+
+**Cost, for the record.** The wheel is 1.5 GB and the environment 3.0 GB; with
+pip's cache the install took this machine from 31 GB free to 23 GB.

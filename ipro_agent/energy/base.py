@@ -198,6 +198,10 @@ class EnergyBackend(ABC):
     can_relax: bool = False
     #: Units of the returned energies, for honest reporting.
     units: str = "kcal/mol"
+    #: The same thing in a few words, for a fixed-column file header. A PDB
+    #: record is 80 columns; the full `units` sentence made one REMARK line
+    #: 230 characters long, which is not a valid PDB record at all.
+    units_short: str = "kcal/mol"
     #: True when :meth:`interaction` and :meth:`internal` -- the numbers the
     #: MILP optimizes and the loop reports -- come from the built-in screening
     #: function rather than this backend's own force field. It is a separate

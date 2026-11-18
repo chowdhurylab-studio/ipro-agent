@@ -775,7 +775,10 @@ class IPROLoop:
             f"REMARK   1 GOAL       {self.spec.goal}",
             f"REMARK   1 MODE       {self.mode}",
             f"REMARK   1 BACKEND    {self.backend.name}",
-            f"REMARK   1 SCORE      {score:.4f} ({self.backend.units})",
+            # units_short, not units: a PDB record is 80 columns and the full
+            # sentence made this line 230 characters. The long form is in
+            # best/design.json, which has no column limit.
+            f"REMARK   1 SCORE      {score:.4f} ({self.backend.units_short})",
             f"REMARK   1 MUTATIONS  {muts}",
         ]
         if len(self._assemblies) > 1:

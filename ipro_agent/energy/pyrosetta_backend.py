@@ -40,45 +40,34 @@ from .builtin import BuiltinBackend
 
 log = logging.getLogger(__name__)
 
-#: **Paths in this module that have never executed**, and why each matters.
+#: Paths in this module that have **not** been executed against a real
+#: PyRosetta, and why each matters.
 #:
-#: PyRosetta needs a licence (free for academics, but it has to be obtained and
-#: accepted by the user) and is not installed in this repo's environment, so
-#: everything below is written against the documented API and checked by
-#: reading only. This is a declaration, not a disclaimer: a name here is a
-#: place where a defect of the kind docs/DESIGN.md sections 7, 7b and 7d record
-#: -- runs clean, returns a plausible wrong answer -- could still be hiding.
-#: ``tests/test_ipro.py`` keeps the list honest (every name must still exist,
-#: and the test fails loudly once PyRosetta IS importable, so the list cannot
-#: quietly outlive its reason).
+#: This was the whole module until 2026-11-18, when PyRosetta
+#: 2026.29+releasequarterly was installed and every entry was run. Three of the
+#: five turned out to be defects, one of the stated suspicions was wrong, and
+#: what is left here is the part that genuinely remains unexercised. Keep it
+#: that way: a name here is a place where a defect of the kind docs/DESIGN.md
+#: sections 7, 7b and 7d record -- runs clean, returns a plausible wrong answer
+#: -- could still be hiding, and ``tests/test_ipro.py`` checks that every name
+#: still exists so the list cannot rot.
 #:
-#: To close one: install PyRosetta, run the relevant case, and move the entry
-#: out with the measurement that exercised it. See docs/DESIGN.md section 7e.
+#: To close one: run the relevant case and move the entry out with the
+#: measurement that exercised it. See docs/DESIGN.md section 7e.
 UNEXERCISED: dict[str, str] = {
-    "PyRosettaBackend.__init__": (
-        "pyrosetta.init() is guarded by a module attribute, so a second backend "
-        "built with different init_flags silently keeps the first set. Never run, "
-        "so never observed."
-    ),
-    "PyRosettaBackend.relax": (
-        "FastRelax with a MoveMap. A MoveMap constrains MINIMIZATION; FastRelax's "
-        "ramped repack cycles take their rotamer set from a PackerTask, so the "
-        "residues named in `fixed` may still be repacked -- the opposite of what "
-        "the restraint promises. Unverified. The residue-count guard against "
-        "-ignore_unrecognized_res silently dropping a cofactor is likewise unrun."
-    ),
-    "PyRosettaBackend.score_structure": (
-        "pose_from_pdb + score function. Whether -ignore_unrecognized_res drops a "
-        "ligand Rosetta has no params for, so the score is of a complex missing "
-        "its cofactor, has not been observed."
-    ),
-    "PyRosettaBackend.interface_energy": (
-        "InterfaceAnalyzerMover. No call site in the package either, so this is "
-        "both unexercised and unused: dG_separated never reaches an objective."
-    ),
     "PyRosettaBackend._exact_pair": (
-        "Raises by design (a pose per rotamer pair is prohibitive). The raise "
-        "itself is covered; the Rosetta-scored table it describes does not exist."
+        "Raises by design (a pose per rotamer pair is prohibitive), and the raise "
+        "is covered by a test. What does not exist, and so cannot be exercised, "
+        "is the Rosetta-scored pair table it describes: with exact_pairs=False "
+        "(the default) every MILP energy comes from the screening function, which "
+        "is why `screening_pairwise` is True and the reported units say so."
+    ),
+    "PyRosettaBackend.relax (multi-chain and ligand cases)": (
+        "Exercised on a single-chain protein (1crn): FastRelax runs, the held "
+        "positions stay within 0.0001 A, and the written structure is re-scored "
+        "without the constraint term. NOT exercised with several chains, with a "
+        "parameterized ligand present, or with relax_cycles > 1 -- a cofactor's "
+        "own params, and whether a chain break survives relaxation, are untested."
     ),
 }
 
@@ -103,9 +92,16 @@ class PyRosettaBackend(EnergyBackend):
         import pyrosetta  # raises if unavailable; resolve() catches it
 
         self._pr = pyrosetta
-        if not getattr(pyrosetta, "_ipro_agent_initialized", False):
+        # Keyed on the flags, not on a bare "have we initialized" boolean. A
+        # second backend asking for different init_flags silently kept the
+        # first set, and Rosetta's own re-initialization does work: measured on
+        # 2026.29, init("-ex1") then reading packing:ex1 gives True where the
+        # default gives False, and initializing again without it returns to
+        # False. So a repeat of the same flags still costs nothing, and a
+        # genuine change now takes effect.
+        if getattr(pyrosetta, "_ipro_agent_init_flags", None) != init_flags:
             pyrosetta.init(init_flags)
-            pyrosetta._ipro_agent_initialized = True  # type: ignore[attr-defined]
+            pyrosetta._ipro_agent_init_flags = init_flags  # type: ignore[attr-defined]
         self.scorefxn_name = scorefxn
         self._sfxn = pyrosetta.create_score_function(scorefxn)
         self.exact_pairs = bool(exact_pairs)
@@ -116,6 +112,7 @@ class PyRosettaBackend(EnergyBackend):
             if k in ("max_repulsion", "hbond_weight", "coulomb")
         })
         self.screening_pairwise = not self.exact_pairs
+        self.units_short = "REU" if self.exact_pairs else "kcal/mol, screening scale"
         self.units = (
             "Rosetta Energy Units (REU)" if self.exact_pairs else
             "kcal/mol (screening scale: the MILP tables and the reported "
@@ -155,15 +152,54 @@ class PyRosettaBackend(EnergyBackend):
     def score_structure(self, pdb) -> float:
         return float(self._sfxn(self._pose(Path(pdb))))
 
-    def relax(self, pdb_in: Path, pdb_out: Path, fixed: Sequence[str] = ()) -> float:
-        """FastRelax, optionally holding some residues fixed.
+    def relax(
+        self,
+        pdb_in: Path,
+        pdb_out: Path,
+        fixed: Sequence[str] = (),
+        hold_tolerance: float = 0.1,
+    ) -> float:
+        """FastRelax, holding the residues named in ``fixed`` where they are.
 
-        ``fixed`` holds position labels like ``"A115"``. Those residues keep
-        both backbone and side-chain torsions; everything else is free. This is
-        the backbone-relaxation step of the IPRO iteration.
+        ``fixed`` holds position labels like ``"A115"``. This is the
+        backbone-relaxation step of the IPRO iteration, and the one place where
+        a restraint the user wrote has to survive a third-party protocol.
+
+        **A MoveMap is not enough, measured.** The earlier version set
+        ``mm.set_bb(idx, False)`` and ``mm.set_chi(idx, False)`` and stopped
+        there, which is the right idiom for *minimization* -- but FastRelax
+        ramps repack cycles whose rotamer set comes from a PackerTask, and
+        fixing a residue's own torsions does not fix its Cartesian position
+        anyway, because the fold tree translates it when an upstream torsion
+        moves. On 1crn A16 with PyRosetta 2026.29:
+
+            MoveMap only                       0.866 A  (and 2.922 A on another seed)
+            MoveMap + PreventRepacking         2.200 A
+            MoveMap + PreventRepacking + coordinate constraints   0.0001 A
+
+        So the hold is done with **coordinate constraints**, and the other two
+        are kept for what they are each right about: the MoveMap stops the
+        torsions being minimized, and ``PreventRepacking`` stops Rosetta
+        re-choosing a rotamer the MILP chose. ``RestrictToRepacking`` is added
+        so relaxation can never change an *identity*.
+
+        The displacement is then **measured and checked**, because this is a
+        promise to the user rather than a best effort: a violation raises, which
+        the loop reports as a failed relaxation and a downgraded mode, instead
+        of quietly returning a structure that breaks the restraint.
         """
-        from pyrosetta.rosetta.protocols.relax import FastRelax
+        import numpy as np
+
+        from pyrosetta.rosetta.core.id import AtomID
         from pyrosetta.rosetta.core.kinematics import MoveMap
+        from pyrosetta.rosetta.core.pack.task import TaskFactory
+        from pyrosetta.rosetta.core.pack.task.operation import (
+            PreventRepacking, RestrictToRepacking,
+        )
+        from pyrosetta.rosetta.core.scoring import ScoreType
+        from pyrosetta.rosetta.core.scoring.constraints import CoordinateConstraint
+        from pyrosetta.rosetta.core.scoring.func import HarmonicFunc
+        from pyrosetta.rosetta.protocols.relax import FastRelax
 
         pose = self._pose(Path(pdb_in))
         # `-ignore_unrecognized_res` is in the default init flags, so Rosetta
@@ -183,22 +219,74 @@ class PyRosettaBackend(EnergyBackend):
                 "structure back. Supply params for the ligand/cofactor, or run "
                 "with the built-in backend."
             )
-        fr = FastRelax(self._sfxn, self.relax_cycles)
+        # A score function of this call's own: the constraint term must not be
+        # left on self._sfxn, or every later score_structure() would silently
+        # include a restraint penalty.
+        sfxn = self._pr.create_score_function(self.scorefxn_name)
+        fr = FastRelax(sfxn, self.relax_cycles)
 
-        if fixed:
+        held: dict[int, dict[str, "np.ndarray"]] = {}
+        frozen = self._resolve_labels(pose, fixed) if fixed else []
+        if frozen:
             mm = MoveMap()
             mm.set_bb(True)
             mm.set_chi(True)
-            frozen = self._resolve_labels(pose, fixed)
             for idx in frozen:
                 mm.set_bb(idx, False)
                 mm.set_chi(idx, False)
             fr.set_movemap(mm)
 
+            tf = TaskFactory()
+            tf.push_back(RestrictToRepacking())
+            prevent = PreventRepacking()
+            for idx in frozen:
+                prevent.include_residue(idx)
+            tf.push_back(prevent)
+            fr.set_task_factory(tf)
+
+            sfxn.set_weight(ScoreType.coordinate_constraint, 1.0)
+            anchor = AtomID(1, 1)
+            for idx in frozen:
+                res = pose.residue(idx)
+                held[idx] = {}
+                for i in range(1, res.natoms() + 1):
+                    if res.is_virtual(i) or res.atom_is_hydrogen(i):
+                        continue
+                    xyz = res.xyz(i)
+                    held[idx][res.atom_name(i).strip()] = np.array(xyz, dtype=float)
+                    pose.add_constraint(
+                        CoordinateConstraint(
+                            AtomID(i, idx), anchor, xyz, HarmonicFunc(0.0, 0.01)
+                        )
+                    )
+
         fr.apply(pose)
+
+        if held:
+            worst, worst_at = 0.0, ""
+            for idx, atoms in held.items():
+                res = pose.residue(idx)
+                for i in range(1, res.natoms() + 1):
+                    nm = res.atom_name(i).strip()
+                    if nm not in atoms:
+                        continue
+                    d = float(np.abs(np.array(res.xyz(i), dtype=float) - atoms[nm]).max())
+                    if d > worst:
+                        worst, worst_at = d, f"{nm} of pose residue {idx}"
+            if worst > hold_tolerance:
+                raise RuntimeError(
+                    f"relaxation moved a position it was told to hold: {worst_at} "
+                    f"by {worst:.5g} A, over the {hold_tolerance:.5g} A tolerance. "
+                    f"Held positions were {list(fixed)}. The structure was NOT "
+                    f"written, because it would violate a restraint the run "
+                    f"reports as enforced."
+                )
+            self._last_hold_error = worst
+
         out = Path(pdb_out)
         out.parent.mkdir(parents=True, exist_ok=True)
         pose.dump_pdb(str(out))
+        # Scored WITHOUT the constraint term, so the number means what it says.
         return float(self._sfxn(pose))
 
     @staticmethod
@@ -238,11 +326,27 @@ class PyRosettaBackend(EnergyBackend):
 
         ``partner_chains`` uses Rosetta's notation, e.g. ``"A_B"``. Returned
         ``dG_separated`` is the quantity a "bind tighter" goal minimizes.
+
+        **This method raised on every call** until 2026-11-18, because
+        ``InterfaceAnalyzerMover("A_B")`` is not a constructor this PyRosetta
+        has: measured against 2026.29, its overloads take a jump index, a set
+        of chain indices, or a ``DockingPartners``. ``DockingPartners`` itself
+        has only a default and a copy constructor, and ``set_interface`` takes
+        one too -- the string is parsed by the free function
+        ``docking_partners_from_string``, which is what this now uses. The
+        method had no call site, so nothing downstream ever noticed.
         """
+        from pyrosetta.rosetta.core.pose import DockingPartners
         from pyrosetta.rosetta.protocols.analysis import InterfaceAnalyzerMover
 
         pose = self._pose(Path(pdb))
-        iam = InterfaceAnalyzerMover(partner_chains)
+        partners = DockingPartners.docking_partners_from_string(str(partner_chains))
+        if partners.is_empty() or not partners.has_both():
+            raise ValueError(
+                f"could not read {partner_chains!r} as two docking partners; "
+                "use Rosetta's chain notation, e.g. 'A_B' or 'AB_C'"
+            )
+        iam = InterfaceAnalyzerMover(partners)
         iam.set_scorefunction(self._sfxn)
         iam.set_compute_packstat(False)
         iam.apply(pose)

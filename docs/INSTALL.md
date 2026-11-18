@@ -114,15 +114,34 @@ shadow PyMOL's. Timeout is 3600 s for the whole harvest.
 
 ## 3. PyRosetta
 
-> **Not installed, and every path that needs it is unexercised.** This is
-> recorded in code, not just here: `ipro_agent/energy/pyrosetta_backend.UNEXERCISED`
-> names each path and what could be wrong with it, and a test fails loudly the
-> moment PyRosetta becomes importable, so the declaration cannot outlive its
-> reason. docs/DESIGN.md §7e has the specifics. It was not installed here
-> because the licence is the user's to obtain and accept (free for academics)
-> and the download is ~1.5 GB. If you install it, re-run
-> `python3 scripts/selftest.py`: the declaration test will fail by design and
-> tell you to exercise those paths and move the entries out.
+> **Installed and exercised on this machine, 2026-11-18**, on the owner's
+> instruction and under their own licence:
+>
+> ```bash
+> mamba create -y -n ipro_rosetta -c conda-forge python=3.12 numpy biopython pyyaml
+> /opt/miniconda3/envs/ipro_rosetta/bin/pip install pyrosetta \
+>     --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
+> ```
+>
+> Resolved `pyrosetta-2026.29+releasequarterly.80a0635615`,
+> `cp312-macosx_12_0_arm64` — a **1532.9 MB** wheel, **3.0 GB** installed,
+> native Apple Silicon, no Rosetta 2 and **no username or password** (so the
+> [unverified] note that used to sit at the end of this section is now
+> resolved: route (a) is password-free as published). Python 3.12 was chosen
+> over this machine's 3.14 base purely for wheel-availability margin; cp314
+> wheels are listed.
+>
+> Running the paths found **five defects**, three of them in the "runs clean,
+> returns a plausible wrong answer" family — `relax(fixed=...)` held nothing,
+> `interface_energy` raised on every call, and a second backend's `init_flags`
+> were ignored. docs/DESIGN.md §7e has each with its measurement.
+>
+> The suite is PyRosetta-aware: four tests run only when it is importable, so
+> run the suite with that interpreter to exercise them —
+> `PATH="$PATH:/opt/miniconda3/envs/ipro_vina/bin" /opt/miniconda3/envs/ipro_rosetta/bin/python scripts/selftest.py`
+> — and with the plain `python3` to check the fallbacks still work. Both are
+> 141 tests. What remains unexercised is listed in
+> `ipro_agent/energy/pyrosetta_backend.UNEXERCISED`.
 
 **Licence first.** PyRosetta is distributed under the *PyRosetta Software
 Non-Commercial License Agreement*
@@ -175,9 +194,8 @@ python3 -c "import pyrosetta; print(pyrosetta.__file__)"
 python3 scripts/doctor.py | grep -i pyrosetta
 ```
 
-Whether the download still requires a username/password: the current downloads
-page does not mention one, and these commands are password-free as published,
-but I did not run them here **[unverified]**.
+Whether the download still requires a username/password: **route (a) was run on
+2026-11-18 and needs neither** — see the note at the top of this section.
 
 ---
 
@@ -518,7 +536,7 @@ design.
 ## 9. What I could not verify
 
 - Whether the licensed Schrödinger PyMOL build ships the mutagenesis wizard in the same importable form. The open-source build does (verified on this machine); the paid build was not available to test.
-- Whether the PyRosetta download endpoints still require credentials in any circumstance, and whether the published install commands succeed end-to-end — no PyRosetta was installed here (the licence is the user's to accept). The file listing on the quarterly index was read directly and is reliable. The *code paths* that need it are declared unexercised in `energy/pyrosetta_backend.UNEXERCISED`; `relax()`'s wiring into the loop is tested with a stand-in backend, so only Rosetta's own behaviour is unverified.
+- ~~Whether the PyRosetta download endpoints still require credentials, and whether the published install commands succeed end-to-end.~~ **Closed 2026-11-18**: route (a) installed `2026.29+releasequarterly` on Apple Silicon with no credentials. What is still unverified is `relax` on anything but a single-chain protein (several chains, a parameterized ligand, `relax_cycles > 1`) — see `energy/pyrosetta_backend.UNEXERCISED`.
 - Current IBM CPLEX academic download path, and the exact term of a free Gurobi academic licence (Gurobi's own pages state 6 months in one place and 1 year in another).
 - ADFR suite / AutoDockTools (`prepare_ligand4.py`, `prepare_receptor4.py`) on Apple Silicon: `doctor.py` probes these names, but no ADFR install was tested.
 - Vina's Python bindings on macOS: only the absence of a macOS wheel on PyPI and the conda recipe's Boost pin were verified, not the exact compiler error you will hit. (The conda-forge package *was* installed and its CLI exercised — see the note at the top of §4 — but this tool drives the `vina` executable, not the bindings.)

@@ -120,6 +120,7 @@ class BuiltinBackend(EnergyBackend):
     name = "builtin-screen"
     can_relax = False
     units = "kcal/mol (screening scale, not comparable to Rosetta energy units)"
+    units_short = "kcal/mol, screening scale"
 
     def __init__(
         self,

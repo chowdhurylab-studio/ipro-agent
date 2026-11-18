@@ -57,7 +57,10 @@ def _module_in(python: str, module: str, timeout: float = 120.0) -> tuple[bool, 
     code = (
         "import importlib,sys\n"
         f"m=importlib.import_module({module!r})\n"
-        "print(getattr(m,'__version__','') or getattr(m,'version',''))\n"
+        # `version` may be a function (pyrosetta's is), and printing the
+        # function's repr put "<function version at 0x...>" in the mode report.
+        "v=getattr(m,'__version__','') or getattr(m,'version','')\n"
+        "print(v() if callable(v) else v)\n"
     )
     rc, out = _run([python, "-I", "-c", code], timeout=timeout)
     return rc == 0, out.splitlines()[-1] if (rc == 0 and out) else out
@@ -125,17 +128,34 @@ def check() -> dict:
     C["pymol"] = pymol
 
     # -- PyRosetta: scoring + relaxation ---------------------------------
+    #
+    # Unlike PyMOL, PyRosetta has to be importable by **this** interpreter:
+    # energy/base.resolve() does `from .pyrosetta_backend import ...`, which
+    # imports pyrosetta in-process. Finding it in another conda environment
+    # therefore does NOT mean a run would use it -- and reporting it as
+    # `energy -> pyrosetta` was wrong in exactly the way the house rules care
+    # about, because the mode is reported with every design. Measured: with
+    # PyRosetta installed only in the env `ipro_rosetta`, doctor run under the
+    # base interpreter claimed `energy -> pyrosetta` while a run under that
+    # same interpreter silently used the built-in screening function.
     pyros: dict = {"available": False, "how": None, "detail": ""}
     ok, ver = _module_in(sys.executable, "pyrosetta")
     if ok:
         pyros.update(available=True, how="import", python=sys.executable, detail=ver)
     else:
         for py in find_conda_envs():
-            ok, ver = _module_in(str(py), "pyrosetta")
-            if ok:
+            found, ver = _module_in(str(py), "pyrosetta")
+            if found:
+                # Recorded, but NOT available: a run with this interpreter
+                # cannot use it.
                 pyros.update(
-                    available=True, how="subprocess-env", python=str(py),
-                    detail=f"found in {py.parent.parent.name}",
+                    available=False, how="elsewhere", python=str(py),
+                    detail=(
+                        f"installed in {py.parent.parent.name} ({py}) but NOT "
+                        f"importable by this interpreter, so a run started with "
+                        f"this python will use the built-in energy. Run "
+                        f"ipro-agent with {py} to use it."
+                    ),
                 )
                 break
     C["pyrosetta"] = pyros
@@ -285,7 +305,16 @@ def main() -> int:
             c = rep["checks"][key]
             mark = "OK  " if c["available"] else "--  "
             extra = f"  [{c.get('how')}] {c.get('detail', '')}".rstrip()
-            print(f"  {mark}{label}{extra if c['available'] else '  (not found)'}")
+            if c["available"]:
+                print(f"  {mark}{label}{extra}")
+            elif c.get("detail"):
+                # Not usable here, but we know something useful about why --
+                # "installed in another env" is the case worth printing rather
+                # than swallowing behind a bare "(not found)".
+                print(f"  {mark}{label}  (not usable here)")
+                print(f"        {c['detail']}")
+            else:
+                print(f"  {mark}{label}  (not found)")
         lp = rep["checks"]["ligand_prep"]
         print(f"  {'OK  ' if lp['available'] else '--  '}ligand prep: "
               + (", ".join(t["name"] for t in lp["tools"]) if lp["tools"] else "none"))

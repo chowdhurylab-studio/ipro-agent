@@ -3263,23 +3263,36 @@ def test_regression_doctor_probes_an_isolated_interpreter():
     so the run looked not degraded at all and the reported mode was wrong in
     both directions. Neither is installed on this machine."""
     tmp = Path(tempfile.mkdtemp())
-    (tmp / "pyrosetta.py").write_text("__version__ = '2024.1'\n")
-    (tmp / "vina").mkdir()
-    (tmp / "vina" / "__init__.py").write_text("__version__ = '1.2.5'\n")
+    # Names that cannot be installed anywhere, so the test measures isolation
+    # rather than whatever this machine happens to have. (PyRosetta may now be
+    # genuinely importable in the interpreter running this.)
+    (tmp / "ipro_planted_module.py").write_text("__version__ = '9.9.9'\n")
+    (tmp / "ipro_planted_pkg").mkdir()
+    (tmp / "ipro_planted_pkg" / "__init__.py").write_text("__version__ = '9.9.9'\n")
     code = (
         "import sys, json\n"
         f"sys.path.insert(0, {str(REPO / 'scripts')!r})\n"
         "from doctor import _module_in\n"
-        "print(json.dumps([_module_in(sys.executable, 'pyrosetta')[0],"
-        " _module_in(sys.executable, 'vina')[0]]))\n"
+        "print(json.dumps([_module_in(sys.executable, 'ipro_planted_module')[0],"
+        " _module_in(sys.executable, 'ipro_planted_pkg')[0]]))\n"
     )
-    p = subprocess.run([sys.executable, code and "-c", code], capture_output=True,
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
                        text=True, cwd=tmp, timeout=300)
     assert p.returncode == 0, p.stderr
     seen = json.loads(p.stdout.strip().splitlines()[-1])
     assert seen == [False, False], (
-        f"a planted module in the working directory must not be reported as "
+        f"a module planted in the working directory must not be reported as "
         f"installed; got {seen}"
+    )
+    # Sanity check that the planted modules really are importable without -I,
+    # so a passing test above means isolation and not a broken fixture.
+    naive = subprocess.run(
+        [sys.executable, "-c", "import ipro_planted_module, ipro_planted_pkg"],
+        capture_output=True, text=True, cwd=tmp, timeout=120,
+    )
+    assert naive.returncode == 0, (
+        "fixture is broken: the planted modules are not importable even "
+        f"without -I ({naive.stderr[-200:]})"
     )
 
 
@@ -3462,28 +3475,161 @@ def test_regression_the_vina_path_converts_pdb_to_pdbqt():
     assert "pdb_to_pdbqt" in src, "the loop must convert before calling Vina"
 
 
-def test_pyrosetta_unexercised_paths_are_declared_and_real():
-    """PyRosetta is licensed and is not installed here, so the paths that need
-    it have never executed. They are declared in one place rather than left to
-    be discovered, and this test keeps that declaration honest: every name must
-    still exist on the backend, so the list cannot rot as the code changes.
-    See docs/DESIGN.md section 7e."""
-    from ipro_agent.energy import pyrosetta_backend as prb
-
-    assert prb.UNEXERCISED, "the declaration must not be empty while PyRosetta is absent"
-    for name, why in prb.UNEXERCISED.items():
-        target = prb.PyRosettaBackend
-        attr = name.split(".")[-1]
-        assert hasattr(target, attr), f"declared-unexercised {name!r} no longer exists"
-        assert why.strip(), f"{name} needs a reason"
-
+def _have_pyrosetta() -> bool:
     try:
         import pyrosetta  # noqa: F401
-    except ImportError:
+    except Exception:
+        return False
+    return True
+
+
+def test_pyrosetta_unexercised_paths_are_declared_and_real():
+    """What in the PyRosetta backend has still not been run, declared in one
+    place rather than left to be discovered.
+
+    PyRosetta 2026.29 was installed on 2026-11-18 and the five original
+    entries were all executed; three were defects and one of the stated
+    suspicions was wrong. What remains is genuinely unexercised. This test
+    keeps the declaration from rotting: every name must still resolve to
+    something on the backend. See docs/DESIGN.md section 7e."""
+    import re
+
+    from ipro_agent.energy import pyrosetta_backend as prb
+
+    assert prb.UNEXERCISED, "if everything is exercised, say so in 7e and empty this"
+    for name, why in prb.UNEXERCISED.items():
+        # Entries may qualify a method ("relax (multi-chain cases)"), so take
+        # the dotted attribute and drop any parenthetical.
+        attr = re.split(r"[\s(]", name.split(".")[-1])[0]
+        assert hasattr(prb.PyRosettaBackend, attr), (
+            f"declared-unexercised {name!r} no longer exists"
+        )
+        assert why.strip(), f"{name} needs a reason"
+
+
+def test_regression_relax_holds_the_positions_it_was_told_to_hold():
+    """``relax(fixed=[...])`` set a MoveMap and stopped there, which is the
+    right idiom for minimization but not for FastRelax: its ramped repack
+    cycles take their rotamer set from a PackerTask, and fixing a residue's own
+    torsions does not fix its Cartesian position anyway, because the fold tree
+    translates it when an upstream torsion moves.
+
+    Measured on 1crn A16 with PyRosetta 2026.29, side-chain displacement after
+    one relax cycle:
+
+        MoveMap only                        0.866 A  (2.922 A on another seed)
+        MoveMap + PreventRepacking          2.200 A
+        + coordinate constraints           0.0001 A
+
+    So a `fix` restraint on a design position -- which the run reports as
+    enforced, and whose own note promises it is "held during relaxation in
+    'full' mode" -- was silently violated by the relaxation step."""
+    if not _have_pyrosetta():
+        print("    (skipped: no PyRosetta)")
         return
-    raise AssertionError(
-        "PyRosetta is now installed: run these paths and move them out of "
-        "UNEXERCISED (docs/DESIGN.md section 7e says how)"
+    from ipro_agent.energy.pyrosetta_backend import PyRosettaBackend
+    from ipro_agent.structure import Structure
+
+    def sidechain(pdb, num):
+        st = Structure.load(pdb)
+        res = st.find("A", num)
+        bb = {"N", "CA", "C", "O", "OXT"}
+        return {
+            a.get_name().strip(): np.array(a.coord, dtype=float)
+            for a in res
+            if a.get_name().strip() not in bb
+            and (a.element or "").strip().upper() != "H"
+        }
+
+    def shift(a, b):
+        common = set(a) & set(b)
+        return max(float(np.abs(a[n] - b[n]).max()) for n in common)
+
+    be = PyRosettaBackend()
+    tmp = Path(tempfile.mkdtemp())
+    out = tmp / "relaxed.pdb"
+    before16, before22 = sidechain(CRN, 16), sidechain(CRN, 22)
+    be.relax(CRN, out, fixed=["A16"])
+
+    held = shift(before16, sidechain(out, 16))
+    free = shift(before22, sidechain(out, 22))
+    assert held < 0.01, f"A16 was told to hold and moved {held:.4f} A"
+    assert free > 0.05, f"relaxation did nothing at all (A22 moved {free:.4f} A)"
+
+    # And the promise is checked, not merely attempted: an impossible
+    # tolerance must raise rather than write a structure that breaks it.
+    try:
+        be.relax(CRN, tmp / "never.pdb", fixed=["A16"], hold_tolerance=0.0)
+    except RuntimeError as exc:
+        assert "told to hold" in str(exc)
+    else:
+        raise AssertionError("a violated hold must raise, not be written out")
+
+
+def test_regression_interface_energy_uses_a_constructor_that_exists():
+    """``InterfaceAnalyzerMover("A_B")`` is not a constructor this PyRosetta
+    has, so this documented method raised TypeError on every call. Measured
+    against 2026.29: the overloads take a jump index, a set of chain indices,
+    or a DockingPartners -- and DockingPartners is not constructible from a
+    string either. The chain-string form is ``set_interface()``."""
+    if not _have_pyrosetta():
+        print("    (skipped: no PyRosetta)")
+        return
+    from ipro_agent.energy.pyrosetta_backend import PyRosettaBackend
+
+    tmp = Path(tempfile.mkdtemp())
+    prot = [ln for ln in CRN.read_text().splitlines() if ln.startswith("ATOM")]
+    shifted = [
+        ln[:21] + "B" + ln[22:30] + f"{float(ln[30:38]) + 14.0:8.3f}" + ln[38:]
+        for ln in prot
+    ]
+    two = tmp / "two_chain.pdb"
+    two.write_text("\n".join(prot + shifted) + "\nEND\n")
+
+    got = PyRosettaBackend().interface_energy(two, "A_B")
+    for key in ("dG_separated", "interface_dSASA", "total_score"):
+        assert key in got and isinstance(got[key], float), got
+
+
+def test_regression_a_second_backend_can_change_the_init_flags():
+    """``pyrosetta.init`` was guarded by a bare "have we initialized" boolean,
+    so a second backend asking for different ``init_flags`` silently kept the
+    first set. Rosetta's re-initialization does work: measured on 2026.29,
+    init("-ex1") then reading packing:ex1 gives True where the default gives
+    False, and initializing again without it returns to False."""
+    if not _have_pyrosetta():
+        print("    (skipped: no PyRosetta)")
+        return
+    from pyrosetta.rosetta.basic import options as O
+
+    from ipro_agent.energy.pyrosetta_backend import PyRosettaBackend
+
+    PyRosettaBackend(init_flags="-mute all -ignore_zero_occupancy false")
+    assert O.get_boolean_option("packing:ex1") is False
+    PyRosettaBackend(init_flags="-mute all -ex1 -ignore_zero_occupancy false")
+    assert O.get_boolean_option("packing:ex1") is True, (
+        "a second backend's init_flags were ignored"
+    )
+    PyRosettaBackend(init_flags="-mute all -ignore_zero_occupancy false")
+    assert O.get_boolean_option("packing:ex1") is False
+
+
+def test_regression_a_pdb_remark_fits_a_pdb_record():
+    """The REMARK line carrying the score embedded the backend's full `units`
+    sentence. With the PyRosetta backend that made one line 230 characters
+    long, where a PDB record is 80 columns -- so the deliverable structure was
+    not a valid PDB file. The long form belongs in best/design.json, which has
+    no column limit."""
+    from ipro_agent.energy import resolve as _resolve
+
+    for name in ("builtin",):
+        be = _resolve(name)
+        assert len(be.units_short) <= 32, be.units_short
+        line = f"REMARK   1 SCORE      {-1234.5678:.4f} ({be.units_short})"
+        assert len(line) <= 80, (len(line), line)
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "self.backend.units_short" in src, (
+        "the PDB header must use the short units label"
     )
 
 
@@ -3518,3 +3664,36 @@ def test_regression_a_pore_axis_that_misses_the_lumen_is_reported():
     assert "pore_axis_clearance" in geo, geo
     assert geo["pore_axis_clearance"] < 1.4, geo["pore_axis_clearance"]
     assert any("cannot confirm the axis is in the lumen" in n for n in loop.notes), loop.notes
+
+
+def test_regression_doctor_only_claims_an_in_process_energy_backend():
+    """PyRosetta has to be importable by the interpreter running ipro-agent:
+    ``energy.resolve()`` imports it in-process, unlike PyMOL, which is driven
+    as a subprocess and may live in any environment.
+
+    Measured with PyRosetta installed only in the env ``ipro_rosetta``: doctor
+    run under the base interpreter reported ``energy -> pyrosetta`` and left
+    PyRosetta out of ``degraded``, while a run started with that same
+    interpreter silently used the built-in screening function. The mode is
+    reported with every design, so this was a scientific misstatement. Finding
+    it elsewhere is now recorded as a hint (``how: "elsewhere"``) and named in
+    the detail, but ``available`` stays False."""
+    p = subprocess.run([sys.executable, str(REPO / "scripts" / "doctor.py"), "--json"],
+                       capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, p.stderr
+    rep = json.loads(p.stdout)
+    pyros = rep["checks"]["pyrosetta"]
+
+    # Whatever this machine has, the claim must match THIS interpreter.
+    importable_here = _have_pyrosetta()
+    assert pyros["available"] is importable_here, (pyros, importable_here)
+    assert (rep["resolved"]["energy"].startswith("pyrosetta")) is importable_here
+    assert ("pyrosetta" in rep["degraded"]) is (not importable_here)
+    if pyros.get("how") == "elsewhere":
+        assert pyros["available"] is False
+        assert "NOT importable by this interpreter" in pyros["detail"]
+
+    # A version that is a callable must not be reported as a function repr.
+    assert "<function" not in json.dumps(rep), (
+        "a module's version() function was printed instead of called"
+    )
