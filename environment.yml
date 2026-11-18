@@ -1,0 +1,22 @@
+# Conda environment for ipro-agent, including PyMOL in the same env so no
+# IPRO_PYMOL_PYTHON indirection is needed.
+#
+#   conda env create -f environment.yml && conda activate ipro-agent
+#   python3 scripts/doctor.py
+#
+# PyRosetta is deliberately absent: it needs a free academic licence and its own
+# channel. See docs/INSTALL.md. Without it the loop runs `fixed-backbone` or
+# `backbone-mc` and says so.
+name: ipro-agent
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - numpy>=1.24
+  - biopython>=1.81
+  - pyyaml>=6.0
+  - pymol-open-source>=3.0     # rotamers and mutagenesis
+  - glpk                        # a real MILP solver, so optimality is proven
+  - pip
+  - pip:
+      - pulp[cbc]>=3.0          # drives CBC/HiGHS/CPLEX/Gurobi if present

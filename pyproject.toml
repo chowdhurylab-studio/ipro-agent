@@ -21,6 +21,10 @@ dependencies = [
 # PuLP 4.x no longer bundles CBC, hence the extra.
 solver = ["pulp[cbc]>=3.0"]
 dock = ["meeko>=0.5"]
+# pytest is optional on purpose: `python3 scripts/selftest.py` runs the same
+# tests with no dependencies at all, so a bare environment can still check
+# itself. Install this only if you want pytest's reporting.
+test = ["pytest>=7.0"]
 
 [project.scripts]
 ipro-agent = "ipro_agent.cli:main"

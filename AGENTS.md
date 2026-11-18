@@ -1,12 +1,16 @@
 # ipro-agent — router
 
+An agent opening this repo normally loads the skill by itself, from its
+`description` in `.claude/skills/ipro-agent/SKILL.md`. This file is the fallback for tools that read
+`AGENTS.md` instead, and the place the house rules live.
+
 This repo is one tool: a generalized, agent-drivable implementation of IPRO
 (Iterative Protein Redesign and Optimization).
 
 - **Redesigning a protein toward a stated goal** — changing specificity,
   reshaping a channel or pore, improving interface affinity, tuning catalytic
   activity, inserting or deleting residues, or producing a mutant sequence from
-  a structure: **read `SKILL.md` first.** It covers choosing the goal, writing
+  a structure: **read `.claude/skills/ipro-agent/SKILL.md` first.** It covers choosing the goal, writing
   the spec, encoding the user's position/residue constraints into the MILP,
   running the loop, and the degraded modes that change how a result must be
   reported.

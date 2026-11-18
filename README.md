@@ -42,15 +42,20 @@ python3 -m ipro_agent status runs/smoke
 
 ## For agents
 
-Read [SKILL.md](SKILL.md). It is the operating manual: goal selection, spec
-format, encoding user constraints into the integer program, the degraded modes,
-and a validation checklist to work through before reporting a design.
+Clone the repo, open it with an agent, and ask in plain language — "redesign
+this thioesterase to prefer C12 over C14, you may change residues 110, 113 and
+117" — and the skill at [.claude/skills/ipro-agent/SKILL.md](.claude/skills/ipro-agent/SKILL.md) loads itself from its description.
+There is no setup step for the agent.
+
+To read it yourself, it is the operating manual: goal selection, spec format,
+encoding user constraints into the integer program, the degraded modes, and a
+validation checklist to work through before reporting a design.
 
 ## Documentation
 
 | File | Contents |
 |---|---|
-| [SKILL.md](SKILL.md) | how an agent drives this tool |
+| [.claude/skills/ipro-agent/SKILL.md](.claude/skills/ipro-agent/SKILL.md) | how an agent drives this tool (auto-loaded) |
 | [docs/DESIGN.md](docs/DESIGN.md) | every capability traced to its paper and equation, and every deviation |
 | [docs/MILP.md](docs/MILP.md) | the integer program in full |
 | [docs/INSTALL.md](docs/INSTALL.md) | dependencies and what each one unlocks |

@@ -67,7 +67,7 @@ following holds:
 
 Two of the nine are geometric and computable; the rest require knowledge this
 tool does not have. That is why `positions` is documented as a *proposal* and
-why `SKILL.md` makes the agent walk the user through the list rather than
+why `.claude/skills/ipro-agent/SKILL.md` makes the agent walk the user through the list rather than
 accepting a distance cutoff as the answer. Note also that the sorting metric
 itself changed between rounds in that paper (rounds 1–2 used a different
 distance definition from rounds 3–4), so even the computable part is a choice,
@@ -561,7 +561,7 @@ free source still unread.
 7. Chowdhury, Grisewood, Boorla, Yan, Pfleger, Maranas. "IPRO+/−: computational protein design tool allowing for insertions and deletions." *Structure* **28**(12):1344–1357.e4 (2020). doi:10.1016/j.str.2020.08.003.
 8. Protein-InDelMaker. github.com/maranasgroup/Protein-InDelMaker.
 9. Cornell et al. "A second generation force field…" *JACS* **117**:5179–5197 (1995) — the LJ parameters.
-10. lucidfrontier45/autodock-vina-agent — the skills-packaging pattern this repo's `SKILL.md` and `AGENTS.md` follow.
+10. lucidfrontier45/autodock-vina-agent — the skills-packaging pattern this repo follows. Its skills live under `.agents/skills/<name>/SKILL.md`; this repo uses `.claude/skills/<name>/SKILL.md` so the user's own tooling auto-discovers it, and keeps a root `SKILL.md` stub so the original convention still resolves.
 
 ### Licensing
 

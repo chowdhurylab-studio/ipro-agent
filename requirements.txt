@@ -1,0 +1,17 @@
+# Required. Versions are lower bounds; the right-hand column is what this repo
+# was actually tested against, which is not the same claim.
+numpy>=1.24          # tested with 1.26.4
+biopython>=1.81      # tested with 1.83
+pyyaml>=6.0          # tested with 6.0.1
+
+# Optional, each resolved at run time with a documented fallback. See
+# docs/INSTALL.md for what every one of them buys you, and run
+# `python3 scripts/doctor.py` to see what resolved on your machine.
+#
+#   PyMOL            conda install -c conda-forge pymol-open-source
+#                    Needed for rotamers and mutagenesis -- effectively required.
+#                    May live in its own env; set IPRO_PYMOL_PYTHON to point at it.
+#   PyRosetta        free academic licence; unlocks relaxation and `mode: full`
+#   AutoDock Vina    a binary on PATH; unlocks global docking
+#   a MILP solver    pulp[cbc], or glpsol/cbc on PATH. Without one the fallback
+#                    is a heuristic that does NOT prove optimality.
