@@ -30,9 +30,19 @@ ensemble of the best designs.
 
 ## Quick start
 
-**One install step, and it is not optional.** Rotamers come only from PyMOL's
-mutagenesis wizard, and `pymol-open-source` is conda-only — so `pip install`
-alone cannot give you a working design pipeline:
+**One command, if you just want it working:**
+
+```bash
+bash scripts/bootstrap.sh
+```
+
+That creates the environment, reports what resolved, runs the test suite and the
+shipped example, and prints the exact commands and MCP config with your own
+paths filled in. Safe to re-run; deletes nothing.
+
+By hand instead — and the install step is **not optional**, because rotamers
+come only from PyMOL's mutagenesis wizard and `pymol-open-source` is conda-only,
+so `pip install` alone cannot give you a working design pipeline:
 
 ```bash
 conda env create -f environment.yml && conda activate ipro-agent
@@ -152,6 +162,7 @@ not resolve. `ipro_setup` says so in its result.
 | [docs/MILP.md](docs/MILP.md) | the integer program in full |
 | [docs/INSTALL.md](docs/INSTALL.md) | dependencies and what each one unlocks |
 | [examples/ompf_pore/](examples/ompf_pore/) | worked case, with an honest `EXPECTED.md` |
+| [docs/HANDOFF.md](docs/HANDOFF.md) | passing this to a labmate, a student or your future self |
 
 ## Dependencies
 

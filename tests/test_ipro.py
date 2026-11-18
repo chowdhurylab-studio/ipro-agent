@@ -3751,14 +3751,21 @@ def test_regression_a_pip_installed_copy_can_reach_the_pymol_helpers():
         assert path.parent.parent.name == "ipro_agent", path
 
     # The declared package list must carry it, or the wheel drops it silently.
-    import tomllib
-
-    cfg = tomllib.loads((REPO / "pyproject.toml").read_text())
-    assert "ipro_agent.pymol_helpers" in cfg["tool"]["setuptools"]["packages"]
-    # ... and the metadata must not have lost the dependencies to a sub-table.
-    assert cfg["project"]["dependencies"], "dependencies went missing from [project]"
-    assert cfg["project"]["license"] == "MIT"
-    assert set(cfg["project"]["urls"]) >= {"Repository"}
+    # Checked as text rather than with tomllib, which is 3.11+ while this
+    # package declares requires-python >=3.10 -- the import alone used to fail
+    # this test on the very floor the metadata promises.
+    cfg = (REPO / "pyproject.toml").read_text()
+    assert '"ipro_agent.pymol_helpers"' in cfg, "the subpackage must be declared"
+    # ... and the metadata must not have lost the dependencies to a sub-table,
+    # which is what happens if a [project.*] sub-table is opened above them.
+    deps_at = cfg.index("dependencies = [")
+    urls_at = cfg.index("[project.urls]")
+    assert deps_at < urls_at, (
+        "[project.urls] is above `dependencies`, so TOML makes dependencies a "
+        "key of urls and the package declares none"
+    )
+    assert 'license = "MIT"' in cfg
+    assert "Repository = " in cfg
 
 
 def test_regression_doctor_separates_can_run_from_can_design():

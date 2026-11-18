@@ -26,7 +26,10 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
   `docs/DESIGN.md` maps each capability to the paper and equation it came from
   and lists every deviation; `docs/MILP.md` gives the formulation in full.
 
-- **Installing dependencies**: `docs/INSTALL.md`.
+- **Installing dependencies**: `bash scripts/bootstrap.sh` does the whole
+  thing in one command; `docs/INSTALL.md` explains what each one unlocks.
+
+- **Handing this to someone else**: `docs/HANDOFF.md`.
 
 - **Driving this from another agent, without cloning it**: there is an MCP
   server (`python3 -m ipro_agent.mcp_server`, or the `ipro-agent-mcp` console
