@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 # optional dependencies are separately licensed (PyRosetta needs its own), and
 # refs/ is git-ignored rather than redistributed -- see LICENSE and README.
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE.md"]
 authors = [{ name = "Supantha Dey" }]
 keywords = [
     "protein-design",

@@ -188,7 +188,7 @@ list with DOIs, chiefly:
 
 ## Licence
 
-**MIT** — see [`LICENSE`](LICENSE).
+**MIT** — see [`LICENSE`](LICENSE), with the scope spelled out in [`NOTICE.md`](NOTICE.md).
 
 That covers *this implementation only*: the code, tests and documentation
 written here. Three things in this tree are deliberately **not** covered, and
