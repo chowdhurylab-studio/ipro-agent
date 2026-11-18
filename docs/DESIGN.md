@@ -604,8 +604,51 @@ position string like `"115"` parsing as chain 1 residue 15, and PyMOL's
 `do_select` deleting the loaded object for insertion-coded positions.
 
 Each has a regression test in `tests/test_ipro.py` named
-`test_regression_*`. The suite is 39 tests.
+`test_regression_*`.
 
 **Consequence for anyone comparing runs:** results from a checkout before these
 fixes are not trustworthy, particularly any that reported small residues at
 buried positions.
+
+### 7b. Second independent review
+
+A second review was run over the parts the first did not reach -- the loop's
+state handling, the geometry builders, and the file writers -- with
+instructions to *execute* rather than read. Fourteen more defects were
+confirmed, in the same family: all ran cleanly and returned a plausible wrong
+answer.
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | The carbonyl O of an inserted residue was placed at a fixed `N-CA-C-O` dihedral of 180° | It must be **psi ± 180**, since O(i) is anti to N(i+1). Any N-terminal insertion, or a C-terminal insertion of two or more residues at the default psi, put O(i) **0.871 Å** from N(i+1) (native 1CRN: 2.299 Å) with an O-C-N angle of 39.6° instead of ~123°. The structure looked like a protein and scored like nonsense. Appending also left the previous residue's O at its crystal direction (O–N 1.942 Å) and left a stale `OXT` in the position the new nitrogen needs. |
+| 2 | `_tables_for` built its template from the input `Structure` objects, ignoring `_poses` | After the first redock the MILP kept optimizing against the partner position the docking step had abandoned. Divergence grew from 0.005 to **6.51 kcal/mol** over six iterations. The build and the post-redock refresh now share one `_template_for`, so they cannot drift apart again. |
+| 3 | `_refresh_self_energies` recomputed only the interaction term | It silently dropped the `reference_energies` and `strain_weight` contributions `build_tables` had added, so identities were ranked on one scale before the first redock and another after it. Measured: a TRP self energy moving **+5.5 kcal/mol** with the partner unmoved. Refresh and a full rebuild now agree to 0. |
+| 4 | `_rebase_choice` read the old rotamer index out of the **new** table | Exactly the mistake its own docstring warned of. A current choice of TRP came back as SER with no energy test, and those indices become `require` pins, so the remainder of the run was pinned to a residue nothing had chosen. It also ignored the restraint vetoes, so a pin could make the next program infeasible — which the loop reports as "design space enumerated", a silent early stop with a plausible message. The loop now carries identities, not indices. |
+| 5 | A pore slice admitted every atom within a slab, then gave those outside their own radius an in-plane radius of **zero** | A radius-0 obstacle still blocks an inscribed circle, so a carbon 2.5 Å off-plane cut a true 4.300 Å lumen to **2.164 Å** and moved the reported bottleneck. Each slice is now a true sphere–plane cross-section and the undocumented `slab` parameter is gone. |
+| 6 | `write_complex` masked residue numbers with `% 10000` | `-1 % 10000` is 9999 in Python, so an indel-created `A-1` was written as residue 9999 and read back at the wrong end of the chain. Negative numbers now write as themselves; a number that genuinely cannot fit the column is reported instead of silently wrapped. |
+| 7 | The free-chain-id list was built once and never pruned as partners kept their own ids | A partner on chain B and another remapped from chain A both became B: **two molecules merged into one**, with only one remap noted. |
+| 8 | `combine` required every assembly to offer an identical rotamer list | But each assembly prunes against its own partners, so a rotamer clashing with one assembly's partner aborted the whole run as an "internal inconsistency" — in exactly the case assemblies exist for, where clashing with the *anti-target* is the point. On a two-assembly specificity run the previous code raised `ValueError` and produced nothing. The surviving sets are now unioned and every assembly is rebuilt over that common set with pruning off, so one index means one conformer everywhere and the per-assembly self energies carry the difference. |
+| 9 | The fixed-atom index kept whichever structure came first | A partner reusing the design molecule's chain id made `A16:CA` resolve to a molecule 50 Å away, and every veto derived from it was wrong. A restraint cannot name a molecule, so this is ambiguity in the input: it is now **refused** with an explanation rather than resolved by ordering. |
+| 10 | The merged interaction map used `dict.update` | A molecule appearing in two assemblies kept only the last value (per-assembly 3167.8 / 5073.3 → scored 5073.3), so the result depended on assembly order while `merged.total` summed both. Now accumulated, weighted, so the two agree. |
+| 11 | `check_restraints` sent a one-atom `fix`/`tether` into `dihedral(*coords)` | `ipro-agent validate` reported a perfectly valid backbone `fix` as a problem. (`plan_restraints` handled it correctly, so the two disagreed.) |
+| 12 | The net docking pose was recovered by fitting start to finish (Kabsch) | A rotation about the axis of a one- or two-atom or collinear body moves none of its atoms, so no fit can see it: the fitted atoms came back exact while anything off that axis — hydrogens, which the scoring set drops — was placed by whichever spin the SVD produced (median 1.1 Å, max 5.0 Å). `redock` now **composes** its moves instead, which is exact for any body; `Pose.then` replaced a re-fit in the loop that was losing 0.997 Å; and where only coordinates exist (a docking program's output) the fit returns the zero-twist rotation and says that it did. |
+| 13 | `_design_pdb` was not in the per-iteration snapshot | A rejected perturbation restored the `Structure` but not the file, so scoring read the restored coordinates while the written PDB and Vina read the rejected ones (0.070 Å apart at A16). The early `break` on an exhausted design space also left the backbone perturbed, so the final report described a backbone no iteration had accepted. |
+| 14 | A design position's label was a lossy encoding of (chain, number, icode) | `1:115` became the text `"1115"` and re-parsed as **chain A residue 1115**, so the mutation was applied to a different residue — one that may well exist, so nothing downstream noticed. The label now round-trips for every spelling, and any future lossy label raises instead of mutating. Worse, `_write_design` only *noted* a failed mutation and still wrote the PDB, which carries a `REMARK` naming the design and its energy: the file claimed a mutation it did not contain. A failed or unverifiable mutation now suppresses the structure. |
+
+Minor, fixed alongside: `_PSI_MOVES` omitted `HXT`, so psi stretched the
+C-terminal O–H bond from 0.954 to 0.983 Å; `choices_for` returned `{}` in the
+single-assembly case; an assembly name containing `::` was accepted and
+silently dropped that assembly's rotamers; and `stop_after_accepted` ended a
+run without adding a note, so the report showed "3/8 iterations" with no
+reason given.
+
+Reported **clean** by this review: identity-coupling completeness and
+constraint scoping, `split_vpos` on `A-1` and `A115B`, the pore `window`
+semantics and centre-offset re-enforcement, deleting a design position,
+`_sort_chain`, `A0`/`A-1` parsing, the phi/psi moving sets, the annealing
+endpoints, and `net_interaction`'s pair counting. One item is **unverified**:
+whether PyMOL accepts `/prot//A/-1` for a negative residue number
+(`scripts/harvest_rotamers.py`, `scripts/apply_design.py` pass it unescaped) —
+the reviewer had no PyMOL available.
+
+Each of the fourteen has a regression test. The suite is **93 tests**.

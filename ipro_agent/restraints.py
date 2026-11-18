@@ -118,8 +118,18 @@ class _Resolved:
 
 
 def _fixed_atom_index(structures: Iterable[Structure]) -> dict[tuple, np.ndarray]:
-    """Map ``(chain, number, icode, atom name)`` to a coordinate."""
+    """Map ``(chain, number, icode, atom name)`` to a coordinate.
+
+    A restraint names an atom by residue and atom name only -- there is no way
+    to say *which molecule* -- so if a partner reuses the design molecule's
+    chain id the reference is genuinely ambiguous. This used to keep whichever
+    structure came first, so ``A16:CA`` could silently be measured on a
+    molecule 50 A from the one the user meant, and every veto derived from it
+    was wrong. It now refuses: ambiguity in the input is not something to
+    resolve by ordering.
+    """
     out: dict[tuple, np.ndarray] = {}
+    clashes: set[tuple] = set()
     for st in structures:
         if st is None:
             continue
@@ -127,7 +137,24 @@ def _fixed_atom_index(structures: Iterable[Structure]) -> dict[tuple, np.ndarray
             ref = st.ref(res)
             for at in res:
                 key = (ref.chain, ref.number, ref.insertion_code, at.get_name().strip().upper())
-                out.setdefault(key, np.asarray(at.coord, dtype=float))
+                coord = np.asarray(at.coord, dtype=float)
+                if key in out:
+                    if not np.allclose(out[key], coord, atol=1e-6):
+                        clashes.add(key)
+                    continue
+                out[key] = coord
+    if clashes:
+        shown = ", ".join(
+            f"{c}{n}{i}:{a}" for c, n, i, a in sorted(clashes, key=str)[:6]
+        )
+        raise RestraintError(
+            f"{len(clashes)} atom reference(s) are ambiguous because more than one "
+            f"molecule uses the same chain id and residue number: {shown}"
+            + (" ..." if len(clashes) > 6 else "")
+            + ". A restraint names an atom by chain, residue and atom name only, "
+            "so it cannot say which molecule is meant. Give the partner molecules "
+            "distinct chain ids (which the output PDB needs anyway) and re-run."
+        )
     return out
 
 
@@ -263,6 +290,17 @@ def check_restraints(
             )
             continue
         if not moving:
+            if len(coords) == 1:
+                # A fix or tether on an atom no design position can move. It
+                # cannot be violated: the atom is part of the fixed template,
+                # so its displacement is identically zero. Running it through
+                # the multi-atom measurement reported a perfectly valid
+                # backbone `fix` as a problem and made `validate` fail.
+                observations.append(
+                    f"{label}: {r.refs[0]} is held fixed and no design position "
+                    f"can move it, so the restraint is satisfied by construction"
+                )
+                continue
             try:
                 value = (
                     distance(coords[0], coords[1])
@@ -361,6 +399,9 @@ def _plan_one(
     def measure(coords: list[np.ndarray]) -> float:
         if r.kind is RestraintKind.DISTANCE:
             return distance(coords[0], coords[1])
+        if len(coords) == 1:
+            # A fix/tether whose atom nothing can move: displacement is zero.
+            return 0.0
         return dihedral(*coords)
 
     def within(value: float) -> bool:

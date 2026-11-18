@@ -311,14 +311,21 @@ def _extend_c_terminus(structure, chain_id: str, count: int, phi: float, psi: fl
                 f"cannot append {chain_id}{number}: that number is already used. "
                 "An indel must never renumber existing residues."
             )
-        # N of the new residue is set by the previous residue's psi.
+        # N of the new residue is set by the previous residue's psi. Note what
+        # that means: the residue we are extending past had NO psi (it was the
+        # terminus), so appending *chooses* one for it. Its carbonyl O was
+        # placed from the crystal geometry and is now inconsistent with the
+        # nitrogen we are about to create, so it is re-placed below.
         n = place_atom(bb["N"], bb["CA"], bb["C"], B_C_N, A_CA_C_N, psi)
         # CA follows from the trans peptide bond.
         ca = place_atom(bb["CA"], bb["C"], n, B_N_CA, A_C_N_CA, OMEGA)
         # C follows from the new residue's phi.
         c = place_atom(bb["C"], n, ca, B_CA_C, A_N_CA_C, phi)
-        # O is placed trans to N across the CA-C bond.
-        o = place_atom(n, ca, c, B_C_O, A_CA_C_O, 180.0)
+        # O(i) is anti to N(i+1) across the CA-C bond, so the N-CA-C-O
+        # dihedral is psi + 180. A constant 180 lands it on top of N(i+1).
+        o = place_atom(n, ca, c, B_C_O, A_CA_C_O, psi + 180.0)
+        _replace_carbonyl_o(last, bb, psi)
+        _drop_terminal_oxygen(last)
         chain.add(_new_residue(chain, number, "GLY", {"N": n, "CA": ca, "C": c, "O": o}))
         added.append(f"{chain_id}{number}")
     return added
@@ -351,7 +358,10 @@ def _extend_n_terminus(structure, chain_id: str, count: int, phi: float, psi: fl
         c = place_atom(bb["C"], bb["CA"], bb["N"], B_C_N, A_C_N_CA, phi)
         ca = place_atom(bb["CA"], bb["N"], c, B_CA_C, A_CA_C_N, OMEGA)
         n = place_atom(bb["N"], c, ca, B_N_CA, A_N_CA_C, psi)
-        o = place_atom(n, ca, c, B_C_O, A_CA_C_O, 180.0)
+        # Anti to the nitrogen it bonds to -- see _extend_c_terminus. The
+        # existing first residue needs no repair: prepending sets ITS phi,
+        # which positions the atom we just built and moves nothing of its own.
+        o = place_atom(n, ca, c, B_C_O, A_CA_C_O, psi + 180.0)
         new = _new_residue(chain, number, "GLY", {"N": n, "CA": ca, "C": c, "O": o})
         chain.add(new)
         added.append(f"{chain_id}{number}")
@@ -361,6 +371,33 @@ def _extend_n_terminus(structure, chain_id: str, count: int, phi: float, psi: fl
         # one residue is prepended.
         _sort_chain(chain)
     return added
+
+
+def _replace_carbonyl_o(res, bb: dict[str, np.ndarray], psi: float) -> None:
+    """Re-place a residue's carbonyl O once its psi has been chosen.
+
+    Only needed when appending: the old terminus had no psi, so the O it
+    carries points wherever the crystal left it. Left alone it sits ~1.9 A
+    from the nitrogen of the appended residue.
+    """
+    for atom in res:
+        if atom.get_name().strip().upper() == "O":
+            atom.set_coord(
+                place_atom(bb["N"], bb["CA"], bb["C"], B_C_O, A_CA_C_O, psi + 180.0)
+            )
+
+
+def _drop_terminal_oxygen(res) -> None:
+    """Remove OXT from a residue that has stopped being the C-terminus.
+
+    OXT is the second carboxylate oxygen of a free C-terminus. After an
+    append the residue is mid-chain, so the atom is not merely redundant --
+    it occupies the position the new nitrogen needs.
+    """
+    for name in ("OXT", "HXT"):
+        for atom in list(res):
+            if atom.get_name().strip().upper() == name:
+                res.detach_child(atom.get_id())
 
 
 def _sort_chain(chain) -> None:

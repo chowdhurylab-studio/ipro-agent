@@ -205,6 +205,13 @@ Three things to understand before reaching for this:
 Every molecule must belong to an assembly — one left out would be silently
 unscored, so the spec is rejected instead.
 
+All assemblies share **one** rotamer set, so a rotamer index means the same
+conformer everywhere and identity coupling is meaningful. Each assembly still
+prunes against its own partners first; the surviving sets are then unioned, so
+a rotamer that clashes with the *anti-target* is kept — that clash is the
+point of the anti-target, not a reason to discard the rotamer. The run logs
+how many rotamers ended up shared.
+
 ### 2a2. Channel goals: set a size, and check the positions line the bottleneck
 
 `reshape_channel` can optimize the **measured** bottleneck, and apply
@@ -238,6 +245,21 @@ Two things to check, both of which will otherwise waste a long run:
 The number is an inscribed **circle**, so for a slit-like pore it reads closer to
 the minor axis than to the major axis a fitted ellipse would give. Comparable
 between runs of this tool; not the same quantity as a paper's.
+
+### 2a3. Give every molecule distinct chain ids
+
+Not cosmetic. A restraint names an atom as `A10:OG` — chain, residue, atom —
+and has no way to say *which molecule*. If a partner reuses the design
+molecule's chain id, `A16:CA` is genuinely ambiguous, so the run **refuses**
+with an explanation rather than measuring whichever molecule happened to load
+first. The output PDB needs distinct ids too, and will rename a colliding
+partner chain (reported in `notes`).
+
+If you hit this, renumber the partner's chain in its own file before running;
+do not work around it by changing the restraint.
+
+A numeric chain id must keep its separator: write `1:115`, never `1115`. With
+no separator the chain defaults to A and `1115` means residue 1115.
 
 ### 2b. Add restraints when geometry must be preserved
 
@@ -414,13 +436,16 @@ The run directory has a fixed layout:
 
 | Path | What it holds |
 |---|---|
-| `best/design.pdb` | **the designed coordinates** — the complex that produced the score, with the chosen rotamers and the partners at their current placement. One file per assembly if there are several. |
+| `best/design.pdb` | **the designed coordinates** — the complex that produced the score, with the chosen rotamers and the partners at their current placement. One file per assembly if there are several. **Absent** if any requested mutation could not be applied or verified: the file carries a `REMARK` naming the design and its energy, so it is never written with a native residue standing in. A `notes` entry says which positions failed. |
 | `best/design.json` | the design: identities, mutations as `D115W`, full sequence, score breakdown |
 | `ensemble/ensemble.json` | the best N designs, not just the single best |
 | `state.json` | status, best score, mode |
 | `iterations.jsonl` | one record per iteration (append-only; do not bulk-read) |
 | `logs/iter*.lp` | the MILP as actually solved, for the first few iterations |
 | `spec.json` | the resolved spec, as actually run |
+
+If `best/design.pdb` is missing, say so and give the reason from `notes` —
+do not report the sequence as though the structure backed it up.
 
 In your report, give the user: the **mutation string**, the **score change**,
 the **mode** the loop ran in, and **every note** from `notes`. The notes are

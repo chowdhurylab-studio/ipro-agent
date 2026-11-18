@@ -51,8 +51,10 @@ log = logging.getLogger(__name__)
 #: before it).
 _PHI_FIXED = {"N", "H", "H1", "H2", "H3", "HN"}
 #: Atoms of a residue that move when psi rotates. C is on the axis; the side
-#: chain hangs off CA, which is before it.
-_PSI_MOVES = {"O", "OXT", "OT1", "OT2"}
+#: chain hangs off CA, which is before it. HXT/HO belong here too: they are
+#: bonded to OXT, so leaving them out stretched the O-H bond from 0.954 to
+#: 0.983 A every time psi moved on a C-terminal residue.
+_PSI_MOVES = {"O", "OXT", "OT1", "OT2", "HXT"}
 
 
 @dataclass

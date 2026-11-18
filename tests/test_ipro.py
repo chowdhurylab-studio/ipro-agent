@@ -2004,3 +2004,357 @@ def test_terminal_insertion_runs_end_to_end_and_the_residues_get_designed():
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the second independent review
+#
+# Every one of these was a defect that ran cleanly and returned a plausible
+# wrong answer. Each test states the defect and the measurement that exposed
+# it, so a reintroduction fails here rather than in someone's results.
+# ---------------------------------------------------------------------------
+
+
+def test_regression_inserted_carbonyl_follows_psi():
+    """The carbonyl O was placed at a fixed N-CA-C-O dihedral of 180 deg instead
+    of psi+180, putting O(i) 0.871 A from N(i+1) (native 1CRN: 2.299 A) with an
+    O-C-N angle of 39.6 deg instead of ~123. The structure looked like a protein
+    and scored like nonsense. Appending also left the old terminal OXT in the
+    position the new nitrogen needs."""
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import apply_terminal, classify, measure_angle
+    from ipro_agent.structure import Structure
+
+    def xyz(res, name):
+        return np.array([a.coord for a in res if a.get_name().strip() == name][0])
+
+    def has(res, name):
+        return any(a.get_name().strip() == name for a in res)
+
+    for end, after, n in (("N", 0, 1), ("N", 0, 3), ("C", 46, 1), ("C", 46, 3)):
+        st = Structure.load(CRN)
+        apply_terminal(
+            st,
+            classify(st, [IndelSpec(kind="insert", chain="A", after=after, length=n)]).terminal,
+        )
+        rs = list(st.residues("A"))
+        for i in range(len(rs) - 1):
+            a, b = rs[i], rs[i + 1]
+            if not (has(a, "O") and has(a, "C") and has(b, "N")):
+                continue
+            o_n = float(np.linalg.norm(xyz(a, "O") - xyz(b, "N")))
+            ang = measure_angle(xyz(a, "O"), xyz(a, "C"), xyz(b, "N"))
+            pep = float(np.linalg.norm(xyz(a, "C") - xyz(b, "N")))
+            assert o_n > 2.0, f"{end}+{n}: O({a.id[1]})..N = {o_n:.3f} A"
+            assert ang > 100.0, f"{end}+{n}: O-C-N = {ang:.1f} deg"
+            assert abs(pep - 1.329) < 0.05, f"{end}+{n}: peptide bond {pep:.3f} A"
+        # no residue may keep a C-terminal OXT unless it is the last one
+        for r in rs[:-1]:
+            assert not has(r, "OXT"), f"residue {r.id[1]} kept a stale OXT"
+
+
+def test_regression_position_label_round_trips():
+    """`label` dropped the separator for a numeric chain id, so `1:115` became
+    `"1115"` and re-parsed as chain A residue 1115. The mutation was then applied
+    to a different residue -- one that may well exist, so nothing noticed."""
+    for raw in ("1:115", "A115", "A115B", "A-1", "B:7", "1:7B", "115"):
+        p = DesignPosition.parse(raw)
+        assert DesignPosition.parse(p.label).key == p.key, raw
+
+
+def test_regression_tables_see_the_current_partner_pose():
+    """`_tables_for` built its template from the input Structures, so after a
+    redock the MILP kept optimizing against the partner position the docking step
+    had already abandoned (6.51 kcal/mol divergence over 6 iterations). And
+    `_refresh_self_energies` recomputed only the interaction term, dropping the
+    reference and strain contributions `build_tables` had added."""
+    import tempfile as _tf
+
+    from ipro_agent.docking import Pose
+    from ipro_agent.loop import IPROLoop
+    from ipro_agent.structure import Structure
+
+    work = Path(_tf.mkdtemp())
+    lig = work / "lig.pdb"
+    st = Structure.load(CRN)
+    res = [r for r in st.residues("A") if int(r.id[1]) == 16][0]
+    ca = np.array([a.coord for a in res if a.get_name().strip() == "CA"][0])
+    lig.write_text(
+        "".join(
+            f"HETATM{i:5d}  C{i}  LIG L   1    "
+            f"{ca[0]+dx:8.3f}{ca[1]+dy:8.3f}{ca[2]:8.3f}  1.00  0.00           C\n"
+            for i, (dx, dy) in enumerate([(6.0, 0.0), (7.5, 0.0), (6.7, 1.4)], start=1)
+        )
+        + "END\n"
+    )
+    base = {
+        "name": "pose-probe",
+        "goal_statement": "bind the ligand more tightly",
+        "goal": "bind_tighter",
+        "molecules": [
+            {"name": "prot", "path": str(CRN), "role": "design", "chains": ["A"]},
+            {"name": "lig", "path": str(lig), "role": "target",
+             "kind": "ligand", "redock": True},
+        ],
+        "positions": [
+            {"position": "A16", "allowed": ["ALA", "SER", "TRP"]},
+            {"position": "A17", "allowed": ["ALA", "SER", "TRP"]},
+        ],
+    }
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+
+    loop = IPROLoop(DesignSpec.from_dict(base), run_dir=Path(_tf.mkdtemp()))
+    loop.prepare()
+    before = dict(loop.build_combined().tables.self_energy)
+    asm = loop._assemblies[0].name
+    loop._poses[(asm, "lig")] = Pose(
+        translation=np.array([20.0, 0.0, 0.0]), rotation=np.eye(3)
+    )
+    after = loop.build_combined()
+    moved = max(
+        abs(after.tables.self_energy[k] - before[k])
+        for k in before if k in after.tables.self_energy
+    )
+    assert moved > 1e-6, "moving a partner 20 A changed no self energy"
+
+    # a refresh must agree with a full rebuild, term for term
+    fresh = loop.build_combined()
+    loop._refresh_self_energies(fresh)
+    drift = max(
+        abs(fresh.tables.self_energy[k] - after.tables.self_energy[k])
+        for k in after.tables.self_energy
+    )
+    assert drift < 1e-9, f"refresh and rebuild disagree by {drift}"
+
+    # with a reference-energy table the refresh used to lose it entirely
+    spec2 = DesignSpec.from_dict(
+        {**base, "goal_options": {"reference_energies": {"TRP": -5.5, "SER": -1.0}}}
+    )
+    l2 = IPROLoop(spec2, run_dir=Path(_tf.mkdtemp()))
+    l2.prepare()
+    cb = l2.build_combined()
+    kept = dict(cb.tables.self_energy)
+    l2._refresh_self_energies(cb)
+    lost = max(abs(cb.tables.self_energy[k] - kept[k]) for k in kept)
+    assert lost < 1e-9, f"refresh dropped reference energies ({lost} kcal/mol)"
+
+
+def test_regression_rebase_carries_the_identity_not_the_index():
+    """`_rebase_choice` read the old index out of the NEW table -- the exact
+    mistake its own docstring warned about. A current choice of TRP came back as
+    SER with no energy test, and those indices become `require` pins, so the rest
+    of the run was pinned to a residue nothing had chosen. It also ignored the
+    restraint vetoes, so a pin could make the next program infeasible, which the
+    loop reports as "design space enumerated" -- a silent early stop."""
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.loop import IPROLoop
+    from ipro_agent.restraints import RestraintPlan
+
+    def rot(aa):
+        return Rotamer(position="A16", aa=aa, state=1, atoms=AtomSet())
+
+    old = EnergyTables(positions=["A16"], rotamers={"A16": [rot("SER"), rot("TRP")]})
+    new = EnergyTables(positions=["A16"], rotamers={"A16": [rot("TRP"), rot("SER")]})
+    new.self_energy = {("A16", 0): -3.0, ("A16", 1): -1.0}
+
+    loop = IPROLoop.__new__(IPROLoop)
+    loop._native_v = {"A16": "SER"}
+    ids = IPROLoop._identities({"A16": 1}, old)
+    assert ids == {"A16": "TRP"}
+    got = loop._rebase_choice(ids, new, RestraintPlan())
+    assert new.rotamers["A16"][got["A16"]].aa == "TRP"
+
+    veto = RestraintPlan()
+    veto.rotamer_vetoes = {("A16", 0)}
+    assert loop._rebase_choice(ids, new, veto)["A16"] != 0, "pinned a vetoed rotamer"
+
+
+def test_regression_pore_slice_is_a_true_cross_section():
+    """Atoms were admitted to a slice if they lay within a slab, then given an
+    in-plane radius of sqrt(max(r^2 - dz^2, 0)) -- zero for the ones outside
+    their own radius. A radius-0 obstacle still blocks an inscribed circle, so a
+    carbon 2.5 A off-plane cut a true 4.300 A lumen to 2.164 A and moved the
+    reported bottleneck."""
+    from ipro_agent.pore import pore_profile
+
+    ang = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+    rings = [
+        np.stack([6.0 * np.cos(ang), 6.0 * np.sin(ang), np.full(12, z)], axis=1)
+        for z in np.arange(-4.0, 4.01, 1.0)
+    ]
+    cyl = np.vstack(rings)
+    names = ["C"] * len(cyl)
+    o, d = np.zeros(3), np.array([0.0, 0.0, 1.0])
+
+    def lumen(pts, nm):
+        pr = pore_profile(pts, nm, o, d, spacing=0.5, max_centre_offset=4.0)
+        return max(r for z, r in zip(pr.positions, pr.radii) if abs(z - 4.0) < 0.26)
+
+    clean = lumen(cyl, names)
+    assert abs(clean - 4.3) < 1e-6, f"clean cylinder measured {clean:.3f}, want 4.300"
+
+    off = lumen(np.vstack([cyl, [[0.0, 0.0, 2.5]]]), names + ["C"])
+    assert abs(off - clean) < 1e-9, f"an atom 2.5 A off-plane changed the lumen to {off:.3f}"
+
+    on = lumen(np.vstack([cyl, [[0.0, 0.0, 1.0]]]), names + ["C"])
+    assert on < clean - 1e-6, "an atom that does reach the plane must still obstruct it"
+
+
+def test_regression_pdb_writer_keeps_negative_residue_numbers():
+    """`int(resseq) % 10000` mapped -1 to 9999, so an indel-created A-1 was
+    written as residue 9999 and read back at the wrong end of the chain."""
+    import tempfile as _tf
+
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import apply_terminal, classify
+    from ipro_agent.output import write_complex
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    apply_terminal(
+        st, classify(st, [IndelSpec(kind="insert", chain="A", after=0, length=2)]).terminal
+    )
+    out = Path(_tf.mkdtemp()) / "indel.pdb"
+    write_complex(out, st, {})
+    cas = [
+        int(ln[22:26])
+        for ln in out.read_text().splitlines()
+        if ln.startswith(("ATOM", "HETATM")) and ln[12:16].strip() == "CA"
+    ]
+    assert cas[:3] == [-1, 0, 1], f"first CA residue numbers were {cas[:3]}"
+    assert [int(r.id[1]) for r in list(Structure.load(out).residues("A"))[:3]] == [-1, 0, 1]
+
+
+def test_regression_two_partners_never_share_a_chain_id():
+    """The free-chain list was built once and never pruned as partners kept their
+    own ids, so a partner on chain B and another remapped from A both ended up as
+    B -- two molecules merged into one, with only one remap reported."""
+    import tempfile as _tf
+
+    from ipro_agent.output import write_complex
+    from ipro_agent.structure import Structure
+
+    work = Path(_tf.mkdtemp())
+
+    def mono(chain):
+        p = work / f"lig_{chain}.pdb"
+        p.write_text(
+            f"HETATM    1  C1  LIG {chain}   1       0.000   0.000   0.000"
+            f"  1.00  0.00           C\nEND\n"
+        )
+        return Structure.load(p)
+
+    out = work / "pair.pdb"
+    write_complex(out, Structure.load(CRN), {"L1": mono("B"), "L2": mono("A")})
+    got = Structure.load(out)
+    chains = {c.id for c in got.model for r in c if r.id[0].strip()}
+    assert len(chains) == 2, f"the two ligands landed in chains {chains}"
+
+
+def test_regression_pose_composition_is_exact_for_a_collinear_body():
+    """The net pose was recovered by fitting start to finish, which cannot see a
+    rotation about the axis of a one- or two-atom or collinear body: those atoms
+    do not move under it. Atoms outside the scoring set (hydrogens) were then
+    placed by whatever spin the fit returned -- up to 5 A."""
+    from ipro_agent.docking import Pose, _pose_between
+
+    def rotx(deg):
+        t = math.radians(deg)
+        return np.array(
+            [[1, 0, 0], [0, math.cos(t), -math.sin(t)], [0, math.sin(t), math.cos(t)]]
+        )
+
+    body = np.array([[6.0, 0, 0], [7.5, 0, 0]])           # collinear, along x
+    full = np.vstack([body, [[6.75, 1.1, 0.0]]])          # + an off-axis atom
+    centre = body.mean(axis=0)
+
+    # composition is exact where re-fitting loses the twist
+    p1 = Pose(rotation=rotx(40), translation=np.array([1.0, 0, 0]), centre=centre)
+    p2 = Pose(rotation=rotx(25), translation=np.array([0, 0.5, 0]), centre=centre)
+    twice = p2.apply(p1.apply(full))
+    assert np.abs(p1.then(p2).apply(full) - twice).max() < 1e-9
+
+    # and the degenerate fit now returns zero twist, not an arbitrary spin
+    notes = []
+    fitted = _pose_between(body, p2.apply(p1.apply(body)), centre, notes=notes)
+    assert np.abs(fitted.apply(body) - twice[:2]).max() < 1e-9
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(fitted.rotation) - 1) / 2))))
+    assert ang < 1e-6, f"a collinear fit invented a {ang:.1f} deg rotation"
+    assert notes, "a fit that cannot recover the twist must say so"
+
+
+def test_regression_assemblies_may_prune_differently():
+    """`combine` required every assembly to offer an identical rotamer list, but
+    each assembly prunes against its own partners -- so a rotamer that clashes
+    with one assembly's partner aborted the whole run as an "internal
+    inconsistency". That is exactly the case assemblies exist for: clashing with
+    the anti-target is the point, not a reason to discard a rotamer."""
+    from ipro_agent.assemblies import combine, vpos
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.config import Assembly
+
+    def rot(aa, state):
+        return Rotamer(position="A16", aa=aa, state=state, atoms=AtomSet())
+
+    a = EnergyTables(positions=["A16"], rotamers={"A16": [rot("ALA", 1), rot("TRP", 1)]})
+    b = EnergyTables(positions=["A16"], rotamers={"A16": [rot("ALA", 1)]})
+    asms = [Assembly(name="x", molecules=[]), Assembly(name="y", molecules=[])]
+    try:
+        combine({"x": a, "y": b}, asms)
+        raise AssertionError("combine must still reject genuinely different sets")
+    except ValueError:
+        pass
+    # the loop's job is to never hand it different sets; vpos guards the names
+    try:
+        vpos("bad::name", "A16")
+        raise AssertionError("an assembly name containing '::' must be rejected")
+    except ValueError:
+        pass
+    assert vpos("ok", "A16") == "ok::A16"
+
+
+def test_regression_a_one_atom_fix_is_not_a_dihedral():
+    """`check_restraints` sent a one-atom fix/tether into `dihedral(*coords)`, so
+    `ipro-agent validate` reported a perfectly valid backbone `fix` as a
+    problem."""
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import check_restraints
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    r = Restraint(kind="fix", atoms=["A20:CA"], label="hold_CA")
+    problems, observations = check_restraints([r], st, [], ["A16", "A17"])
+    assert not problems, f"a fixed backbone atom was reported as a problem: {problems}"
+    assert any("hold_CA" in o for o in observations)
+
+
+def test_regression_ambiguous_restraint_atom_is_refused():
+    """The fixed-atom index kept whichever structure came first, so a partner
+    reusing the design molecule's chain id made `A16:CA` resolve to a molecule
+    50 A away -- and every veto derived from it was wrong."""
+    import tempfile as _tf
+
+    from ipro_agent.restraints import RestraintError, _fixed_atom_index
+    from ipro_agent.structure import Structure
+
+    p = Path(_tf.mkdtemp()) / "clash.pdb"
+    p.write_text(
+        "HETATM    1  CA  LIG A  16      50.000  50.000  50.000"
+        "  1.00  0.00           C\nEND\n"
+    )
+    try:
+        _fixed_atom_index([Structure.load(CRN), Structure.load(p)])
+        raise AssertionError("an ambiguous atom reference was resolved silently")
+    except RestraintError as exc:
+        assert "ambiguous" in str(exc)
+
+
+def test_regression_psi_moves_the_terminal_hydroxyl_hydrogen():
+    """HXT is bonded to OXT, so leaving it out of the psi-moving set stretched
+    the O-H bond every time psi moved on a C-terminal residue."""
+    from ipro_agent.perturb import _PHI_FIXED, _PSI_MOVES
+
+    assert "HXT" in _PSI_MOVES
+    assert not (_PHI_FIXED & _PSI_MOVES), "an atom cannot be both phi-fixed and psi-moving"

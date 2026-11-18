@@ -382,10 +382,16 @@ class IPROLoop:
             if getattr(self.goal, "wants_geometry", False):
                 ctx.geometry.update(self._measure_geometry(design_all))
             per[a.name] = ctx
-            # Each partner is scored in its own assembly, so the merged view has
-            # exactly one interaction energy per molecule -- which is what the
-            # goal expects.
-            merged.interaction.update(ctx.interaction)
+            # Usually each partner appears in one assembly, so this is just a
+            # copy. When a molecule appears in SEVERAL assemblies it has one
+            # interaction energy per assembly, and `update` kept whichever came
+            # last -- making the score depend on assembly ordering while
+            # `merged.total` summed them all. Accumulate instead, weighted, so
+            # the per-molecule view agrees with the total.
+            for mol, e in ctx.interaction.items():
+                merged.interaction[mol] = (
+                    merged.interaction.get(mol, 0.0) + weights[a.name] * e
+                )
             merged.design_only += weights[a.name] * ctx.design_only
             merged.total += weights[a.name] * ctx.total
             # The channel is a property of the design molecule, which is shared,
@@ -604,10 +610,21 @@ class IPROLoop:
 
             res = apply_design(self._design_pdb, design_only, picks)
             if res.errors:
-                self.notes.append(
-                    f"some positions could not be written into the structure: "
-                    f"{json.dumps(res.errors)[:200]}"
-                )
+                # Do NOT fall through and write the file. The PDB carries a
+                # REMARK naming the design and its energy, so emitting it with
+                # an unapplied position would publish a structure that is the
+                # native residue under a header claiming the mutation. No
+                # structure is better than a wrong one that looks right.
+                if "design_write_failed" not in self._once:
+                    self._once.add("design_write_failed")
+                    self.notes.append(
+                        f"designed coordinates were NOT written: these positions "
+                        f"could not be applied or verified -- "
+                        f"{json.dumps(res.errors)[:300]}. The sequence and "
+                        f"energies are still reported; the structure is omitted "
+                        f"rather than written with the native residue in place."
+                    )
+                return None
         except Exception as exc:
             if "no_structure_note" not in self._once:
                 self._once.add("no_structure_note")
@@ -784,15 +801,14 @@ class IPROLoop:
                 )
                 for name, res in results.items():
                     # The returned pose is relative to the atoms handed in,
-                    # which already carry the current pose. Re-fit from the
-                    # ORIGINAL coordinates so poses never compound.
-                    base = self._base_atoms[name]
-                    current = self._partner_atoms(a.name, name)
-                    self._poses[(a.name, name)] = _pose_between(
-                        base.coords,
-                        res.pose.apply(current.coords),
-                        base.coords.mean(axis=0),
-                    )
+                    # which already carry the current pose, so it is composed
+                    # with that one to stay relative to the ORIGINAL
+                    # coordinates. This used to re-fit the composed pose from
+                    # coordinates, which threw away exactly what the fit
+                    # cannot recover: for a collinear ligand, the rotation
+                    # about its own axis. Composition is exact.
+                    prior = self._poses.get((a.name, name)) or Pose()
+                    self._poses[(a.name, name)] = prior.then(res.pose)
                     report[f"{a.name}/{name}"] = res.describe()
             else:
                 report.update(self._redock_with_vina(a.name, mobile, chosen, iteration))
@@ -901,7 +917,9 @@ class IPROLoop:
                 "with Meeko so the atom order round-trips."
             )
             return None
-        return _pose_between(base.coords, coords, base.coords.mean(axis=0))
+        return _pose_between(
+            base.coords, coords, base.coords.mean(axis=0), notes=self.notes
+        )
 
     def _refresh_self_energies(self, cb: CombinedTables) -> None:
         """Recompute self energies after the partners have moved.
@@ -917,37 +935,90 @@ class IPROLoop:
         """
         assert self._design_st is not None
         weights = {a.name: a.weight for a in self._assemblies}
-        design_labels = {p.label for p in self.spec.positions}
-        fixed = _atoms_of(self._design_st, design_labels)
         for a in self._assemblies:
-            partners = self._assembly_partner_map(a.name)
-            template = fixed.extend(AtomSet.concat(list(partners.values())))
+            template = self._template_for(a.name)
             w = weights[a.name]
             for v in cb.by_assembly.get(a.name, []):
                 for i, rot in enumerate(cb.tables.rotamers[v]):
-                    cb.tables.self_energy[(v, i)] = w * self.backend.interaction(
-                        rot.atoms, template
-                    )
+                    cb.tables.self_energy[(v, i)] = w * self._self_energy(rot, template)
+
+    def _self_energy(self, rot: Rotamer, template: AtomSet) -> float:
+        """One rotamer's self energy, by the same formula ``build_tables`` uses.
+
+        It has to be the same formula. When the refresh recomputed only the
+        interaction term, every redock silently deleted the strain and
+        reference-energy contributions that the initial build had added, so
+        identities were ranked on one scale before the first redock and
+        another after it -- a sequence could change with no physical cause.
+        """
+        strain_weight, refs = self._self_energy_terms()
+        e = self.backend.interaction(rot.atoms, template)
+        if strain_weight and rot.strain is not None:
+            e += strain_weight * rot.strain
+        return e + refs.get(rot.aa, 0.0)
+
+    def _self_energy_terms(self) -> tuple[float, dict[str, float]]:
+        return (
+            float(self.spec.goal_options.get("strain_weight", 0.0)),
+            self.spec.goal_options.get("reference_energies") or {},
+        )
+
+    def _template_for(self, assembly_name: str) -> AtomSet:
+        """Everything held fixed for one assembly, partners at their CURRENT pose.
+
+        One helper for both the initial table build and the post-redock
+        refresh. When those two computed the template separately, the build
+        read the input ``Structure`` objects and the refresh read ``_poses``,
+        so after the first redock the MILP was still optimizing against a
+        partner position the docking step had abandoned.
+
+        The design structure goes through ``build_template`` so that design
+        side chains are excluded. Partner atoms are added whole and never
+        label-filtered: a partner that reuses the design's chain id must not
+        lose its own side chain to a design-position label match.
+        """
+        assert self._design_st is not None
+        fixed = build_template(
+            [self._design_st], [p.label for p in self.spec.positions]
+        )
+        partners = self._assembly_partner_map(assembly_name)
+        return fixed.extend(AtomSet.concat(list(partners.values())))
 
     # -- measurement without designing -------------------------------------
 
-    def _tables_for(self, assembly_name: str) -> EnergyTables:
-        """Energy tables against one assembly's template."""
+    def _tables_for(
+        self,
+        assembly_name: str,
+        restrict_to: dict[str, set[tuple[str, int]]] | None = None,
+    ) -> EnergyTables:
+        """Energy tables against one assembly's template.
+
+        ``restrict_to`` pins the candidate set to a given list of ``(aa,
+        state)`` per position and switches pruning off, so that every assembly
+        ends up with the *same* rotamers in the same order. See
+        :meth:`build_combined`.
+        """
         assert self._rotamer_cache is not None
-        template = build_template(
-            [self._design_st, *self._asm_partners.get(assembly_name, [])],
-            [p.label for p in self.spec.positions],
-        )
+        template = self._template_for(assembly_name)
+        rots = self._rotamer_cache
+        if restrict_to is not None:
+            rots = {
+                p: [r for r in rots.get(p, []) if (r.aa, r.state) in keep]
+                for p, keep in restrict_to.items()
+            }
         return build_tables(
-            self._rotamer_cache,
+            rots,
             template,
             self.backend,
-            max_self_energy=float(self.spec.goal_options.get("max_self_energy", 50.0)),
+            max_self_energy=(
+                float("inf") if restrict_to is not None
+                else float(self.spec.goal_options.get("max_self_energy", 50.0))
+            ),
             pair_eps=float(self.spec.goal_options.get("pair_eps", 1e-3)),
             energy_cutoff=self.spec.loop.energy_cutoff,
             native=self._native,
-            reference_energies=self.spec.goal_options.get("reference_energies"),
-            strain_weight=float(self.spec.goal_options.get("strain_weight", 0.0)),
+            reference_energies=self._self_energy_terms()[1],
+            strain_weight=self._self_energy_terms()[0],
         )
 
     def build_combined(self) -> CombinedTables:
@@ -960,6 +1031,33 @@ class IPROLoop:
         if self._rotamer_cache is None:
             self.prepare()
         per = {a.name: self._tables_for(a.name) for a in self._assemblies}
+        if len(self._assemblies) > 1:
+            # Each assembly pruned against its OWN partners, so a rotamer that
+            # clashes in one assembly was dropped only there -- and `combine`
+            # then refused the whole problem as internally inconsistent. That
+            # hit exactly the case assemblies exist for: a rotamer that clashes
+            # with the ANTI-target is the point, not a reason to discard it.
+            #
+            # So the surviving sets are unioned and every assembly is rebuilt
+            # over that common set with pruning off. One rotamer list, one
+            # index meaning the same conformer everywhere, per-assembly self
+            # energies carrying the difference between the partners.
+            union: dict[str, set[tuple[str, int]]] = {}
+            for t in per.values():
+                for pos, rl in t.rotamers.items():
+                    union.setdefault(pos, set()).update((r.aa, r.state) for r in rl)
+            dropped = sum(
+                len(self._rotamer_cache.get(p, [])) - len(k) for p, k in union.items()
+            )
+            per = {
+                a.name: self._tables_for(a.name, restrict_to=union)
+                for a in self._assemblies
+            }
+            self.run.log(
+                f"multi-assembly: {sum(len(v) for v in union.values())} rotamers "
+                f"shared across {len(self._assemblies)} assemblies "
+                f"({dropped} pruned in every assembly)"
+            )
         self._combined = combine(per, self._assemblies)
         # Positions are virtual once there are several assemblies, so every
         # lookup keyed by a design-position label needs the mapped form.
@@ -1113,6 +1211,7 @@ class IPROLoop:
         )
 
         current_choice = dict(start_choice)
+        current_aa = self._identities(current_choice, tables)
         current_score = start_score
         current_asm_energy = {k: v.total for k, v in start_per_asm.items()}
         accepted = 0
@@ -1132,9 +1231,14 @@ class IPROLoop:
             snapshot = None
             pert = None
             if self.mode != "fixed-backbone":
+                # _design_pdb belongs in here with _design_st: a rejected
+                # perturbation that restored only the Structure left the file
+                # on disk pointing at the rejected backbone, so scoring read
+                # the restored coordinates while the written PDB and Vina read
+                # the rejected ones.
                 snapshot = (
-                    self._design_st, self._rotamer_cache, cb, tables,
-                    dict(self._native_v), rp, ordered,
+                    self._design_st, self._design_pdb, self._rotamer_cache,
+                    cb, tables, dict(self._native_v), rp, ordered,
                 )
                 try:
                     candidate, pert = self._perturb_once(it)
@@ -1144,8 +1248,8 @@ class IPROLoop:
                     ordered = self._ordered_positions(tables, cb.sequence_positions)
                 except Exception as exc:
                     (
-                        self._design_st, self._rotamer_cache, cb, tables,
-                        self._native_v, rp, ordered,
+                        self._design_st, self._design_pdb, self._rotamer_cache,
+                        cb, tables, self._native_v, rp, ordered,
                     ) = snapshot
                     snapshot = None
                     pert = None
@@ -1161,7 +1265,7 @@ class IPROLoop:
             # other position is pinned to its current identity, so an iteration
             # is a local move rather than a fresh global solve.
             if snapshot is not None:
-                current_choice = self._rebase_choice(current_choice, tables)
+                current_choice = self._rebase_choice(current_aa, tables, rp)
             window = self._choose_window(ordered)
             pins = [
                 Constraint(
@@ -1219,6 +1323,14 @@ class IPROLoop:
                     f"under the current constraints ({last_exc})"
                 )
                 n_done = it - 1
+                if snapshot is not None:
+                    # Leaving here with the perturbation still applied would
+                    # make the final report describe a backbone no iteration
+                    # ever accepted.
+                    (
+                        self._design_st, self._design_pdb, self._rotamer_cache,
+                        cb, tables, self._native_v, rp, ordered,
+                    ) = snapshot
                 break
 
             chosen = self._rotamers_for(tables, sol.choices)
@@ -1331,14 +1443,15 @@ class IPROLoop:
             if not ok and snapshot is not None:
                 # Put the backbone, rotamers and tables back as they were.
                 (
-                    self._design_st, self._rotamer_cache, cb, tables,
-                    self._native_v, rp, ordered,
+                    self._design_st, self._design_pdb, self._rotamer_cache,
+                    cb, tables, self._native_v, rp, ordered,
                 ) = snapshot
-                current_choice = self._rebase_choice(current_choice, tables)
+                current_choice = self._rebase_choice(current_aa, tables, rp)
 
             if ok:
                 accepted += 1
                 current_choice, current_score = dict(sol.choices), score
+                current_aa = self._identities(current_choice, tables)
                 current_asm_energy = {k: v.total for k, v in per_asm.items()}
 
             if score < best_score:
@@ -1363,6 +1476,14 @@ class IPROLoop:
 
             if spec.loop.stop_after_accepted and accepted >= spec.loop.stop_after_accepted:
                 self.run.log(f"stopping: reached {accepted} accepted designs")
+                # Say so in the notes, as the max_minutes branch below does.
+                # Without this the report showed "3/8 iterations" and gave no
+                # reason, which reads like a crash rather than a setting.
+                self.notes.append(
+                    f"stopped after {accepted} accepted design(s) because "
+                    f"loop.stop_after_accepted is {spec.loop.stop_after_accepted}; "
+                    f"the iteration cap of {spec.loop.iterations} was not reached"
+                )
                 break
             if spec.loop.max_minutes and (time.time() - t_start) / 60.0 >= spec.loop.max_minutes:
                 self.run.log("stopping: wall-clock budget reached")
@@ -1516,29 +1637,53 @@ class IPROLoop:
         start = self.rng.randrange(0, len(ordered) - k + 1)
         return ordered[start : start + k]
 
-    def _rebase_choice(
-        self, choices: dict[str, int], tables: EnergyTables
-    ) -> dict[str, int]:
-        """Re-express an assignment against a rebuilt rotamer set.
+    @staticmethod
+    def _identities(choices: dict[str, int], tables: EnergyTables) -> dict[str, str]:
+        """The amino acids an index assignment stands for, read against its own tables."""
+        out: dict[str, str] = {}
+        for p, i in choices.items():
+            rots = tables.rotamers.get(p) or []
+            if 0 <= i < len(rots):
+                out[p] = rots[i].aa
+        return out
 
-        Rotamer indices are not comparable across backbones: a rebuild can prune
-        differently, so index 3 may be a different residue or may not exist. The
-        identity is the part that carries over, so each position is mapped onto
-        its cheapest rotamer of the same identity.
+    def _rebase_choice(
+        self,
+        identities: dict[str, str],
+        tables: EnergyTables,
+        plan: "RestraintPlan | None" = None,
+    ) -> dict[str, int]:
+        """Express a set of identities as indices into a rebuilt rotamer set.
+
+        Rotamer indices are not comparable across backbones: a rebuild can
+        prune differently, so index 3 may be a different residue or may not
+        exist. So the caller carries *identities* and this maps each onto its
+        cheapest rotamer of the same identity in the new tables.
+
+        It used to take the old index map and read it out of the NEW tables --
+        exactly the mistake the paragraph above warns about. A position whose
+        current choice was TRP could come back as SER with no energy test
+        applied, and since these indices then become ``require`` pins, the
+        rest of the run was pinned to a residue nothing had chosen.
+
+        ``plan`` excludes restraint-vetoed rotamers. Pinning a vetoed rotamer
+        makes the next program infeasible, which the loop reports as "design
+        space enumerated" -- a silent early stop with a plausible message.
         """
+        vetoed = plan.rotamer_vetoes if plan is not None else set()
         out: dict[str, int] = {}
         for p in tables.positions:
-            want = None
-            if p in choices and p in tables.rotamers:
-                old_list = tables.rotamers[p]
-                idx = choices[p]
-                if 0 <= idx < len(old_list):
-                    want = old_list[idx].aa
-            if want is None:
-                want = self._native_v.get(p) or None
-            candidates = [
-                i for i, r in enumerate(tables.rotamers[p]) if r.aa == want
-            ] or list(range(len(tables.rotamers[p])))
+            rots = tables.rotamers.get(p) or []
+            if not rots:
+                continue
+            allowed = [i for i in range(len(rots)) if (p, i) not in vetoed]
+            if not allowed:
+                # Every rotamer here is vetoed; the program is infeasible with
+                # or without a pin, so leave the cheapest and let the solver
+                # report it rather than inventing a feasible-looking pin.
+                allowed = list(range(len(rots)))
+            want = identities.get(p) or self._native_v.get(p) or None
+            candidates = [i for i in allowed if rots[i].aa == want] or allowed
             out[p] = min(
                 candidates, key=lambda i: tables.self_energy.get((p, i), 0.0)
             )

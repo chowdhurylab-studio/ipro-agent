@@ -68,8 +68,45 @@ class WrittenComplex:
         return "; ".join(bits)
 
 
+def _resseq_field(resseq, notes: list[str] | None = None) -> str:
+    """The 4-column resSeq field, which must hold a NEGATIVE number as itself.
+
+    An indel that prepends residues numbers them downward (A0, A-1, ...) so
+    that nothing existing is renumbered. ``-1 % 10000`` is 9999 in Python, so
+    the old masking wrote A-1 as residue 9999 -- a residue that reads back at
+    the wrong end of the chain, which silently reorders the model. ``-999``
+    through ``9999`` all fit the column as written.
+    """
+    num = int(resseq)
+    if -999 <= num <= 9999:
+        return f"{num:4d}"
+    if notes is not None:
+        notes.append(
+            f"residue number {num} does not fit the 4-column PDB resSeq field; "
+            f"written as {num % 10000} -- the numbering in this file is not the "
+            f"numbering used in the design"
+        )
+    return f"{num % 10000:4d}"
+
+
+def _serial_field(serial: int, notes: list[str] | None = None) -> str:
+    """The 5-column atom serial, noting the wrap rather than hiding it."""
+    if serial <= 99999:
+        return f"{serial:5d}"
+    if notes is not None and not any("atom serial" in n for n in notes):
+        notes.append(
+            f"more than 99999 atoms: serials wrap, so they are no longer unique "
+            f"in this file (first wrap at atom {serial})"
+        )
+    return f"{serial % 100000:5d}"
+
+
 def _atom_records(
-    structure, chain_for: dict[str, str], transform=None, start_serial: int = 1
+    structure,
+    chain_for: dict[str, str],
+    transform=None,
+    start_serial: int = 1,
+    notes: list[str] | None = None,
 ) -> tuple[list[str], int]:
     """PDB ATOM/HETATM lines for a structure, renaming chains and moving atoms.
 
@@ -107,15 +144,15 @@ def _atom_records(
                 b = 0.0 if b is None else b
                 lines.append(
                     f"{'HETATM' if hetero else 'ATOM  '}"
-                    f"{serial % 100000:5d} {name_field}{alt}{resname:>3s} "
-                    f"{out_chain[:1]}{int(resseq) % 10000:4d}{(icode or ' ')[:1]}   "
+                    f"{_serial_field(serial, notes)} {name_field}{alt}{resname:>3s} "
+                    f"{out_chain[:1]}{_resseq_field(resseq, notes)}{(icode or ' ')[:1]}   "
                     f"{coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}"
                     f"{occ:6.2f}{b:6.2f}          {el:>2s}"
                 )
                 serial += 1
                 wrote_any = True
         if wrote_any:
-            lines.append(f"TER   {serial % 100000:5d}")
+            lines.append(f"TER   {_serial_field(serial, notes)}")
             serial += 1
     return lines, serial
 
@@ -143,8 +180,22 @@ def write_complex(
     chain_map: dict[str, dict[str, str]] = {WrittenComplex.DESIGN: design_map}
     free = [c for c in _PDB_CHAINS if c not in used]
 
+    def take_chain() -> str | None:
+        """Next genuinely unused chain id.
+
+        ``free`` is built once, but ``used`` grows as partners keep their own
+        ids -- so popping blindly could hand out an id a previous partner had
+        already kept, writing two molecules into one chain. Both then read
+        back as a single molecule and only one of them is reported as renamed.
+        """
+        while free:
+            c = free.pop(0)
+            if c not in used:
+                return c
+        return None
+
     lines: list[str] = list(header or [])
-    body, serial = _atom_records(design_structure, design_map, None, 1)
+    body, serial = _atom_records(design_structure, design_map, None, 1, notes)
     lines += body
 
     for name in sorted(partners):
@@ -152,15 +203,15 @@ def write_complex(
         mapping: dict[str, str] = {}
         for chain in st.model:
             if chain.id in used:
-                if not free:
+                new = take_chain()
+                if new is None:
                     notes.append(
                         f"ran out of chain ids writing {name}; its chain "
-                        f"{chain.id!r} collides with the design molecule and the "
+                        f"{chain.id!r} collides with another molecule and the "
                         "file will merge them"
                     )
                     mapping[chain.id] = chain.id
                     continue
-                new = free.pop(0)
                 mapping[chain.id] = new
                 notes.append(f"{name}: chain {chain.id} written as {new}")
             else:
@@ -168,7 +219,7 @@ def write_complex(
             used.add(mapping[chain.id])
         pose = poses.get(name)
         body, serial = _atom_records(
-            st, mapping, (pose.apply if pose is not None else None), serial
+            st, mapping, (pose.apply if pose is not None else None), serial, notes
         )
         lines += body
         chain_map[name] = mapping

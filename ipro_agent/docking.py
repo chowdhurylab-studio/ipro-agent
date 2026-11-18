@@ -66,6 +66,32 @@ class Pose:
         return (c - self.centre) @ self.rotation.T + self.centre + self.translation
 
     @property
+    def affine(self) -> tuple[np.ndarray, np.ndarray]:
+        """This pose as the plain affine map ``p -> M p + v``."""
+        r = np.asarray(self.rotation, dtype=float)
+        c = np.asarray(self.centre, dtype=float)
+        t = np.asarray(self.translation, dtype=float)
+        return r, c - r @ c + t
+
+    @classmethod
+    def from_affine(cls, m: np.ndarray, v: np.ndarray) -> "Pose":
+        return cls(
+            rotation=np.asarray(m, dtype=float),
+            translation=np.asarray(v, dtype=float),
+            centre=np.zeros(3),
+        )
+
+    def then(self, other: "Pose") -> "Pose":
+        """The single pose equivalent to applying ``self`` and then ``other``.
+
+        Exact. Composing beats re-fitting two coordinate sets, which cannot
+        recover a rotation about the axis of a collinear body at all.
+        """
+        m1, v1 = self.affine
+        m2, v2 = other.affine
+        return Pose.from_affine(m2 @ m1, m2 @ v1 + v2)
+
+    @property
     def is_identity(self) -> bool:
         return (
             np.allclose(self.rotation, np.eye(3), atol=1e-12)
@@ -192,7 +218,13 @@ def redock(
         return {}
 
     current = {n: np.array(a.coords, dtype=float) for n, a in partners.items()}
-    centres = {n: current[n].mean(axis=0) for n in movable}
+    # The transform is accumulated as ``p -> M p + v`` alongside the
+    # coordinates. It used to be recovered at the end by fitting start to
+    # finish, which cannot see a rotation about the axis of a one- or
+    # two-atom or collinear body: those atoms do not move under it. The
+    # atoms left out of the scoring set (hydrogens) were then placed by
+    # whatever spin the fit happened to return.
+    xform = {n: (np.eye(3), np.zeros(3)) for n in movable}
 
     def sets_from(coords: dict[str, np.ndarray]) -> dict[str, AtomSet]:
         return {
@@ -206,6 +238,7 @@ def redock(
     start_energy = net_interaction(design, sets_from(current), backend)
     best_energy = cur_energy = start_energy
     best = {n: current[n].copy() for n in movable}
+    best_xform = dict(xform)
     accepted = 0
 
     for step in range(max(0, int(moves))):
@@ -226,15 +259,22 @@ def redock(
         if delta <= 0 or rng.random() < math.exp(-min(delta / kt, 700.0)):
             cur_energy = trial_energy
             accepted += 1
+            # This move is p -> rot (p - centre) + centre + shift; composed
+            # with the accumulated p -> M p + v that is M' = rot M,
+            # v' = rot (v - centre) + centre + shift.
+            m, v = xform[name]
+            xform[name] = (rot @ m, rot @ (v - centre) + centre + shift)
             if trial_energy < best_energy:
                 best_energy = trial_energy
                 best = {n: current[n].copy() for n in movable}
+                best_xform = dict(xform)
         else:
             current[name] = keep
 
     out: dict[str, RedockResult] = {}
     for n in movable:
-        pose = _pose_between(partners[n].coords, best[n], centres[n])
+        m, v = best_xform[n]
+        pose = Pose.from_affine(m, v)
         out[n] = RedockResult(
             pose=pose,
             start_energy=start_energy,
@@ -247,27 +287,78 @@ def redock(
 
 
 def _pose_between(
-    start: np.ndarray, end: np.ndarray, centre: np.ndarray
+    start: np.ndarray,
+    end: np.ndarray,
+    centre: np.ndarray,
+    notes: list[str] | None = None,
 ) -> Pose:
     """Recover the rigid transform taking ``start`` to ``end`` (Kabsch).
 
-    The chain accumulates coordinates, not transforms, so the net pose is
-    recovered at the end. Both sets are the same rigid body, so the fit is
-    exact up to floating point.
+    Only for the case where coordinates are all there is -- a docking program
+    that returns a repositioned ligand, say. Prefer :meth:`Pose.then` whenever
+    the transforms themselves are in hand, because this fit has a blind spot:
+
+    If the body spans fewer than two dimensions (one atom, two atoms, or any
+    collinear set) a rotation *about the body's own axis* moves none of its
+    atoms, so no fit can see it. The fitted atoms come back exact either way
+    while anything off that axis -- a hydrogen, a branch the scoring set
+    dropped -- is placed by whichever spin the SVD happened to produce; up to
+    5 A in practice. Rather than pick a spin at random, this returns the
+    zero-twist rotation: the smallest rotation that carries the body's axis
+    onto its new one, and nothing more. ``notes`` records when that happened,
+    because the result is then a choice and not a measurement.
     """
     a = np.asarray(start, dtype=float)
     b = np.asarray(end, dtype=float)
     if a.shape != b.shape or len(a) == 0:
         return Pose(centre=np.asarray(centre, dtype=float))
     ca, cb = a.mean(axis=0), b.mean(axis=0)
-    if len(a) == 1:
+    ac, bc = a - ca, b - cb
+
+    sv = np.linalg.svd(ac, compute_uv=False)
+    span = int((sv > max(sv[0] * 1e-8, 1e-9)).sum()) if sv.size else 0
+    if span == 0:
         return Pose(translation=cb - ca, centre=ca)
-    H = (a - ca).T @ (b - cb)
+    if span == 1:
+        u = np.linalg.svd(ac)[2][0]
+        v = np.linalg.svd(bc)[2][0]
+        if float((ac @ u) @ (bc @ v)) < 0:
+            v = -v
+        if notes is not None:
+            notes.append(
+                "the moved body is collinear, so a rotation about its own axis "
+                "cannot be recovered from coordinates; the zero-twist rotation "
+                "was used and any off-axis atoms (e.g. hydrogens) may be "
+                "rotated about that axis relative to the docking program's output"
+            )
+        return Pose(rotation=_min_rotation(u, v), translation=cb - ca, centre=ca)
+
+    H = ac.T @ bc
     U, _S, Vt = np.linalg.svd(H)
     d = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
     # start -> end is: rotate about ca, then shift by (cb - ca)
     return Pose(rotation=R, translation=cb - ca, centre=ca)
+
+
+def _min_rotation(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Smallest rotation carrying unit vector ``u`` onto unit vector ``v``."""
+    u = u / np.linalg.norm(u)
+    v = v / np.linalg.norm(v)
+    c = float(u @ v)
+    if c > 1.0 - 1e-12:
+        return np.eye(3)
+    axis = np.cross(u, v)
+    n = float(np.linalg.norm(axis))
+    if n < 1e-12:  # antiparallel: any perpendicular axis, turned half a turn
+        helper = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        axis = np.cross(u, helper)
+        axis /= np.linalg.norm(axis)
+        k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        return np.eye(3) + 2.0 * (k @ k)
+    axis /= n
+    k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return np.eye(3) + n * k + (1.0 - c) * (k @ k)
 
 
 def moved_atomset(original: AtomSet, pose: Pose) -> AtomSet:

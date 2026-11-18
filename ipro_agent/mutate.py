@@ -122,6 +122,18 @@ def apply_design(
             pos = DesignPosition.parse(label, allowed=[aa])
         except SpecError as exc:
             raise MutateError(f"cannot use {label!r} as a position label: {exc}") from exc
+        if pos.label != label:
+            # The label is the only carrier of (chain, number, icode) across
+            # the PyMOL boundary, so it has to survive the round trip. If it
+            # does not, the mutation would be applied to a different residue
+            # than the one the MILP chose -- and that residue may well exist,
+            # so nothing downstream would notice.
+            raise MutateError(
+                f"position label {label!r} does not survive re-parsing "
+                f"(it reads back as {pos.label!r}, chain {pos.chain!r} "
+                f"residue {pos.number}{pos.insertion_code}). Refusing to "
+                f"mutate a residue that may not be the one requested."
+            )
         jobs.append(
             {
                 "chain": pos.chain,

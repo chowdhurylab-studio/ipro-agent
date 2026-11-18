@@ -199,7 +199,17 @@ class DesignPosition:
 
     @property
     def label(self) -> str:
-        return f"{self.chain}{self.number}{self.insertion_code}".strip()
+        """Text form, which must round-trip: ``parse(p.label).key == p.key``.
+
+        A letter chain can simply concatenate (``A115``), but a numeric chain
+        id has to keep its separator. ``1:115`` written as ``1115`` reads back
+        as chain A residue 1115, and the mutation lands on the wrong residue
+        -- silently, because 1115 may well exist. The PDB permits any
+        printable character as a chain id, so the test is "is it a letter",
+        not "is it a digit".
+        """
+        sep = "" if self.chain.isalpha() else ":"
+        return f"{self.chain}{sep}{self.number}{self.insertion_code}".strip()
 
     @property
     def key(self) -> tuple[str, int, str]:

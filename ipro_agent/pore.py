@@ -165,7 +165,6 @@ def pore_profile(
     spacing: float = 0.5,
     window: tuple[float, float] | None = None,
     max_centre_offset: float = 4.0,
-    slab: float | None = None,
 ) -> PoreProfile:
     """Radius of the largest inscribed circle, slice by slice along the axis.
 
@@ -178,6 +177,14 @@ def pore_profile(
     the axis. It is a real parameter, not a tolerance: it is what makes the
     question "how wide is the lumen" rather than "how far is the nearest atom",
     and a value much larger than the pore lets the search escape into solvent.
+
+    Each slice is a true cross-section: an atom obstructs it only if its vdW
+    sphere actually reaches that plane, and then by the radius of the circle
+    where sphere and plane intersect. There is deliberately no slab thickness.
+    An earlier version admitted every atom within a slab and gave the ones
+    outside their own radius an in-plane radius of zero, which left them in
+    the slice as *point* obstacles -- and a point still blocks an inscribed
+    circle, so a carbon 2.5 A off-plane reported a 4.3 A lumen as 2.2 A.
     """
     c = np.asarray(coords, dtype=float)
     if c.size == 0:
@@ -218,7 +225,6 @@ def pore_profile(
     if hi <= lo:
         return PoreProfile(axis_origin=origin, axis_direction=direction, axis_guessed=guessed)
 
-    half = float(slab) if slab is not None else float(max(VDW.values()))
     prof = PoreProfile(axis_origin=origin, axis_direction=direction, axis_guessed=guessed)
     steps = max(1, int(np.floor((hi - lo) / max(spacing, 1e-6))) + 1)
     for k in range(steps):
@@ -226,7 +232,7 @@ def pore_profile(
         # Atoms whose vdW sphere reaches this plane; their in-plane radius is
         # the circle where the sphere cuts the plane.
         dz = np.abs(z - zc)
-        near = dz < (r + half)
+        near = dz < r
         if not near.any():
             continue
         eff = np.sqrt(np.maximum(r[near] ** 2 - dz[near] ** 2, 0.0))

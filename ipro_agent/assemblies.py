@@ -64,6 +64,14 @@ SEP = "::"
 
 
 def vpos(assembly: str, label: str) -> str:
+    if SEP in assembly or assembly.endswith(":"):
+        # Otherwise split_vpos cuts at the wrong colon and the whole assembly
+        # silently vanishes from by_assembly -- its rotamers are never scored.
+        raise ValueError(
+            f"assembly name {assembly!r} may not contain {SEP!r} or end in ':': "
+            f"the name is joined to a position label with {SEP!r} to form the "
+            f"virtual positions the combined program is written over"
+        )
     return f"{assembly}{SEP}{label}"
 
 
@@ -194,11 +202,17 @@ def combine(
 def choices_for(
     combined: CombinedTables, assembly: str, choices: dict[str, int]
 ) -> dict[str, int]:
-    """Project a combined solution onto one assembly's real position labels."""
+    """Project a combined solution onto one assembly's real position labels.
+
+    With a single assembly the combined positions are not virtual, so
+    ``split_vpos`` returns no assembly name; those belong to the only
+    assembly there is. Returning ``{}`` for that case made this silently
+    useless outside multi-assembly runs.
+    """
     out: dict[str, int] = {}
     for v, idx in choices.items():
         h, label = split_vpos(v)
-        if h == assembly:
+        if h == assembly or (not h and assembly == combined.reference):
             out[label] = idx
     return out
 
