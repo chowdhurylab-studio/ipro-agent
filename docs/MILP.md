@@ -117,6 +117,27 @@ clamps objective coefficients at 10000 kcal/mol for the same reason.
 
 ## Solving
 
+### Published problem size
+
+The paper quantifies what the linearization buys. Replacing the bilinear form
+by eqs. (4) and (5) cuts the constraint count by a factor of
+
+```
+   sum_{i<j} R_i R_j  /  [ (N-1) * sum_i R_i ]
+```
+
+and it gives a worked example: a tripeptide with 21, 29 and 15 rotamers at its
+three positions has **1359 bilinear constraints** (21·29 + 21·15 + 29·15) but
+only **130 linear ones** ((N−1)·ΣR_i = 2·65) — about an order of magnitude.
+That is the only published figure for this program's size, and it is the reason
+the formulation scales to the ~1300 rotamers the released source caps at.
+
+Note the quantifiers in eqs. (4) and (5): they range over **all** `r` in `R_i`
+and **all** `s` in `R_j`. A pair block that is missing some `(r,s)` therefore
+does not implement the published constraint at all — which is exactly the defect
+recorded as #1 in docs/DESIGN.md §7, and why blocks here are kept or dropped
+whole.
+
 `RotamerMILP.to_lp()` emits CPLEX LP format with the positions, their rotamer
 counts and every constraint commented. **This file is the artifact that records
 what was actually solved** — the deliverable when a user has stated a
@@ -168,6 +189,6 @@ LP file's objective agrees with the objective used by the accept/reject test.
 ## Sources
 
 - Saraf, Moore, Goodey, Cao, Benkovic, Maranas. *Biophys J* **90**:4167–4180 (2006). The original formulation; equations 3–10 (single-structure) and 11–21 (library).
-- Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251–263 (2015). The IPRO suite.
+- Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251–263 (2015). The IPRO suite. **This is the authoritative statement of the formulation above**: its eq. (1) is the objective, eq. (2) the assignment constraint, and eqs. (4) and (5) the two marginalizations — `y[i,r] = Σ_s w[i,r,j,s]` and `y[j,s] = Σ_r w[i,r,j,s]` — introduced explicitly to replace the bilinear `w = y·y` of its eq. (3). Parameters are named `EC[i,r]` (rotamer against the non-rotamer portion of the assembly, i.e. the template) and `ER[i,r][j,s]` (rotamer against rotamer).
 - Chowdhury et al. *Nat Commun* **9**:3661 (2018), supplementary information. The formulation reproduced in full, CC-BY, including the ≥50%-long constraint and the no-good cut.
 - The IPRO Suite source (`ROTAMERS.py`, `GAMS.py`, `CPLEX.py`), for the variable declarations, the coefficient clamp and the cut forms.

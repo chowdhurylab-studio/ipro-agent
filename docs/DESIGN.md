@@ -24,7 +24,7 @@ from this tool as an IPRO result.
 | Stability energy cap | `Constraint("max_energy")` | Biophys J 2006 stability constraint |
 | Residue-class cardinality (≥ 50% long side chains) | `Constraint("min_class")` | PoreDesigner (Nat Commun 2018) MILP constraint 4 |
 | Interaction energy `IE = E(complex) − E(design) − E(partner)` | `loop.IPROLoop._context_for` | IPRO source's `Calculate_Energy`; same definition in ACS Catal 2017 |
-| Metropolis accept/reject at T = 3640 K | `goals.metropolis_accept` | IPRO Suite, `P = exp(−ΔE/k_BT)`; the source's equivalent `window = −R·T·ln(U)` form |
+| Metropolis accept/reject at T = 3640 K | `goals.metropolis_accept` | IPRO Suite: the interaction energy goes into a Boltzmann factor at **3640 K**, "which retains 25% of designs within 10 kcal mol⁻¹ of the best design"; the released source implements the algebraically identical `window = −R·T·ln(U)` form |
 | Greedy opening phase (no thermal acceptance early) | `LoopSettings.greedy_fraction` | IPRO source disables annealing for the first 10% of iterations |
 | Hard rejection of large worsenings | `LoopSettings.hard_reject_*` | IPRO source rejects a worsening beyond `max(40 kcal/mol, 5%)` |
 | Design ensemble rather than a single answer | `RunResult.ensemble` | IPRO Suite; source default of 10 ensembles |
@@ -71,6 +71,63 @@ estimated ΔΔG (Figure S5), measured against myristoyl-ACP for round 3 and
 lauroyl-ACP for round 4 — the basis for the caveat in §5 that these objectives
 rank better than they predict magnitudes.
 
+### 1b. IPRO's input language, and what this tool's spec covers
+
+The Suite paper defines the vocabulary verbatim:
+
+| Term | Definition (paper's wording, condensed) | Here |
+|---|---|---|
+| **DM** — design molecule | a protein permitted to mutate | `role: design` |
+| **TM** — target molecule | what it binds: a protein, peptide or small ligand | `role: target` |
+| **DP** — design position | the residues within a DM allowed to mutate | `positions:` |
+| **BA** — binding assembly | the totality of molecules interacting with a particular binding topology; multiple DMs and TMs may take part | **not modelled** — see below |
+
+It also settles a definition this implementation depends on. IPRO deliberately
+does **not** use binding energy:
+
+```
+binding energy     =  G(BA,min) − G(DMs,min) − G(TMs,min)
+interaction energy =  G(BA,min) − G(DMs)     − G(TMs)      <- IPRO uses this
+```
+
+The components are *not* separately re-minimized, "as it is less dependent on
+the force field used and requires fewer calculations". That is exactly what
+`IPROLoop._context_for` computes — the cross-term on the complex conformation —
+so the quantity is right, and the reason for preferring it is now sourced
+rather than inferred.
+
+**The paper's full list of required user input**, against what `DesignSpec`
+accepts:
+
+| IPRO requires | Here |
+|---|---|
+| user's name, experiment name | `name` (no user field; provenance is the git history) |
+| the DMs and TMs | `molecules` |
+| the DPs | `positions` |
+| the kinds of amino acid mutations permitted for each DP | `positions[].allowed` |
+| the temperature for the Metropolis criterion | `loop.temperature_k` |
+| number of design iterations | `loop.iterations` |
+| how to run docking | `backends.dock`, and the separate `dock` command |
+| how to repack rotamers | implicit (the MILP is always used) |
+| how to use the force field | `backends.energy` |
+| how to use implicit solvation | **not exposed** — the built-in model's solvation treatment is fixed |
+| the BAs | **not modelled** (single assembly only) |
+| whether to share Metropolis-retained results between processors | **not applicable** (single process) |
+| how to do ensemble structure refinements | partial — `loop.ensemble_size` keeps an ensemble but does not refine it |
+
+Two consequences worth stating plainly. First, IPRO supports **multiple binding
+assemblies** and requires that *all* of them pass the acceptance criterion for
+an iteration to be retained; this tool models one assembly, so a design that
+must satisfy several binding topologies at once cannot be expressed. Second,
+IPRO offers **four kinds of atom-position restraint, "rigorously enforced
+throughout all functions"** — atoms fixed in place, atoms held near their input
+positions, a distance restraint between two atoms, and a dihedral restraint on
+four atoms. **None is implemented here.** That matters more than it sounds: the
+distance restraint is the mechanism the thioesterase work used to preserve
+catalytic geometry while redesigning specificity (catalytic distances held to
+±0.2 Å), so "redesign this site but keep the catalysis intact" is currently not
+expressible. It is the single most useful thing to add next.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -90,7 +147,8 @@ stated.
 
 | Parameter | Value here | Source | Note |
 |---|---|---|---|
-| `temperature_k` | 3640 K | IPRO Suite | Calibrated so a 10 kcal/mol worsening is accepted ~25% of the time. **Verified:** with `R = 1.987e-3 kcal/(mol·K)`, `exp(−10/(R·3640)) = 0.2509`. One secondary source quotes `k = 0.333e-3 cal/K`, which gives `P = 0.0003` and is inconsistent with the stated calibration; it was not used. Checked in `tests/test_ipro.py`. |
+| `temperature_k` | 3640 K | IPRO Suite, confirmed in the paper itself | The paper states the Boltzmann factor uses 3640 K, "which retains 25% of designs within 10 kcal mol⁻¹ of the best design", and separately that docking anneals from 3640 K to 2190 K, retaining 25% and **10%** of positions within 10 kcal/mol. **Both calibrations were checked and both hold with `R = 1.987e-3 kcal/(mol·K)`:** `exp(−10/(R·3640)) = 0.2509` and `exp(−10/(R·2190)) = 0.1005`. A secondary source's `k = 0.333e-3` fits neither (it gives 0.0003 and 1e-6), so it was discarded. Checked in `tests/test_ipro.py`. |
+| docking anneal | not implemented | IPRO Suite | 3640 K → 2190 K on a constant cooling schedule, inside the 500-move rigid-body docking loop. The **outer** accept/reject temperature is constant; the annealing belongs to docking, which this tool does not run inside the iteration. |
 | `perturbation_sigma_deg` | 1.5 | IPRO Suite and source (`random.gauss(0, 1.5)`) | The 2006 paper reports 1.65°. The source value was chosen. |
 | `perturbation_cap_deg` | 5.0 | both | Rejection-truncated, not clipped. |
 | `perturbation_segment` | (1, 5) | source (`randint(0,4)`-based split) | 1–5 consecutive residues. |
@@ -144,6 +202,8 @@ specified, and this table is the record of what that changes.
 | **Vina re-docking inside the loop** | `dock.py` exists and is tested in dry-run; it is not wired into the iteration. | Vina is not installed in this environment, so a wired-in untested path would be a liability. When wiring it: re-score Vina poses with the energy backend, and **never** add Vina affinities to the objective — the scales are unrelated. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
+| **Atom-position restraints** (4 kinds: fixed, tethered, distance, dihedral) | **Not implemented.** | IPRO enforces these throughout. The distance restraint is how the published work preserved catalytic geometry while redesigning specificity (±0.2 Å on catalytic distances). Without it, "redesign this pocket but keep the catalysis" cannot be stated. Highest-value addition. |
+| **Multiple binding assemblies (BAs)** | Not modelled; one assembly only. | IPRO requires every BA to pass acceptance for an iteration to be retained, which is how it designs against several binding topologies at once. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
 
 ---
@@ -180,7 +240,7 @@ Protein-InDelMaker.
 
 | Missing | Why | What is unresolved |
 |---|---|---|
-| **IPRO Suite paper, JCC 2015** (10.1002/jcc.23796) | Closed access; Wiley returned 403 with a bot challenge; this machine is off campus with no VPN up | The full input-language specification and the rotamer MILP's published problem size. The method's technical content was recovered from CC-BY surrogates — chiefly the PoreDesigner SI — and from the source. |
+| ~~IPRO Suite paper, JCC 2015~~ (10.1002/jcc.23796) | **Obtained 2026-11-18** by the user through ISU's Wiley subscription. | Closed. Its equations (1), (2), (4), (5) confirm the formulation in docs/MILP.md verbatim; its input-requirement list and the DM/TM/DP/BA vocabulary are recorded in §1b; both temperature calibrations are verified in §2. |
 | ~~ACS Catal 2017 supporting information~~ | **Obtained 2026-11-18** through the user's own Chrome; ACS serves Supporting Information free of charge even off campus. 30 pp., Tables S1–S6 + Figures S1–S5. | Closed. The position-selection rule it documents is now recorded in §1a. |
 | **IPRO's rotamer library** | Not in either release; referenced as an external path | Why PyMOL's library is used instead. |
 | **A public IPRO+/− release** | `maranasgroup/ipro--` is an empty repository | Indels exist publicly only as Protein-InDelMaker. |
