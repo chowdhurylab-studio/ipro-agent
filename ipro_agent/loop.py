@@ -48,6 +48,7 @@ from .energy.base import AtomSet, EnergyBackend
 from .energy import resolve as resolve_energy
 from .goals import Goal, ScoreContext, build_goal, metropolis_accept
 from .milp import Constraint, EnergyTables, RotamerMILP, Rotamer, build_tables
+from .assemblies import CombinedTables, combine, split_vpos, vpos
 from .restraints import RestraintError, RestraintPlan, plan_restraints
 from .rotamers import build_template, harvest
 from .state import IterationRecord, RunDir, Status
@@ -152,6 +153,14 @@ class IPROLoop:
         self._visited: list[dict[str, str]] = []
         #: Filled in by run_loop once the rotamer tables exist.
         self._restraints: RestraintPlan = RestraintPlan()
+        #: Native identity keyed by *virtual* position, built once the
+        #: assemblies are combined. With one assembly it equals _native.
+        self._native_v: dict[str, str] = {}
+        #: Binding assemblies, resolved (one implicit one if none were given).
+        self._assemblies = spec.resolved_assemblies()
+        #: Assembly name -> its partner structures.
+        self._asm_partners: dict[str, list[Structure]] = {}
+        self._combined: CombinedTables | None = None
 
     # -- setup -------------------------------------------------------------
 
@@ -195,6 +204,21 @@ class IPROLoop:
             )
         self._native = {p.label: (p.native or "") for p in spec.positions}
 
+        # Each assembly sees only its own partner molecules, so its template --
+        # and therefore its rotamer energies -- differ. That is what makes
+        # per-assembly repacking meaningful.
+        for a in self._assemblies:
+            self._asm_partners[a.name] = [
+                self._partners[m.name] for m in spec.assembly_molecules(a)
+                if m.name in self._partners
+            ]
+        if len(self._assemblies) > 1:
+            self.notes.append(
+                f"designing one sequence across {len(self._assemblies)} binding "
+                "assemblies: rotamers are chosen separately in each, identity is "
+                "shared, and every gating assembly must pass acceptance"
+            )
+
         self.run.write_spec(spec.to_dict())
         self.run.log(f"prepared: mode={self.mode} backend={self.backend.describe()}")
 
@@ -230,6 +254,51 @@ class IPROLoop:
 
     # -- scoring -----------------------------------------------------------
 
+    def _contexts_for(
+        self, chosen: dict[str, Rotamer]
+    ) -> tuple[ScoreContext, dict[str, ScoreContext]]:
+        """Measure a candidate in every assembly.
+
+        ``chosen`` is keyed by virtual position, so each assembly's own packing
+        is used for its own partners. Returns the merged context the goal scores
+        -- each partner's interaction energy measured in the assembly it belongs
+        to -- and the per-assembly contexts the conjunctive acceptance test
+        needs.
+        """
+        assert self._design_st is not None
+        design_fixed = _atoms_of(self._design_st, {p.label for p in self.spec.positions})
+
+        per: dict[str, ScoreContext] = {}
+        merged = ScoreContext()
+        weights = {a.name: a.weight for a in self._assemblies}
+
+        for a in self._assemblies:
+            rots = [
+                r for v, r in chosen.items()
+                if (split_vpos(v)[0] or a.name) == a.name
+            ]
+            design_all = design_fixed.extend(AtomSet.concat([r.atoms for r in rots]))
+            ctx = ScoreContext()
+            partners = self.spec.assembly_molecules(a)
+            for m in partners:
+                st = self._partners.get(m.name)
+                if st is None:
+                    continue
+                ctx.interaction[m.name] = self.backend.interaction(design_all, _atoms_of(st))
+            ctx.design_only = self.backend.internal(design_all)
+            ctx.total = ctx.design_only + sum(ctx.interaction.values()) + sum(
+                self.backend.internal(_atoms_of(self._partners[m.name]))
+                for m in partners if m.name in self._partners
+            )
+            per[a.name] = ctx
+            # Each partner is scored in its own assembly, so the merged view has
+            # exactly one interaction energy per molecule -- which is what the
+            # goal expects.
+            merged.interaction.update(ctx.interaction)
+            merged.design_only += weights[a.name] * ctx.design_only
+            merged.total += weights[a.name] * ctx.total
+        return merged, per
+
     def _context_for(self, chosen: dict[str, Rotamer]) -> ScoreContext:
         """Measure a candidate without writing it to disk.
 
@@ -242,33 +311,15 @@ class IPROLoop:
         ``interaction(design, partner)``, with no need to score three
         structures.
         """
-        assert self._design_st is not None
-        design_fixed = _atoms_of(self._design_st, {p.label for p in self.spec.positions})
-        rot_atoms = AtomSet.concat([r.atoms for r in chosen.values()])
-        design_all = design_fixed.extend(rot_atoms)
-
-        ctx = ScoreContext()
-        for name, st in self._partners.items():
-            ctx.interaction[name] = self.backend.interaction(design_all, _atoms_of(st))
-        ctx.design_only = self.backend.internal(design_all)
-        ctx.total = ctx.design_only + sum(ctx.interaction.values()) + sum(
-            self.backend.internal(_atoms_of(st)) for st in self._partners.values()
-        )
-        return ctx
+        return self._contexts_for(chosen)[0]
 
     # -- measurement without designing -------------------------------------
 
-    def build_tables(self) -> EnergyTables:
-        """Self/pair energy tables for the current structures.
-
-        Public because both the loop and ``ipro-agent score`` need them, and
-        reaching into the loop's internals from the CLI was fragile.
-        """
-        if self._rotamer_cache is None:
-            self.prepare()
+    def _tables_for(self, assembly_name: str) -> EnergyTables:
+        """Energy tables against one assembly's template."""
         assert self._rotamer_cache is not None
         template = build_template(
-            [self._design_st, *self._partners.values()],
+            [self._design_st, *self._asm_partners.get(assembly_name, [])],
             [p.label for p in self.spec.positions],
         )
         return build_tables(
@@ -282,6 +333,29 @@ class IPROLoop:
             reference_energies=self.spec.goal_options.get("reference_energies"),
             strain_weight=float(self.spec.goal_options.get("strain_weight", 0.0)),
         )
+
+    def build_combined(self) -> CombinedTables:
+        """Per-assembly tables, folded into one program over virtual positions.
+
+        With a single assembly this returns that assembly's tables untouched, so
+        the single-complex case is exactly the problem it was before assemblies
+        existed.
+        """
+        if self._rotamer_cache is None:
+            self.prepare()
+        per = {a.name: self._tables_for(a.name) for a in self._assemblies}
+        self._combined = combine(per, self._assemblies)
+        # Positions are virtual once there are several assemblies, so every
+        # lookup keyed by a design-position label needs the mapped form.
+        self._native_v = {
+            v: self._native.get(split_vpos(v)[1], "")
+            for v in self._combined.tables.positions
+        }
+        return self._combined
+
+    def build_tables(self) -> EnergyTables:
+        """The combined tables, as one single-assembly problem."""
+        return self.build_combined().tables
 
     def measure_native(self) -> tuple[ScoreContext, EnergyTables]:
         """Score the input as supplied, with the native identity where allowed.
@@ -298,16 +372,60 @@ class IPROLoop:
 
     def run_loop(self) -> RunResult:
         spec = self.spec
-        tables = self.build_tables()
+        cb = self.build_combined()
+        tables = cb.tables
         self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
+        if cb.n_assemblies > 1:
+            self.run.log(
+                f"assemblies: {cb.n_assemblies}, reference {cb.reference!r}, "
+                f"{len(cb.identity_links)} identity link(s)"
+            )
 
         # Geometric restraints become vetoes on rotamer choices, which is exact:
         # the forbidden assignments are precisely those that violate them, so the
         # MILP optimum is the best design that complies. A restraint that cannot
         # be expressed is reported, never dropped in silence.
-        self._restraints = plan_restraints(
-            spec.restraints, tables, self._design_st, list(self._partners.values())
-        )
+        if spec.restraints and cb.n_assemblies > 1:
+            # A restraint is geometry, so it is measured inside each assembly
+            # against that assembly's own partners, and vetoes that assembly's
+            # virtual positions.
+            merged = RestraintPlan()
+            for a in self._assemblies:
+                sub = EnergyTables(
+                    positions=[split_vpos(v)[1] for v in cb.by_assembly[a.name]],
+                    rotamers={
+                        split_vpos(v)[1]: tables.rotamers[v]
+                        for v in cb.by_assembly[a.name]
+                    },
+                    self_energy={},
+                    pruned_per_position={
+                        split_vpos(v)[1]: tables.pruned_per_position.get(v, 0)
+                        for v in cb.by_assembly[a.name]
+                    },
+                )
+                one = plan_restraints(
+                    spec.restraints, sub, self._design_st, self._asm_partners[a.name]
+                )
+                merged.rotamer_vetoes |= {
+                    (vpos(a.name, p), i) for p, i in one.rotamer_vetoes
+                }
+                merged.pair_vetoes |= {
+                    (vpos(a.name, pi), ri, vpos(a.name, pj), rj)
+                    for pi, ri, pj, rj in one.pair_vetoes
+                }
+                merged.native_violations.extend(
+                    f"[{a.name}] {m}" for m in one.native_violations
+                )
+                merged.unsupported.extend(f"[{a.name}] {m}" for m in one.unsupported)
+                merged.notes.extend(f"[{a.name}] {m}" for m in one.notes)
+                merged.summary.extend(f"[{a.name}] {m}" for m in one.summary)
+                merged.relax_fixed_positions.extend(one.relax_fixed_positions)
+            self._restraints = merged
+        else:
+            self._restraints = plan_restraints(
+                spec.restraints, tables, self._design_st,
+                self._asm_partners.get(self._assemblies[0].name, []),
+            )
         rp = self._restraints
         if spec.restraints:
             for line in rp.summary:
@@ -336,7 +454,9 @@ class IPROLoop:
 
         # -- starting point: the native sequence, repacked --------------------
         start_choice = self._native_choice(tables, vetoed=rp.rotamer_vetoes)
-        start_ctx = self._context_for(self._rotamers_for(tables, start_choice))
+        start_ctx, start_per_asm = self._contexts_for(
+            self._rotamers_for(tables, start_choice)
+        )
         start_score = self.goal.score(start_ctx)
 
         best_score = start_score
@@ -359,11 +479,12 @@ class IPROLoop:
 
         current_choice = dict(start_choice)
         current_score = start_score
+        current_asm_energy = {k: v.total for k, v in start_per_asm.items()}
         accepted = 0
         t_start = time.time()
         n_done = 0
 
-        ordered = self._ordered_positions(tables)
+        ordered = self._ordered_positions(tables, cb.sequence_positions)
 
         for it in range(1, spec.loop.iterations + 1):
             t0 = time.time()
@@ -406,10 +527,12 @@ class IPROLoop:
                 milp = RotamerMILP(
                     tables,
                     constraints=self.constraints + pins,
-                    native=self._native,
+                    native=self._native_v,
                     visited=self._visited if spec.loop.integer_cuts else [],
                     rotamer_vetoes=rp.rotamer_vetoes,
                     pair_vetoes=rp.pair_vetoes,
+                    identity_links=cb.identity_links,
+                    sequence_positions=cb.sequence_positions,
                 )
                 try:
                     sol = milp.solve(
@@ -431,13 +554,21 @@ class IPROLoop:
                 break
 
             chosen = self._rotamers_for(tables, sol.choices)
-            identities = {p: r.aa for p, r in chosen.items()}
+            # Virtual view, restricted to the sequence scope: this is what the
+            # integer cuts and the sequence-level constraints act on.
+            seq_scope = cb.sequence_positions
+            identities_v = {
+                p: tables.rotamers[p][i].aa
+                for p, i in sol.choices.items() if p in seq_scope
+            }
+            # Real-label view, for mutations, the sequence string and reports.
+            identities = {split_vpos(p)[1] or p: aa for p, aa in identities_v.items()}
 
             if spec.loop.integer_cuts:
-                self._visited.append(dict(identities))
+                self._visited.append(dict(identities_v))
 
-            # (5) score
-            ctx = self._context_for(chosen)
+            # (5) score, in every assembly
+            ctx, per_asm = self._contexts_for(chosen)
             score = self.goal.score(ctx)
             delta = score - current_score
 
@@ -452,6 +583,25 @@ class IPROLoop:
                 ok, reason = metropolis_accept(
                     delta, spec.loop.kt, self.rng.random(), greedy=greedy
                 )
+            # IPRO: "all BAs must pass the selection criteria for the results of
+            # the iteration to be retained." Applied as an extra gate on top of
+            # the objective test, and only when there is more than one assembly,
+            # so the single-complex case behaves exactly as before.
+            if ok and len(self._assemblies) > 1:
+                for a in self._assemblies:
+                    if not a.must_pass:
+                        continue
+                    prev = current_asm_energy.get(a.name)
+                    if prev is None:
+                        continue
+                    d_h = per_asm[a.name].total - prev
+                    passed, _why = metropolis_accept(
+                        d_h, spec.loop.kt, self.rng.random(), greedy=greedy
+                    )
+                    if not passed:
+                        ok = False
+                        reason = f"assembly {a.name} rejected it (dE={d_h:+.3f})"
+                        break
 
             mutations = {
                 p: aa for p, aa in identities.items()
@@ -472,6 +622,7 @@ class IPROLoop:
             if ok:
                 accepted += 1
                 current_choice, current_score = dict(sol.choices), score
+                current_asm_energy = {k: v.total for k, v in per_asm.items()}
             if score < best_score:
                 best_score, best_choice, best_ctx = score, dict(sol.choices), ctx
                 self.run.update_state(
@@ -498,7 +649,10 @@ class IPROLoop:
         ensemble = ensemble[: spec.loop.ensemble_size]
         (self.run.path / "ensemble" / "ensemble.json").write_text(json.dumps(ensemble, indent=2))
 
-        best_identities = {p: tables.rotamers[p][r].aa for p, r in best_choice.items()}
+        best_identities = {
+            split_vpos(p)[1] or p: tables.rotamers[p][r].aa
+            for p, r in best_choice.items() if p in cb.sequence_positions
+        }
         best_mutations = {
             p: aa for p, aa in best_identities.items()
             if self._native.get(p) and aa != self._native[p]
@@ -560,7 +714,7 @@ class IPROLoop:
         substituted = []
         blocked = []
         for p in tables.positions:
-            nat = self._native.get(p)
+            nat = (self._native_v or self._native).get(p)
             allowed = [
                 i for i in range(len(tables.rotamers[p])) if (p, i) not in vetoed
             ] or list(range(len(tables.rotamers[p])))
@@ -578,15 +732,17 @@ class IPROLoop:
                     substituted.append(p)
             out[p] = idx
         if blocked:
+            real = sorted({split_vpos(p)[1] or p for p in blocked})
             self.notes.append(
                 "the restraints forbid every native rotamer at "
-                f"{', '.join(blocked)}, so the starting score is not the wild "
+                f"{', '.join(real)}, so the starting score is not the wild "
                 "type's; the input structure does not satisfy the restraints there"
             )
         if substituted:
+            real = sorted({split_vpos(p)[1] or p for p in substituted})
             self.notes.append(
                 "the native residue is not an allowed choice at "
-                f"{', '.join(substituted)}, so the reported starting score is for "
+                f"{', '.join(real)}, so the reported starting score is for "
                 "the best allowed residue there, not the wild type"
             )
         return out
@@ -595,17 +751,27 @@ class IPROLoop:
     def _rotamers_for(tables: EnergyTables, choices: dict[str, int]) -> dict[str, Rotamer]:
         return {p: tables.rotamers[p][i] for p, i in choices.items()}
 
-    def _ordered_positions(self, tables: EnergyTables) -> list[str]:
-        """Design positions in sequence order, so "contiguous" means something."""
+    def _ordered_positions(
+        self, tables: EnergyTables, scope: set[str] | None = None
+    ) -> list[str]:
+        """Design positions in sequence order, so "contiguous" means something.
+
+        Restricted to ``scope`` (the reference assembly's virtual positions) so
+        that a window names each sequence position once rather than once per
+        assembly; identity coupling then carries the choice to the others.
+        """
         by_label = {p.label: p for p in self.spec.positions}
-        return sorted(
-            tables.positions,
-            key=lambda lab: (
-                by_label[lab].chain if lab in by_label else lab,
-                by_label[lab].number if lab in by_label else 0,
-                by_label[lab].insertion_code if lab in by_label else "",
-            ),
-        )
+        candidates = [
+            v for v in tables.positions if scope is None or v in scope
+        ]
+
+        def key(v: str):
+            lab = split_vpos(v)[1] or v
+            dp = by_label.get(lab)
+            return (dp.chain if dp else lab, dp.number if dp else 0,
+                    dp.insertion_code if dp else "")
+
+        return sorted(candidates, key=key)
 
     def _choose_window(self, ordered: list[str]) -> list[str]:
         """A run of 1-3 design positions to re-decide, as IPRO does.

@@ -1022,6 +1022,186 @@ def test_dihedral_and_distance_geometry():
     assert abs(angular_deviation(10.0, 350.0) - 20.0) < 1e-9
 
 
+# ---------------------------------------------------------------------------
+# Binding assemblies
+# ---------------------------------------------------------------------------
+
+
+def _asm_tables(energies: dict[str, dict[tuple[str, int], float]]) -> EnergyTables:
+    """Toy tables from an explicit {position: {(aa, state): self energy}} map."""
+    positions = sorted(energies)
+    t = EnergyTables(positions=positions, rotamers={})
+    for pi, p in enumerate(positions):
+        lst = [
+            Rotamer(
+                position=p, aa=aa, state=st,
+                atoms=AtomSet(
+                    names=["CB"], coords=[[pi * 10.0, st * 0.5, 0.0]],
+                    resnames=[aa], reskeys=[("A", pi + 1, "")],
+                ),
+            )
+            for (aa, st) in sorted(energies[p])
+        ]
+        t.rotamers[p] = lst
+        for i, r in enumerate(lst):
+            t.self_energy[(p, i)] = energies[p][(r.aa, r.state)]
+    return t
+
+
+def test_assembly_spec_defaults_and_validation():
+    from ipro_agent.config import DesignSpec
+
+    base = dict(
+        goal="bind_tighter", goal_statement="x",
+        molecules=[
+            {"name": "e", "path": str(CRN), "role": "design", "kind": "protein", "chains": ["A"]},
+            {"name": "L1", "path": str(CRN), "role": "target", "kind": "ligand"},
+            {"name": "L2", "path": str(CRN), "role": "anti_target", "kind": "ligand"},
+        ],
+        positions=["A16"],
+    )
+    # No assemblies block -> one implicit assembly with every partner.
+    only = DesignSpec.from_dict(dict(base)).resolved_assemblies()
+    assert len(only) == 1 and set(only[0].molecules) == {"L1", "L2"}
+
+    two = DesignSpec.from_dict({**base, "assemblies": [
+        {"name": "a", "molecules": ["e", "L1"]},
+        {"name": "b", "molecules": ["L2"], "weight": 0.5, "must_pass": False},
+    ]}).resolved_assemblies()
+    assert [a.name for a in two] == ["a", "b"]
+    assert two[0].molecules == ["L1"]       # the design molecule is implicit
+    assert two[1].weight == 0.5 and two[1].must_pass is False
+
+    for bad, why in (
+        ([{"name": "a", "molecules": ["L1"]}], "L2 belongs to no assembly"),
+        ([{"name": "a", "molecules": ["nope"]}], "unknown molecule"),
+        ([{"name": "a", "molecules": ["L1"]}, {"name": "a", "molecules": ["L2"]}], "duplicate name"),
+        ([{"name": "a", "molecules": ["L1", "L2"], "must_pass": False}], "nothing gates acceptance"),
+        ([{"name": "a", "molecules": ["L1", "L2"], "weight": 0}], "non-positive weight"),
+    ):
+        try:
+            DesignSpec.from_dict({**base, "assemblies": bad}).resolved_assemblies()
+        except SpecError:
+            pass
+        else:
+            raise AssertionError(f"should have been rejected: {why}")
+
+
+def test_single_assembly_combine_is_a_no_op():
+    """The single-complex case must be exactly the problem it was before
+    assemblies existed -- same positions, same tables object."""
+    from ipro_agent.assemblies import combine
+    from ipro_agent.config import Assembly
+
+    t = _asm_tables({"A1": {("ALA", 1): -1.0, ("TRP", 1): 0.0}})
+    cb = combine({"only": t}, [Assembly(name="only")])
+    assert cb.tables is t
+    assert cb.identity_links == []
+    assert cb.sequence_positions == set(t.positions)
+    assert cb.n_assemblies == 1
+
+
+def test_assembly_identity_is_shared_while_packing_differs():
+    """IPRO's rule exactly: "rotamers are selected sequentially for each BA
+    whereas residue identity remains the same for all BAs"."""
+    from ipro_agent.assemblies import combine, identities_agree, split_vpos
+    from ipro_agent.config import Assembly
+
+    # TRP state 1 is best in h1, TRP state 2 is best in h2; ALA is worse in both.
+    h1 = _asm_tables({"A1": {("TRP", 1): -5.0, ("TRP", 2): -1.0, ("ALA", 1): -0.5}})
+    h2 = _asm_tables({"A1": {("TRP", 1): -1.0, ("TRP", 2): -5.0, ("ALA", 1): -0.5}})
+    cb = combine({"h1": h1, "h2": h2}, [Assembly(name="h1"), Assembly(name="h2")])
+    assert len(cb.identity_links) == 1
+    m = RotamerMILP(
+        cb.tables, native={p: "ALA" for p in cb.tables.positions},
+        identity_links=cb.identity_links, sequence_positions=cb.sequence_positions,
+    )
+    for solver in ("auto", "greedy"):
+        sol = m.solve(solver=solver)
+        assert not identities_agree(cb, sol.choices), solver
+        picked = {
+            split_vpos(v)[0]: (cb.tables.rotamers[v][i].aa, cb.tables.rotamers[v][i].state)
+            for v, i in sol.choices.items()
+        }
+        assert len({a for a, _ in picked.values()}) == 1, ("identity must be shared", picked)
+        assert len({s for _, s in picked.values()}) == 2, ("packing must differ", picked)
+    # -10 = each assembly's best packing of the shared identity
+    assert abs(m.solve(solver="auto").objective - (-10.0)) < 1e-9
+
+
+def test_assembly_optimum_matches_shared_identity_brute_force():
+    """Brute force with the right semantics: choose an identity per position
+    (shared), then pack each assembly independently."""
+    import itertools as _it
+
+    from ipro_agent.assemblies import combine
+    from ipro_agent.config import Assembly
+
+    e1 = {"A1": {("ALA", 1): -1.0, ("ALA", 2): -0.5, ("TRP", 1): 2.0, ("TRP", 2): 3.0},
+          "A2": {("ALA", 1): 0.0, ("ALA", 2): 0.5, ("TRP", 1): -1.0, ("TRP", 2): -0.2}}
+    e2 = {"A1": {("ALA", 1): 4.0, ("ALA", 2): 4.5, ("TRP", 1): -3.0, ("TRP", 2): -2.0},
+          "A2": {("ALA", 1): -0.5, ("ALA", 2): 0.0, ("TRP", 1): 1.0, ("TRP", 2): 1.5}}
+    per = {"h1": _asm_tables(e1), "h2": _asm_tables(e2)}
+    cb = combine(per, [Assembly(name="h1"), Assembly(name="h2")])
+    m = RotamerMILP(
+        cb.tables, native={p: "ALA" for p in cb.tables.positions},
+        identity_links=cb.identity_links, sequence_positions=cb.sequence_positions,
+    )
+    best = None
+    for seq in _it.product(["ALA", "TRP"], repeat=2):
+        total = 0.0
+        for t in per.values():
+            for p, aa in zip(["A1", "A2"], seq):
+                total += min(
+                    t.self_energy[(p, i)]
+                    for i, r in enumerate(t.rotamers[p]) if r.aa == aa
+                )
+        best = total if best is None else min(best, total)
+    assert abs(m.solve(solver="auto").objective - best) < 1e-6
+    assert abs(m.solve(solver="greedy").objective - best) < 1e-6
+
+
+def test_assembly_does_not_multiply_sequence_budgets():
+    """max_mutations is a budget on the SEQUENCE. Counting it in every assembly
+    would silently allow N_assemblies times as many mutations."""
+    from ipro_agent.assemblies import combine, split_vpos
+    from ipro_agent.config import Assembly
+
+    e = {"A1": {("TRP", 1): -5.0, ("ALA", 1): 0.0},
+         "A2": {("TRP", 1): -5.0, ("ALA", 1): 0.0}}
+    cb = combine({"h1": _asm_tables(e), "h2": _asm_tables(e)},
+                 [Assembly(name="h1"), Assembly(name="h2")])
+    native = {p: "ALA" for p in cb.tables.positions}
+    for k in (0, 1, 2):
+        m = RotamerMILP(
+            cb.tables, constraints=[Constraint(kind="max_mutations", count=k)],
+            native=native, identity_links=cb.identity_links,
+            sequence_positions=cb.sequence_positions,
+        )
+        sol = m.solve(solver="auto")
+        mutated = {
+            split_vpos(v)[1] for v, i in sol.choices.items()
+            if v in cb.sequence_positions and cb.tables.rotamers[v][i].aa != "ALA"
+        }
+        assert len(mutated) <= k, (k, mutated)
+
+
+def test_assembly_mismatched_rotamer_sets_are_rejected():
+    """Assemblies share the design molecule's backbone, so their rotamer sets
+    must be identical; a mismatch is an internal inconsistency, not input."""
+    from ipro_agent.assemblies import combine
+    from ipro_agent.config import Assembly
+
+    a = _asm_tables({"A1": {("ALA", 1): 0.0, ("TRP", 1): 0.0}})
+    b = _asm_tables({"A1": {("ALA", 1): 0.0}})
+    try:
+        combine({"h1": a, "h2": b}, [Assembly(name="h1"), Assembly(name="h2")])
+    except ValueError as exc:
+        assert "rotamer set" in str(exc) or "disagree" in str(exc)
+    else:
+        raise AssertionError("mismatched rotamer sets should be rejected")
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

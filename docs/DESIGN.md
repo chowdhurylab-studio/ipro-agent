@@ -34,6 +34,7 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Multiple binding assemblies (one sequence, per-assembly packing, conjunctive acceptance) | `assemblies.py`, `config.Assembly` | IPRO Suite: "rotamers are selected sequentially for each BA whereas residue identity remains the same for all BAs", and "all BAs must pass the selection criteria" |
 | Atom-position restraints (fix, tether, distance, dihedral) | `restraints.py`, `Constraint` vetoes in `milp.py` | IPRO Suite: four kinds of restraint "rigorously enforced throughout all functions"; the ±0.2 Å catalytic-distance form is from ACS Catal 2017 |
 | Design/target/anti-target vocabulary | `config.Role` | IPRO's own **DM** / **TM** / **DP** input vocabulary (design molecule, target molecule, design position); `anti_target` is this repo's addition |
 | Rotamer enumeration and mutagenesis | `rotamers.py`, `mutate.py`, `scripts/*.py` | PyMOL's mutagenesis wizard — **a substitution**, see §3 |
@@ -178,6 +179,58 @@ A `fix` or `tether` on a **backbone** atom cannot be enforced by rotamer choice.
 In `full` mode it is handed to the relaxation backend; in `fixed-backbone` mode
 it is already satisfied, and the run says so.
 
+### 1d. How binding assemblies are implemented
+
+IPRO's rule is that one sequence is packed **separately in each assembly**, and
+that every assembly must pass acceptance. Rather than add a third index to
+every variable -- and so a fourth encoding of the same program to keep in step,
+which is how §7's defect 1 happened -- a multi-assembly problem is rewritten as
+a single larger one:
+
+* each (assembly, design position) pair becomes a **virtual position**
+  `"with_C12::A115"`. Constraint (2) then already reads "one rotamer per
+  position **per assembly**", which is the per-BA packing, for free.
+* pair terms exist only within an assembly; cross-assembly blocks are never
+  built.
+* identity is tied across assemblies by one extra linear family -- for each
+  position `i`, each non-reference assembly `h`, and each permitted amino acid
+  `a`:
+
+      sum_{r : aa(r)=a} y[ref::i, r]  -  sum_{r : aa(r)=a} y[h::i, r]  =  0
+
+  This is the published coupling `Y[i,a] = sum_r X[i,r,h]` with the identity
+  variable `Y` eliminated, so it needs **no new variables**.
+* sequence-level constraints (mutation counts, residue-class cardinality,
+  require/forbid, integer cuts) are counted over the reference assembly only.
+  Counting them in every assembly would silently multiply every budget by the
+  number of assemblies — verified not to
+  (`test_assembly_does_not_multiply_sequence_budgets`).
+
+**Acceptance.** The objective test on the combined score runs as before; with
+more than one assembly, each gating assembly must *additionally* pass its own
+Metropolis test on its own energy change. That is the paper's "all BAs must
+pass". Single-assembly runs take exactly the path they always did, so nothing
+about the existing behaviour changed — the whole test suite passes unaltered.
+
+**Verified:** identity is shared while packing differs per assembly, and the
+optimum equals a brute force that chooses an identity per position and then
+packs each assembly independently (`test_assembly_*`).
+
+**What is not supported.** Every assembly shares the design molecule's
+**backbone**; they differ only in which partner molecules are present. IPRO
+allows each BA its own structure, which matters once backbone perturbation is in
+play. Also note a practical limit observed while testing: on a real buried site,
+the partner's contribution to a rotamer's energy can be much smaller than the
+intrinsic packing differences between rotamers, so the per-assembly optimum is
+often the same rotamer in every assembly. The capability is exact; whether it
+*changes the answer* depends on the partner mattering enough.
+
+**Selecting against a partner** is still the `switch_specificity` goal's job,
+not an assembly's. Assembly weights are positive and each assembly's packing is
+minimized, because that is what the protein will actually do when it meets that
+partner; the trade-off between partners lives in the objective and in
+acceptance.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -252,7 +305,6 @@ specified, and this table is the record of what that changes.
 | **Vina re-docking inside the loop** | `dock.py` exists and is tested in dry-run; it is not wired into the iteration. | Vina is not installed in this environment, so a wired-in untested path would be a liability. When wiring it: re-score Vina poses with the energy backend, and **never** add Vina affinities to the objective — the scales are unrelated. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
-| **Multiple binding assemblies (BAs)** | Not modelled; one assembly only. | IPRO requires every BA to pass acceptance for an iteration to be retained, which is how it designs against several binding topologies at once. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
 
 ---

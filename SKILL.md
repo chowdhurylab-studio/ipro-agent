@@ -140,6 +140,40 @@ implements. The rest need the user's knowledge of the system, a family
 alignment, or a prior round's results. Ask; do not guess, and never silently
 design away a catalytic residue.
 
+### 2a. Use assemblies when one sequence must work in several complexes
+
+By default every molecule sits in one complex. When the design has to work in
+more than one binding topology — bound to C12 *and* to C14, or with and without
+a cofactor — declare them, and the loop will design **one sequence** that packs
+separately in each, requiring all of them to pass acceptance:
+
+```yaml
+assemblies:
+  - {name: with_C12, molecules: [C12]}
+  - {name: with_C14, molecules: [C14], weight: 0.5}
+```
+
+The design molecule is implicit in every assembly. `weight` scales an
+assembly's contribution to the combined objective; `must_pass: false` lets an
+assembly be scored without gating acceptance.
+
+Three things to understand before reaching for this:
+
+- **Identity is shared, packing is not.** That is the point: the same residue
+  may adopt different rotamers in different complexes, which is what makes the
+  sequence a genuine compromise rather than an average.
+- **Assemblies do not express "bind A, not B".** Every assembly's packing is
+  minimized, because that is what the protein will do when it meets that
+  partner. Selecting *against* a partner is `goal: switch_specificity` with
+  `role: anti_target`. Use assemblies when the sequence must work in several
+  contexts; use the anti-target role when it must fail in one.
+- **It may not change the answer.** On a buried site the intrinsic packing
+  differences between rotamers can dwarf the partner's contribution, so every
+  assembly may pick the same rotamer anyway. That is a real result, not a bug.
+
+Every molecule must belong to an assembly — one left out would be silently
+unscored, so the spec is rejected instead.
+
 ### 2b. Add restraints when geometry must be preserved
 
 This is the capability that makes enzyme work possible: **"redesign this pocket
@@ -321,6 +355,7 @@ Before reporting a design, confirm:
 - [ ] `proven_optimal` is true, or the heuristic packing is disclosed
 - [ ] the score *improved* (`best_score` < `start_score`); if not, say the search found nothing
 - [ ] reference energies were set, or the all-small-residue caveat is reported
+- [ ] if the design must work in more than one complex, assemblies are declared (otherwise every partner is scored in one combined complex, which is a different problem)
 - [ ] any geometry that must survive the redesign is stated as a restraint (a catalytic contact, a metal site, a disulfide) — the optimizer will not preserve it on its own
 - [ ] no restraint came back `RESTRAINT NOT ENFORCED` or `NATIVE VIOLATION` unreported
 - [ ] every entry in `notes` is passed on to the user

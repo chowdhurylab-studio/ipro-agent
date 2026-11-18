@@ -270,6 +270,50 @@ class IndelSpec:
 
 
 # ---------------------------------------------------------------------------
+# Binding assemblies
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Assembly:
+    """One binding topology the design must work in -- IPRO's **BA**.
+
+    "The totality of the participating molecules interacting with a particular
+    binding topology is referred to as a binding assembly (BA)." A design
+    problem may have several, and the rule that makes them useful is:
+
+        the optimal combination of rotamers is selected **separately for each
+        BA**, whereas the **residue identity is the same in all of them**
+
+    so one sequence is evaluated in several structural contexts at once, each
+    free to repack. That is what lets a single run demand "binds C12 *and*
+    rejects C14" rather than ranking the two afterwards.
+
+    ``molecules`` names the participants. The design molecule is always a
+    participant and need not be listed. ``weight`` scales this assembly's
+    contribution to the combined objective; ``must_pass`` decides whether the
+    acceptance test requires it (IPRO: "all BAs must pass the selection
+    criteria for the results of the iteration to be retained").
+    """
+
+    name: str
+    molecules: list[str] = field(default_factory=list)
+    weight: float = 1.0
+    must_pass: bool = True
+
+    def __post_init__(self) -> None:
+        if not str(self.name).strip():
+            raise SpecError("every assembly needs a name")
+        self.name = str(self.name).strip()
+        if self.weight <= 0:
+            raise SpecError(
+                f"assembly {self.name!r} has weight {self.weight}; weights scale a "
+                "contribution to the objective and must be positive (use a goal "
+                "with an anti-target to penalize an interaction)"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Restraints
 # ---------------------------------------------------------------------------
 
@@ -608,6 +652,9 @@ class DesignSpec:
     indels: list[IndelSpec] = field(default_factory=list)
     #: Geometric conditions every accepted design must satisfy.
     restraints: list[Restraint] = field(default_factory=list)
+    #: Binding topologies to design in simultaneously. Empty means one implicit
+    #: assembly containing every molecule, which is the single-complex case.
+    assemblies: list[Assembly] = field(default_factory=list)
     loop: LoopSettings = field(default_factory=LoopSettings)
     backends: Backends = field(default_factory=Backends)
     #: Free-form, goal-specific knobs (e.g. a target pore radius). Validated by
@@ -626,6 +673,62 @@ class DesignSpec:
                 f"exactly one molecule must have role 'design'; found {len(ms)}"
             )
         return ms[0]
+
+    def molecule(self, name: str) -> Molecule:
+        for m in self.molecules:
+            if m.name == name:
+                return m
+        raise SpecError(
+            f"no molecule named {name!r}; have "
+            f"{', '.join(repr(m.name) for m in self.molecules)}"
+        )
+
+    def resolved_assemblies(self) -> list[Assembly]:
+        """The assemblies to design in, with the single-complex default filled in.
+
+        With no ``assemblies:`` block this returns one assembly containing every
+        molecule, so the single-complex case needs no extra configuration and
+        behaves exactly as it did before assemblies existed.
+        """
+        if not self.assemblies:
+            return [Assembly(
+                name="complex",
+                molecules=[m.name for m in self.molecules if m.role is not Role.DESIGN],
+            )]
+        out: list[Assembly] = []
+        design = self.design_molecule.name
+        seen: set[str] = set()
+        for a in self.assemblies:
+            if a.name in seen:
+                raise SpecError(f"two assemblies are both named {a.name!r}")
+            seen.add(a.name)
+            names = [n for n in a.molecules if n != design]
+            for n in names:
+                self.molecule(n)          # raises with a helpful message
+            out.append(Assembly(
+                name=a.name, molecules=names, weight=a.weight, must_pass=a.must_pass
+            ))
+        # A molecule in no assembly would be silently ignored, which would change
+        # the problem without saying so.
+        used = {n for a in out for n in a.molecules}
+        orphan = [
+            m.name for m in self.molecules
+            if m.role is not Role.DESIGN and m.name not in used
+        ]
+        if orphan:
+            raise SpecError(
+                f"molecule(s) {orphan} belong to no assembly, so they would not be "
+                "scored at all. Add them to an assembly, or remove them."
+            )
+        if not any(a.must_pass for a in out):
+            raise SpecError(
+                "no assembly has must_pass; at least one must gate acceptance, or "
+                "nothing constrains whether an iteration is kept"
+            )
+        return out
+
+    def assembly_molecules(self, a: Assembly) -> list[Molecule]:
+        return [self.molecule(n) for n in a.molecules]
 
     @property
     def targets(self) -> list[Molecule]:
@@ -679,6 +782,7 @@ class DesignSpec:
 
         indels = [IndelSpec(**i) for i in d.pop("indels", [])]
         restraints = [Restraint(**r) for r in d.pop("restraints", [])]
+        assemblies = [Assembly(**a) for a in d.pop("assemblies", [])]
         loop = LoopSettings(**d.pop("loop", {}))
         backends = Backends(**d.pop("backends", {}))
 
@@ -693,7 +797,8 @@ class DesignSpec:
             )
         return cls(
             molecules=mols, positions=positions, indels=indels,
-            restraints=restraints, loop=loop, backends=backends, **d,
+            restraints=restraints, assemblies=assemblies,
+            loop=loop, backends=backends, **d,
         )
 
     @classmethod
@@ -731,6 +836,8 @@ class DesignSpec:
             m["role"] = str(m["role"].value if hasattr(m["role"], "value") else m["role"])
         for i in d["indels"]:
             i["kind"] = str(i["kind"].value if hasattr(i["kind"], "value") else i["kind"])
+        for a in d.get("assemblies", []):
+            pass   # plain fields only
         for r in d.get("restraints", []):
             r["kind"] = str(r["kind"].value if hasattr(r["kind"], "value") else r["kind"])
             r.pop("refs", None)   # derived; re-parsed from `atoms` on load
@@ -765,6 +872,15 @@ class DesignSpec:
                 lines.append(f"  delete {i.chain}{i.residues}")
         for r in self.restraints:
             lines.append(f"  restraint {r.describe()}")
+        asm = self.resolved_assemblies()
+        if len(asm) > 1 or self.assemblies:
+            lines.append(f"assemblies ({len(asm)}):")
+            for a in asm:
+                gate = "" if a.must_pass else "  (not gating acceptance)"
+                lines.append(
+                    f"  {a.name}: {', '.join(a.molecules) or '(design molecule alone)'}"
+                    f"  weight {a.weight:g}{gate}"
+                )
         n = self.design_space_size()
         lines.append(f"design space: {n:.3g} sequences" if n > 1e6 else f"design space: {n} sequences")
         lines.append(f"iterations: {self.loop.iterations}")

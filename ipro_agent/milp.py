@@ -423,6 +423,8 @@ class RotamerMILP:
         visited: Sequence[dict[str, str]] = (),
         rotamer_vetoes: Iterable[tuple[str, int]] = (),
         pair_vetoes: Iterable[tuple[str, int, str, int]] = (),
+        identity_links: Sequence[tuple[str, str]] = (),
+        sequence_positions: Iterable[str] | None = None,
     ) -> None:
         self.t = tables
         self.constraints = list(constraints)
@@ -440,6 +442,19 @@ class RotamerMILP:
         self.pair_vetoes = {
             (str(pi), int(ri), str(pj), int(rj)) for pi, ri, pj, rj in pair_vetoes
         }
+        #: Pairs of positions whose chosen *identity* must agree. Used for
+        #: multiple binding assemblies, where the same sequence is packed
+        #: separately in each: see :mod:`ipro_agent.assemblies`.
+        self.identity_links = [(str(a), str(b)) for a, b in identity_links]
+        #: Positions that sequence-level constraints (mutation counts, residue
+        #: classes, require/forbid, integer cuts) are counted over. With
+        #: several assemblies this is one representative set, because identity
+        #: is coupled and counting every assembly would multiply each budget by
+        #: the number of assemblies. Defaults to every position.
+        self.sequence_positions = (
+            set(tables.positions) if sequence_positions is None
+            else {str(p) for p in sequence_positions}
+        )
         #: Sequences already evaluated, as position -> amino acid. Each becomes
         #: an integer ("no good") cut so the optimizer cannot return it again:
         #:
@@ -531,6 +546,31 @@ class RotamerMILP:
         for n, con in enumerate(self.constraints):
             L.extend(self._emit_constraint(n, con))
 
+        # -- identity coupling across binding assemblies
+        if self.identity_links:
+            L.append(
+                "\\ (12) identity is shared across assemblies: for each permitted "
+                "amino acid, the\n\\     rotamers of that identity must be chosen in "
+                "both positions or in neither"
+            )
+            n = 0
+            for a, b in self.identity_links:
+                if a not in t.rotamers or b not in t.rotamers:
+                    continue
+                for aa in sorted({r.aa for r in t.rotamers[a]} | {r.aa for r in t.rotamers[b]}):
+                    left = [
+                        f"+1 {self._y(a, i)}"
+                        for i, r in enumerate(t.rotamers[a]) if r.aa == aa
+                    ]
+                    right = [
+                        f"-1 {self._y(b, i)}"
+                        for i, r in enumerate(t.rotamers[b]) if r.aa == aa
+                    ]
+                    if not left and not right:
+                        continue
+                    L.append(f" idlink{n}: " + _wrap_terms(left + right) + " = 0")
+                    n += 1
+
         # -- restraint vetoes
         if self.rotamer_vetoes:
             L.append("\\ (10) restraint vetoes: forbidden rotamers")
@@ -597,7 +637,7 @@ class RotamerMILP:
             k = con.resolve_count(npos)
             vs = [
                 self._y(p, r)
-                for p in t.positions
+                for p in self._seq_positions()
                 for r, rot in enumerate(t.rotamers[p])
                 if self.native.get(p) and rot.aa != self.native[p]
             ]
@@ -610,7 +650,7 @@ class RotamerMILP:
             want = con.residue_set()
             vs = [
                 self._y(p, r)
-                for p in t.positions
+                for p in self._seq_positions()
                 for r, rot in enumerate(t.rotamers[p])
                 if rot.aa in want
             ]
@@ -629,7 +669,7 @@ class RotamerMILP:
 
         elif con.kind in ("require", "forbid"):
             want = con.residue_set()
-            for p in (con.positions or t.positions):
+            for p in (con.positions or self._seq_positions()):
                 if p not in t.rotamers:
                     continue
                 vs = [
@@ -667,6 +707,34 @@ class RotamerMILP:
         else:
             out.append(f"\\ WARNING: unknown constraint kind {con.kind!r}, ignored")
         return out
+
+    def _identity_groups(self) -> list[list[str]]:
+        """Positions tied together by identity links, as connected components."""
+        if not self.identity_links:
+            return []
+        parent: dict[str, str] = {}
+
+        def find(x: str) -> str:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in self.identity_links:
+            if a not in self.t.rotamers or b not in self.t.rotamers:
+                continue
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+        groups: dict[str, list[str]] = {}
+        for x in list(parent):
+            groups.setdefault(find(x), []).append(x)
+        return [sorted(v) for v in groups.values() if len(v) > 1]
+
+    def _seq_positions(self) -> list[str]:
+        """Positions that sequence-level constraints count over, in order."""
+        return [p for p in self.t.positions if p in self.sequence_positions]
 
     def _cut_vars(self, assignment: dict[str, str]) -> list[str]:
         """Variables whose simultaneous selection reproduces ``assignment``.
@@ -781,6 +849,14 @@ class RotamerMILP:
         for (p, r, _q), vs in groups.items():
             prob += pulp.lpSum(vs) == y[(p, r)]
         self._add_pulp_user_constraints(prob, pulp, y, w)
+        for a, b in self.identity_links:
+            if a not in t.rotamers or b not in t.rotamers:
+                continue
+            for aa in sorted({r.aa for r in t.rotamers[a]} | {r.aa for r in t.rotamers[b]}):
+                left = [y[(a, i)] for i, r in enumerate(t.rotamers[a]) if r.aa == aa]
+                right = [y[(b, i)] for i, r in enumerate(t.rotamers[b]) if r.aa == aa]
+                if left or right:
+                    prob += pulp.lpSum(left) == pulp.lpSum(right)
         for (p, r) in self.rotamer_vetoes:
             if (p, r) in y:
                 prob += y[(p, r)] == 0
@@ -856,7 +932,7 @@ class RotamerMILP:
                 k = con.resolve_count(npos)
                 vs = [
                     y[(p, r)]
-                    for p in t.positions
+                    for p in self._seq_positions()
                     for r, rot in enumerate(t.rotamers[p])
                     if self.native.get(p) and rot.aa != self.native[p]
                 ]
@@ -867,7 +943,7 @@ class RotamerMILP:
                 want = con.residue_set()
                 vs = [
                     y[(p, r)]
-                    for p in t.positions
+                    for p in self._seq_positions()
                     for r, rot in enumerate(t.rotamers[p])
                     if rot.aa in want
                 ]
@@ -878,7 +954,7 @@ class RotamerMILP:
                         prob += pulp.lpSum(vs) <= k
             elif con.kind in ("require", "forbid"):
                 want = con.residue_set()
-                for p in (con.positions or t.positions):
+                for p in (con.positions or self._seq_positions()):
                     if p not in t.rotamers:
                         continue
                     vs = [
@@ -994,13 +1070,50 @@ class RotamerMILP:
         its answers as a lower bound on quality, not as the MILP optimum.
         """
         t = self.t
-        choices = {}
-        for p in t.positions:
-            allowed = [
+        def allowed_at(p: str) -> list[int]:
+            return [
                 r for r in range(len(t.rotamers[p]))
                 if (p, r) not in self.rotamer_vetoes
             ] or list(range(len(t.rotamers[p])))
-            choices[p] = min(allowed, key=lambda r: t.self_energy.get((p, r), 0.0))
+
+        choices: dict[str, int] = {}
+        groups = self._identity_groups()
+        if groups:
+            # With identity coupling, choosing each position independently
+            # breaks the link immediately. Pick one identity per group -- the
+            # one whose best packing is cheapest summed over the group -- then
+            # take each member's cheapest rotamer of that identity. This starts
+            # feasible instead of relying on repair.
+            for members in groups:
+                shared = set.intersection(*(
+                    {r.aa for i, r in enumerate(t.rotamers[m]) if i in set(allowed_at(m))}
+                    for m in members
+                )) or set.intersection(*({r.aa for r in t.rotamers[m]} for m in members))
+                best_aa, best_cost, best_pick = None, None, {}
+                for aa in sorted(shared):
+                    cost, pick = 0.0, {}
+                    ok = True
+                    for m in members:
+                        cands = [
+                            (t.self_energy.get((m, i), 0.0), i)
+                            for i in allowed_at(m) if t.rotamers[m][i].aa == aa
+                        ]
+                        if not cands:
+                            ok = False
+                            break
+                        e, i = min(cands)
+                        cost += e
+                        pick[m] = i
+                    if ok and (best_cost is None or cost < best_cost):
+                        best_aa, best_cost, best_pick = aa, cost, pick
+                if best_aa is None:
+                    for m in members:
+                        choices[m] = min(allowed_at(m), key=lambda r: t.self_energy.get((m, r), 0.0))
+                else:
+                    choices.update(best_pick)
+        for p in t.positions:
+            if p not in choices:
+                choices[p] = min(allowed_at(p), key=lambda r: t.self_energy.get((p, r), 0.0))
 
         # Repair toward feasibility, then improve.
         for _ in range(200):
@@ -1066,7 +1179,14 @@ class RotamerMILP:
         for (pi, ri, pj, rj) in self.pair_vetoes:
             if choices.get(pi) == ri and choices.get(pj) == rj:
                 return False
-        ids = {p: t.rotamers[p][r].aa for p, r in choices.items()}
+        for a, b in self.identity_links:
+            if a in choices and b in choices:
+                if t.rotamers[a][choices[a]].aa != t.rotamers[b][choices[b]].aa:
+                    return False
+        ids = {
+            p: t.rotamers[p][r].aa for p, r in choices.items()
+            if p in self.sequence_positions
+        }
         for con in self.constraints:
             if con.kind == "max_mutations":
                 k = con.resolve_count(npos)
@@ -1083,12 +1203,12 @@ class RotamerMILP:
                     return False
             elif con.kind == "require":
                 want = con.residue_set()
-                for p in (con.positions or t.positions):
+                for p in (con.positions or self._seq_positions()):
                     if p in ids and ids[p] not in want:
                         return False
             elif con.kind == "forbid":
                 want = con.residue_set()
-                for p in (con.positions or t.positions):
+                for p in (con.positions or self._seq_positions()):
                     if p in ids and ids[p] in want:
                         return False
             elif con.kind == "max_energy":
@@ -1105,6 +1225,27 @@ class RotamerMILP:
         """Change one position to move toward feasibility. True if it changed."""
         t = self.t
         npos = len(t.positions)
+
+        # Identity coupling first: it is structural, and leaving it broken makes
+        # every other repair meaningless.
+        for a, b in self.identity_links:
+            if a not in choices or b not in choices:
+                continue
+            if t.rotamers[a][choices[a]].aa == t.rotamers[b][choices[b]].aa:
+                continue
+            best: tuple[float, str, int] | None = None
+            for src, dst in ((a, b), (b, a)):
+                want = t.rotamers[src][choices[src]].aa
+                for k, rot in enumerate(t.rotamers[dst]):
+                    if rot.aa != want or (dst, k) in self.rotamer_vetoes:
+                        continue
+                    cost = t.self_energy.get((dst, k), 0.0)
+                    if best is None or cost < best[0]:
+                        best = (cost, dst, k)
+            if best is None:
+                return False
+            choices[best[1]] = best[2]
+            return True
 
         # Vetoes first: they are hard and cheap to repair.
         for p, r in list(choices.items()):
@@ -1149,12 +1290,15 @@ class RotamerMILP:
             if con.kind == "min_class":
                 want = con.residue_set()
                 k = con.resolve_count(npos)
-                have = sum(1 for p, r in choices.items() if t.rotamers[p][r].aa in want)
+                have = sum(
+                    1 for p, r in choices.items()
+                    if p in self.sequence_positions and t.rotamers[p][r].aa in want
+                )
                 if have >= k:
                     continue
                 # Switch the cheapest position that can take a wanted identity.
                 cands = []
-                for p in t.positions:
+                for p in self._seq_positions():
                     if t.rotamers[p][choices[p]].aa in want:
                         continue
                     for r, rot in enumerate(t.rotamers[p]):
@@ -1167,7 +1311,7 @@ class RotamerMILP:
                 return True
             if con.kind == "require":
                 want = con.residue_set()
-                for p in (con.positions or t.positions):
+                for p in (con.positions or self._seq_positions()):
                     if p in choices and t.rotamers[p][choices[p]].aa not in want:
                         for r, rot in enumerate(t.rotamers[p]):
                             if rot.aa in want:
@@ -1175,7 +1319,7 @@ class RotamerMILP:
                                 return True
             if con.kind == "forbid":
                 want = con.residue_set()
-                for p in (con.positions or t.positions):
+                for p in (con.positions or self._seq_positions()):
                     if p in choices and t.rotamers[p][choices[p]].aa in want:
                         alts = [(t.self_energy.get((p, r), 0.0), r)
                                 for r, rot in enumerate(t.rotamers[p]) if rot.aa not in want]
@@ -1187,7 +1331,10 @@ class RotamerMILP:
                 # out to its cheapest non-member rotamer.
                 want = con.residue_set()
                 k = con.resolve_count(npos)
-                members = [p for p, r in choices.items() if t.rotamers[p][r].aa in want]
+                members = [
+                    p for p, r in choices.items()
+                    if p in self.sequence_positions and t.rotamers[p][r].aa in want
+                ]
                 if len(members) <= k:
                     continue
                 best: tuple[float, str, int] | None = None
@@ -1232,7 +1379,8 @@ class RotamerMILP:
             if con.kind == "max_mutations":
                 k = con.resolve_count(npos)
                 muts = [p for p, r in choices.items()
-                        if self.native.get(p) and t.rotamers[p][r].aa != self.native[p]]
+                        if p in self.sequence_positions
+                        and self.native.get(p) and t.rotamers[p][r].aa != self.native[p]]
                 if len(muts) <= k:
                     continue
                 # Revert the most expensive mutation to native, if offered.
