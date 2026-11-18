@@ -56,6 +56,40 @@ resolved and what the run will actually use. **Read its output before promising
 the user anything**, because the protocol degrades in a specific, documented way
 when PyRosetta or Vina is absent (see *Degraded modes*).
 
+### 0. Get the structure, and find out what is actually at the positions
+
+Before anything else, two commands that cost nothing and prevent the most
+expensive class of mistake here.
+
+If the user named a protein or a PDB entry instead of giving you a file:
+
+```bash
+python3 -m ipro_agent fetch 2OMF --chain A        # the only networked command
+```
+
+Then **always**, before writing a spec:
+
+```bash
+python3 -m ipro_agent inspect 2OMF_A.pdb --positions 18,20,38,40
+```
+
+```
+chain A: 340 residues, A1..A340
+  18 -> A18 is VAL      - {position: A18, allowed: [standard]}
+  20 -> A20 is LEU      38 -> A38 is MET      40 -> A40 is TYR
+```
+
+**Report that back to the user before you design anything.** A user who says
+"you may change residues 18, 20, 38 and 40" has not said which chain, and a
+bare number means chain A here — so a number resolved against the wrong chain
+designs a *different* residue, and nothing downstream notices because the
+residue it lands on usually exists (docs/DESIGN.md §7b, defect 14). `inspect`
+also shows you the chains, the sequence, any ligands and waters, and whether the
+numbering has gaps — all of which change what a spec means.
+
+If a position the user named does not exist, or the native residue is not what
+their description implies, **stop and ask**. Do not pick the nearest one.
+
 ### 1. Turn the request into a goal
 
 `python3 -m ipro_agent goals` lists every goal, what it optimizes, and which

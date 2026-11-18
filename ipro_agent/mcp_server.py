@@ -892,7 +892,9 @@ PROMPTS: list[dict[str, Any]] = [
             "the operating manual says to."
         ),
         "arguments": [
-            {"name": "structure", "description": "path to the PDB/mmCIF file",
+            {"name": "structure",
+             "description": "path to a PDB/mmCIF file, OR a four-character PDB "
+                            "ID to fetch (e.g. 2OMF)",
              "required": True},
             {"name": "goal", "description": "what to achieve, in plain words",
              "required": True},
@@ -973,25 +975,39 @@ def _prompt_get(name: str, args: dict) -> dict:
             "tool descriptions cannot.\n"
             "2. `ipro_doctor`. If a design is impossible, stop and use "
             "`ipro_setup` rather than guessing.\n"
-            "3. `ipro_goals`, then pick the objective that matches my goal, and "
+            "3. Get the structure. If what I gave you is a four-character PDB "
+            "ID rather than a file, `ipro_fetch_structure` it (and reduce it to "
+            "the chain we mean -- a spec's residue numbers are per chain).\n"
+            "4. **`ipro_inspect_structure`, with the residues I named.** Tell me "
+            "what is at each one before you design anything: a bare residue "
+            "number does not say which chain it is in, and one resolved against "
+            "the wrong chain silently designs a different residue. If a position "
+            "I named does not exist, or is not the residue I seem to expect, "
+            "stop and ask.\n"
+            "5. `ipro_goals`, then pick the objective that matches my goal, and "
             "tell me which one and why. If the goal needs an anti-target or a "
             "transition-state analogue I have not given you, ask.\n"
-            "4. Write the spec, copying the shape from `ipro://example-spec`. "
+            "6. Write the spec, copying the shape from `ipro://example-spec`. "
             "Put my goal in `goal_statement` **in my own words**. Any geometry "
             "that must survive -- a catalytic contact, a metal site, a "
             "disulfide -- has to be a restraint, because the optimizer will not "
             "preserve it on its own.\n"
-            "5. `ipro_validate`. Fix every problem it reports before spending "
+            "7. `ipro_validate`. Fix every problem it reports before spending "
             "CPU. Show me the design-space size.\n"
-            "6. `ipro_score` for the starting baseline.\n"
-            "7. `ipro_run` with a `max_minutes` budget, then poll "
+            "8. `ipro_score` for the starting baseline.\n"
+            "9. `ipro_run` with a `max_minutes` budget, then poll "
             "`ipro_status`. It is detached; do not block.\n"
-            "8. Report as `ipro://house-rules` requires: the mode, the notes, "
+            "10. Report as `ipro://house-rules` requires: the mode, the notes, "
             "and the fact that every design is a bench hypothesis. If nothing "
             "was accepted, say so.\n\n"
             "If a step fails and the only way past it is to weaken something I "
             "specified -- a restraint, the allowed residues, an energy "
-            "threshold -- tell me instead of doing it."
+            "threshold -- tell me instead of doing it.\n\n"
+            "If the goal is about a pore or channel radius, read the axis "
+            "caveat: the radius is only meaningful when the design positions "
+            "surround the lumen, and the run reports the axis clearance so you "
+            "can tell. Say so rather than quoting a number you cannot stand "
+            "behind."
         )
     return {
         "description": f"ipro-agent: {name}",
