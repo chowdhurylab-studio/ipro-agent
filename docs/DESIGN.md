@@ -37,6 +37,40 @@ from this tool as an IPRO result.
 | Design/target/anti-target vocabulary | `config.Role` | IPRO's own **DM** / **TM** / **DP** input vocabulary (design molecule, target molecule, design position); `anti_target` is this repo's addition |
 | Rotamer enumeration and mutagenesis | `rotamers.py`, `mutate.py`, `scripts/*.py` | PyMOL's mutagenesis wizard — **a substitution**, see §3 |
 
+### 1a. Position selection, as actually published
+
+`ipro-agent positions` proposes design positions by distance to a partner
+molecule. That is one step of the published procedure, not all of it. The
+thioesterase work (Grisewood et al., *ACS Catal* 2017, SI Table S4) sorts
+candidate residues by distance from the ligand and then takes **the eight
+closest that are not excluded**, where a residue is excluded if any of the
+following holds:
+
+| Exclusion | Can this tool detect it? |
+|---|---|
+| part of the catalytic triad | no — needs the user |
+| forms the oxyanion hole | no |
+| shown important for function by mutagenesis | no |
+| within 4.5 Å of the reactive atom (the thioester sulfur) | **yes**, given the atom |
+| Cα more than 0.75 Å closer than Cβ to the ligand's discriminating atom (side chain points away) | **yes**, given the atom |
+| ≥40% conservation in the family | no — needs an alignment |
+| the family alignment has a gap at that position | no |
+| in one of the protein's flexible loops | no |
+| an earlier round showed mutating it abolished activity | no |
+
+Two of the nine are geometric and computable; the rest require knowledge this
+tool does not have. That is why `positions` is documented as a *proposal* and
+why `SKILL.md` makes the agent walk the user through the list rather than
+accepting a distance cutoff as the answer. Note also that the sorting metric
+itself changed between rounds in that paper (rounds 1–2 used a different
+distance definition from rounds 3–4), so even the computable part is a choice,
+not a constant.
+
+The same SI reports the correlation between computed and experimentally
+estimated ΔΔG (Figure S5), measured against myristoyl-ACP for round 3 and
+lauroyl-ACP for round 4 — the basis for the caveat in §5 that these objectives
+rank better than they predict magnitudes.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -147,7 +181,7 @@ Protein-InDelMaker.
 | Missing | Why | What is unresolved |
 |---|---|---|
 | **IPRO Suite paper, JCC 2015** (10.1002/jcc.23796) | Closed access; Wiley returned 403 with a bot challenge; this machine is off campus with no VPN up | The full input-language specification and the rotamer MILP's published problem size. The method's technical content was recovered from CC-BY surrogates — chiefly the PoreDesigner SI — and from the source. |
-| **ACS Catal 2017 supporting information** (Tables S1–S4) | `pubs.acs.org` returned Cloudflare 403; not open access on PMC | Per-design energies and the full position-selection tables for that case. |
+| ~~ACS Catal 2017 supporting information~~ | **Obtained 2026-11-18** through the user's own Chrome; ACS serves Supporting Information free of charge even off campus. 30 pp., Tables S1–S6 + Figures S1–S5. | Closed. The position-selection rule it documents is now recorded in §1a. |
 | **IPRO's rotamer library** | Not in either release; referenced as an external path | Why PyMOL's library is used instead. |
 | **A public IPRO+/− release** | `maranasgroup/ipro--` is an empty repository | Indels exist publicly only as Protein-InDelMaker. |
 | **PoreDesigner's water-wire probe** | Never deposited; the SI publishes only fitted helix parameters | The example case cannot express the published pore objective. |

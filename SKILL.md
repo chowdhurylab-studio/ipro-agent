@@ -118,9 +118,27 @@ python3 -m ipro_agent positions spec.yaml --near C12 --cutoff 5 --json
 ```
 
 This prints the residues within the cutoff of that partner, ready to paste as
-spec YAML. Say clearly that it is a proposal: the published protocols *also*
-drop highly conserved and catalytic residues, which a distance rule cannot
-detect. Ask the user before designing away a catalytic residue.
+spec YAML. **It is a proposal, not an answer.** The published protocol sorts
+residues by distance and then takes *the eight closest that are not excluded* —
+and the exclusions are what a distance rule cannot see. Walk the user through
+them before accepting a position list (Grisewood et al., ACS Catal 2017,
+Table S4 excludes a residue for any of these):
+
+- it belongs to the catalytic triad, or forms the oxyanion hole;
+- mutagenesis has shown it matters for function;
+- it is within 4.5 Å of the reactive atom (there, the thioester sulfur) — i.e.
+  it is at the wrong end of the ligand to change specificity;
+- its Cα is more than 0.75 Å *closer* than its Cβ to the discriminating atom of
+  the ligand, so the side chain points away from the feature being designed;
+- it has ≥40% conservation across the family;
+- the family alignment has a gap there;
+- it sits in a flexible loop;
+- an earlier round showed mutating it abolished activity.
+
+Distance alone is cheap to compute and is the one criterion this tool
+implements. The rest need the user's knowledge of the system, a family
+alignment, or a prior round's results. Ask; do not guess, and never silently
+design away a catalytic residue.
 
 ### 3. Validate before spending time
 
