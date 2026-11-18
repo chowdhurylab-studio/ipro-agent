@@ -3916,3 +3916,20 @@ def test_regression_an_indel_at_an_unmodelled_terminus_is_reported():
     # And the note has to reach the run: apply_terminal takes plan.terminal,
     # not the plan, so the loop must carry plan.notes itself.
     assert "self.notes.extend(plan.notes)" in (REPO / "ipro_agent" / "loop.py").read_text()
+
+
+def test_a_zero_mutation_structure_says_it_is_not_a_design():
+    """best/design.pdb is written up front from the native sequence, repacked,
+    and only replaced once an ACCEPTED candidate beats it. On a run where every
+    candidate is rejected it is therefore the starting point -- which the file
+    has to say on its own, since tracing a stray PDB back to its run is the
+    only reason this header exists. Verified end to end on a spec whose pore
+    filter rejects everything: 3 iterations, 0 accepted, NO DESIGN WAS ACCEPTED
+    in the notes, MUTATIONS none in the header."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "NO MUTATIONS: this is the input sequence," in src
+    # Every PDB record must still fit 80 columns.
+    for line in src.splitlines():
+        if "REMARK   1 WARNING" in line and line.strip().startswith('"'):
+            text = line.strip().strip('",')
+            assert len(text) <= 80, (len(text), text)

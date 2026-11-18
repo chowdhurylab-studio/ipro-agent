@@ -788,6 +788,18 @@ class IPROLoop:
             f"REMARK   1 SCORE      {score:.4f} ({self.backend.units_short})",
             f"REMARK   1 MUTATIONS  {muts}",
         ]
+        if not mutations:
+            # This file is written up front from the native sequence, repacked,
+            # and is only replaced once an ACCEPTED candidate beats it. So a
+            # copy with no mutations is the starting point, not a design, and a
+            # stray PDB has to say so on its own -- the whole reason this header
+            # exists.
+            out.append(
+                "REMARK   1 WARNING    NO MUTATIONS: this is the input sequence,"
+            )
+            out.append(
+                "REMARK   1 WARNING    repacked. It is NOT a design. See the run's notes."
+            )
         if len(self._assemblies) > 1:
             out.append(f"REMARK   1 ASSEMBLY   {assembly}")
         out.append(

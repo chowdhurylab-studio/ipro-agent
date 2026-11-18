@@ -995,4 +995,4 @@ termini — where that residue sits in the middle of the real chain — appendin
 created exactly the unclosed break internal indels are refused for. SEQRES is
 now compared against the modelled span and the discrepancy reported.
 
-The suite is **148 tests**.
+The suite is **149 tests**.
