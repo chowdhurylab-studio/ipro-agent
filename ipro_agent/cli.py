@@ -28,7 +28,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import DesignSpec, SpecError
+from .config import DesignSpec, Role, SpecError
 from .goals import GOALS, build_goal, suggest_goal
 from .state import RunDir
 
@@ -358,6 +358,106 @@ def cmd_run(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def cmd_dock(args) -> int:
+    """Dock the spec's partner molecules into the design molecule's site.
+
+    An explicit step rather than part of the loop: the iteration does not
+    auto-dock (see docs/DESIGN.md), so an agent that needs a partner re-placed
+    after mutation calls this, then re-scores. The search box is centred on the
+    design positions by default, which is the site that was redesigned.
+
+    Note that Vina's affinity is **not** on the same scale as this tool's
+    objective. Use the pose, then score it with ``ipro-agent score``; never add
+    a Vina affinity to an objective value.
+    """
+    spec = _load(args.spec)
+    import numpy as np
+
+    from .dock import DockBox, dock, dock_batch, find_vina
+    from .structure import Structure
+
+    dm = spec.design_molecule
+    design = Structure.load(dm.path, dm.chains or None)
+
+    if args.center:
+        center = tuple(float(x) for x in args.center)
+    else:
+        # Centre on the design positions: the site that was redesigned.
+        pts = []
+        for p in spec.positions:
+            try:
+                pts.append(design.coords(design.find(p.chain, p.number, p.insertion_code)))
+            except Exception as exc:
+                print(f"warning: {p.label}: {exc}", file=sys.stderr)
+        if not pts:
+            print(
+                "cannot place a docking box: no design position resolved and no "
+                "--center given",
+                file=sys.stderr,
+            )
+            return 2
+        center = tuple(float(v) for v in np.vstack(pts).mean(axis=0))
+
+    box = DockBox(center=center, size=tuple(float(s) for s in args.size))
+    ligands = [m for m in spec.molecules if m.role is not Role.DESIGN]
+    if args.only:
+        ligands = [m for m in ligands if m.name in args.only]
+    if not ligands:
+        print("no partner molecules to dock", file=sys.stderr)
+        return 2
+
+    if find_vina() is None and not args.dry_run:
+        print(
+            "AutoDock Vina not found. Install it (see docs/INSTALL.md) or pass "
+            "--dry-run to see the exact command that would be issued.",
+            file=sys.stderr,
+        )
+        return 1
+
+    out_dir = Path(args.out_dir)
+    results = []
+    for m in ligands:
+        try:
+            res = dock(
+                receptor=dm.path, ligand=m.path, box=box, out_dir=out_dir,
+                exhaustiveness=args.exhaustiveness, num_modes=args.num_modes,
+                seed=args.seed, dry_run=args.dry_run,
+            )
+            results.append({
+                "molecule": m.name,
+                "best_score_kcal": res.best_score,
+                "scores": res.scores,
+                "poses": [str(p) for p in res.poses],
+                "command": res.command,
+            })
+        except Exception as exc:
+            results.append({"molecule": m.name, "error": f"{type(exc).__name__}: {exc}"})
+
+    payload = {
+        "box": {"center": list(center), "size": list(box.size)},
+        "dry_run": bool(args.dry_run),
+        "results": results,
+        "note": (
+            "Vina affinities are not comparable to this tool's objective; "
+            "re-score the chosen pose with 'ipro-agent score'"
+        ),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"box centre {tuple(round(c, 2) for c in center)} size {box.size}")
+        for r in results:
+            if "error" in r:
+                print(f"  {r['molecule']}: ERROR {r['error']}")
+            elif args.dry_run:
+                print(f"  {r['molecule']}: would run\n    {' '.join(r['command'])}")
+            else:
+                print(f"  {r['molecule']}: best {r['best_score_kcal']:+.2f} kcal/mol, "
+                      f"{len(r['poses'])} poses")
+        print(f"\n{payload['note']}")
+    return 0 if all("error" not in r for r in results) else 1
+
+
 def cmd_status(args) -> int:
     rd = RunDir(args.run_dir, create=False)
     if not rd.path.exists():
@@ -431,6 +531,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, help="override spec loop.random_seed")
     p.add_argument("--max-minutes", type=float, help="wall-clock budget; stops cleanly")
     p.set_defaults(func=cmd_run)
+
+    p = add_json(sub.add_parser("dock", help="dock the spec's partners with AutoDock Vina"))
+    p.add_argument("spec")
+    p.add_argument("--out-dir", default="runs/dock")
+    p.add_argument("--center", nargs=3, metavar=("X", "Y", "Z"),
+                   help="box centre; default is the centroid of the design positions")
+    p.add_argument("--size", nargs=3, default=(22.5, 22.5, 22.5), metavar=("X", "Y", "Z"))
+    p.add_argument("--exhaustiveness", type=int, default=8)
+    p.add_argument("--num-modes", type=int, default=9)
+    p.add_argument("--seed", type=int, help="fix Vina's seed for a reproducible pose")
+    p.add_argument("--only", nargs="*", help="dock only these molecule names")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the exact Vina command without running it")
+    p.set_defaults(func=cmd_dock)
 
     p = add_json(sub.add_parser("status", help="progress of a run (cheap; safe to poll)"))
     p.add_argument("run_dir")

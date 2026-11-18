@@ -163,7 +163,25 @@ them):
 designed positions to be long residues (W/F/Y/M), and `reshape_channel` adds
 that constraint automatically when narrowing.
 
-### 5. Run
+### 5. Dock, if a partner must be re-placed
+
+The iteration loop does **not** auto-dock. When a ligand has to find a new pose
+after the pocket is mutated, dock it explicitly:
+
+```bash
+python3 -m ipro_agent dock spec.yaml --out-dir runs/dock --seed 1 --json
+```
+
+The box is centred on the design positions by default; `--center X Y Z` and
+`--size X Y Z` override it, and a box much larger than the site turns a redock
+into a blind dock. `--dry-run` prints the exact Vina command without running
+it, which is how to check the box before spending the time.
+
+**Never add a Vina affinity to an objective value.** Vina reports kcal/mol on
+its own scale, unrelated to this tool's score. Take the *pose*, then re-score
+with `ipro-agent score`.
+
+### 6. Run
 
 ```bash
 python3 -m ipro_agent run spec.yaml --run-dir runs/case1 --json
@@ -186,7 +204,7 @@ context — it grows without limit. Use `status`.
 `run` accepts `--max-minutes`, which stops cleanly at a checkpoint. Use it when
 you do not know how long a case will take.
 
-### 6. Report honestly
+### 7. Report honestly
 
 The run directory has a fixed layout:
 
