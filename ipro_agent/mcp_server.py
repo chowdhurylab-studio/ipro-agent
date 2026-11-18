@@ -349,6 +349,43 @@ def tool_status(args: dict) -> dict:
     return rep
 
 
+def tool_inspect(args: dict) -> dict:
+    """What is in a structure, and what is AT the residues someone named.
+
+    This is the step that makes a request like "you may change residues 18, 20,
+    38 and 40" actionable at all. Without it nothing says which chain those
+    numbers are in, what the native residues are, or whether they exist -- so an
+    agent guesses, and a guess here designs a different residue without
+    anything noticing (docs/DESIGN.md section 7b, defect 14).
+    """
+    cmd = ["inspect", str(args["structure"])]
+    for ch in args.get("chains") or []:
+        cmd += ["--chain", str(ch)]
+    if args.get("positions"):
+        pos = args["positions"]
+        cmd += ["--positions", ",".join(str(x) for x in pos)
+                if isinstance(pos, list) else str(pos)]
+    return _cli(cmd, timeout=300)
+
+
+def tool_fetch(args: dict) -> dict:
+    """Download a structure from the RCSB PDB by its four-character ID.
+
+    The ONLY networked operation in this package. It is a separate, explicit
+    tool for that reason: a design run must never silently reach the internet
+    for its inputs, and whoever reads the result should know a coordinate file
+    arrived from outside.
+    """
+    cmd = ["fetch", str(args["pdb_id"])]
+    if args.get("out"):
+        cmd += ["-o", str(args["out"])]
+    for ch in args.get("chains") or []:
+        cmd += ["--chain", str(ch)]
+    if args.get("force"):
+        cmd += ["--force"]
+    return _cli(cmd, timeout=300)
+
+
 def tool_setup(args: dict) -> dict:
     """Report what is missing and, on confirmation, install it.
 
@@ -488,6 +525,60 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_setup,
+    },
+    {
+        "name": "ipro_fetch_structure",
+        "description": (
+            "Download a structure from the RCSB PDB by its four-character ID "
+            "(e.g. 2OMF), optionally writing a copy reduced to one chain. This "
+            "is the ONLY tool here that uses the network. Use it when the user "
+            "names a protein or a PDB entry rather than giving you a file. "
+            "Always check what you got with ipro_inspect_structure afterwards: "
+            "resolution, missing residues and engineered mutations all change "
+            "what a design means."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pdb_id": {"type": "string", "description": "e.g. 2OMF, 1CRN"},
+                "out": {"type": "string", "description": "output path (default <ID>.pdb)"},
+                "chains": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "also write a copy reduced to these chains; a "
+                                   "design spec's residue numbers are per chain",
+                },
+                "force": {"type": "boolean", "description": "overwrite an existing file"},
+            },
+            "required": ["pdb_id"],
+        },
+        "handler": tool_fetch,
+    },
+    {
+        "name": "ipro_inspect_structure",
+        "description": (
+            "What is in a structure file: chains, residue counts and ranges, the "
+            "one-letter sequence, ligands and waters -- and, for residues you "
+            "name, the NATIVE identity plus a ready-to-paste spec line. Call "
+            "this before writing a spec, every time. A user who says 'residues "
+            "18, 20, 38 and 40' has not said which chain, and a residue number "
+            "that resolves to the wrong chain silently designs a different "
+            "residue. It needs no PyMOL and no network."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "structure": {"type": "string", "description": "path to a PDB or mmCIF file"},
+                "chains": {"type": "array", "items": {"type": "string"},
+                           "description": "restrict the report to these chains"},
+                "positions": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "residues to report the native identity of, e.g. "
+                                   "[\"18\", \"A20\", \"1:115\"]",
+                },
+            },
+            "required": ["structure"],
+        },
+        "handler": tool_inspect,
     },
     {
         "name": "ipro_goals",

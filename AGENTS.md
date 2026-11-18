@@ -31,6 +31,9 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
 
 - **Handing this to someone else**: `docs/HANDOFF.md`.
 
+- **Worked requests, end to end**: `docs/EXAMPLE_PROMPTS.md` -- five real
+  prompts with what each produces and what must not be concluded from it.
+
 - **Driving this from another agent, without cloning it**: there is an MCP
   server (`python3 -m ipro_agent.mcp_server`, or the `ipro-agent-mcp` console
   script) exposing eight typed tools. See README.md, "Use it from another agent

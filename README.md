@@ -162,6 +162,7 @@ not resolve. `ipro_setup` says so in its result.
 | [docs/MILP.md](docs/MILP.md) | the integer program in full |
 | [docs/INSTALL.md](docs/INSTALL.md) | dependencies and what each one unlocks |
 | [examples/ompf_pore/](examples/ompf_pore/) | worked case, with an honest `EXPECTED.md` |
+| [docs/EXAMPLE_PROMPTS.md](docs/EXAMPLE_PROMPTS.md) | five prompts to paste at an agent, and what each actually produces |
 | [docs/HANDOFF.md](docs/HANDOFF.md) | passing this to a labmate, a student or your future self |
 
 ## Dependencies

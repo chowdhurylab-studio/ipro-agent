@@ -3997,12 +3997,22 @@ def test_mcp_server_speaks_the_protocol():
     assert "instructions" in init and "screening" in init["instructions"]
 
     names = [t["name"] for t in replies[2]["result"]["tools"]]
-    assert names == ["ipro_doctor", "ipro_setup", "ipro_goals", "ipro_validate",
-                     "ipro_positions", "ipro_score", "ipro_milp", "ipro_run",
-                     "ipro_status"], names
-    # doctor first: it is the one the others' descriptions tell you to call
-    # before anything else, and clients show the list in order.
+    # Membership, not an exact ordered list -- the list grows, and pinning its
+    # order made adding a tool look like a regression. What matters is that
+    # every tool is there and that the ordering intent holds.
+    expected = {
+        "ipro_doctor", "ipro_setup", "ipro_fetch_structure",
+        "ipro_inspect_structure", "ipro_goals", "ipro_validate",
+        "ipro_positions", "ipro_score", "ipro_milp", "ipro_run", "ipro_status",
+    }
+    assert set(names) == expected, sorted(set(names) ^ expected)
+    # doctor first: every other description tells you to call it before
+    # anything else, and clients show the list in order.
     assert names[0] == "ipro_doctor"
+    assert names[1] == "ipro_setup", "the fix for doctor's bad news comes next"
+    # The structure tools must precede the spec tools: you cannot write a spec
+    # about residues until you know what they are.
+    assert names.index("ipro_inspect_structure") < names.index("ipro_validate")
     for tool in replies[2]["result"]["tools"]:
         assert tool["description"].strip(), tool["name"]
         assert tool["inputSchema"]["type"] == "object", tool["name"]
@@ -4281,3 +4291,86 @@ def test_mcp_resources_survive_a_pip_install():
 
     # The cwd fallback is what makes a pip-installed server usable.
     assert "Path.cwd()" in (REPO / "ipro_agent" / "mcp_server.py").read_text()
+
+
+def test_inspect_resolves_a_bare_residue_number_to_its_native_identity():
+    """A user says "you may change residues 18, 20, 38 and 40" and nothing in
+    the tool could say which chain those are in, what is at them, or whether
+    they exist -- so an agent guessed, and a guess here silently designs a
+    different residue (docs/DESIGN.md section 7b defect 14).
+
+    On the shipped OmpF example those four resolve to VAL, LEU, MET and TYR --
+    which is also a check against the paper, since PoreDesigner's tested designs
+    mutate exactly V18, L20, M38 and Y40 to tryptophan."""
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "inspect", str(ompf),
+         "--positions", "18,20,38,40", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=600,
+    )
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+
+    natives = {a["asked"]: a["native"] for a in out["positions"]}
+    assert natives == {"18": "VAL", "20": "LEU", "38": "MET", "40": "TYR"}, natives
+    # It must also hand back something pasteable, and say which chain it chose.
+    for a in out["positions"]:
+        assert a["resolves_to"] == f"A{a['asked']}"
+        assert "allowed:" in a["spec_form"]
+
+    chain = next(c for c in out["chains"] if c["chain"] == "A")
+    assert chain["residues"] == 340 and chain["first"] == "A1" and chain["last"] == "A340"
+    assert chain["sequence"].startswith("AEIYNKDGNK")
+
+    # A position that does not exist must say so, not resolve to something else.
+    p2 = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "inspect", str(ompf),
+         "--positions", "99999", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=600,
+    )
+    bad = json.loads(p2.stdout)["positions"][0]
+    assert "error" in bad and "not found" in bad["error"].lower(), bad
+
+
+def test_fetch_is_the_only_networked_command_and_validates_its_input():
+    """`fetch` is the one operation here that touches the internet, which is
+    why it is a command of its own: a design run must never silently reach out
+    for its inputs. It is not exercised against the network in the suite -- that
+    would make the tests depend on RCSB being up -- so what is checked here is
+    the input validation and that nothing else imports urllib."""
+    # A malformed ID must be refused before any request is made.
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "fetch", "NOTANID"],
+        capture_output=True, text=True, cwd=REPO, timeout=120,
+    )
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+    assert "not a PDB ID" in p.stderr
+    assert "Traceback" not in p.stderr
+
+    # Nothing in the package may reach the network except this one command.
+    # Checked over the parsed imports, not the text: grepping for "requests"
+    # matched the English word in a comment, which is the kind of false
+    # positive that teaches people to ignore a check.
+    import ast
+
+    NETWORKING = {"urllib", "requests", "httpx", "socket", "http", "ftplib",
+                  "telnetlib", "smtplib", "xmlrpc", "asyncio"}
+    offenders = {}
+    for path in sorted((REPO / "ipro_agent").rglob("*.py")):
+        tree = ast.parse(path.read_text(errors="ignore"))
+        used = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                used |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                used.add(node.module.split(".")[0])
+        hit = used & NETWORKING
+        if hit:
+            offenders[path.relative_to(REPO).as_posix()] = sorted(hit)
+    assert list(offenders) == ["ipro_agent/cli.py"], (
+        f"only the fetch command may use the network; found: {offenders}"
+    )
+    assert offenders["ipro_agent/cli.py"] == ["urllib"], offenders

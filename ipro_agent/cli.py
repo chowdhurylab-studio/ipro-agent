@@ -483,6 +483,181 @@ def cmd_status(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# inspect / fetch -- answering "what is in this structure" and "get me one"
+# ---------------------------------------------------------------------------
+
+
+def cmd_inspect(args) -> int:
+    """What is actually in a structure file, before writing a spec about it.
+
+    This existed nowhere, and its absence is why "you may change residues 18,
+    20, 38 and 40" was not actionable: nothing could say which chain those
+    numbers live in, what the native residues are, or whether they exist at
+    all. An agent had to guess, and a guess here silently designs a different
+    residue (docs/DESIGN.md section 7b defect 14).
+    """
+    from .structure import Structure, StructureError
+
+    try:
+        st = Structure.load(args.structure, chains=args.chain or None)
+    except StructureError as exc:
+        print(f"cannot read structure: {exc}", file=sys.stderr)
+        return 2
+
+    out: dict = {"structure": str(Path(args.structure)), "chains": []}
+    for ch in st.chain_ids():
+        residues = list(st.residues(ch))
+        if not residues:
+            continue
+        refs = [st.ref(r) for r in residues]
+        out["chains"].append({
+            "chain": ch,
+            "residues": len(residues),
+            "first": refs[0].label,
+            "last": refs[-1].label,
+            "numbering_is_contiguous": [r.number for r in refs]
+                == list(range(refs[0].number, refs[0].number + len(refs))),
+            "sequence": st.sequence(ch),
+        })
+    het = [st.ref(r) for r in st.hetero_residues()]
+    out["hetero_residues"] = [
+        {"label": r.label, "name": r.name} for r in het[:40]
+    ]
+    out["hetero_count"] = len(het)
+
+    # The point of the command: what is AT the positions someone named.
+    if args.positions:
+        from .config import DesignPosition
+
+        asked = []
+        for token in args.positions.replace(",", " ").split():
+            try:
+                pos = DesignPosition.parse(token)
+            except SpecError as exc:
+                asked.append({"asked": token, "error": str(exc)})
+                continue
+            try:
+                res = st.find(pos.chain, pos.number, pos.insertion_code)
+                ref = st.ref(res)
+                asked.append({
+                    "asked": token, "resolves_to": ref.label,
+                    "native": ref.name,
+                    "spec_form": f"- {{position: {ref.label}, allowed: [standard]}}",
+                })
+            except StructureError as exc:
+                asked.append({"asked": token, "resolves_to": pos.label,
+                              "error": str(exc)})
+        out["positions"] = asked
+
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print(f"structure: {out['structure']}")
+    for c in out["chains"]:
+        gap = "" if c["numbering_is_contiguous"] else "   (numbering has gaps)"
+        print(f"  chain {c['chain']}: {c['residues']} residues, "
+              f"{c['first']}..{c['last']}{gap}")
+        print(f"    {c['sequence']}")
+    if out["hetero_count"]:
+        names = ", ".join(f"{h['name']}{h['label']}" for h in out["hetero_residues"][:12])
+        print(f"  hetero/ligands ({out['hetero_count']}): {names}")
+    for a in out.get("positions", []):
+        if "error" in a:
+            print(f"  {a['asked']}: NOT FOUND -- {a['error']}")
+        else:
+            print(f"  {a['asked']} -> {a['resolves_to']} is {a['native']}")
+            print(f"      {a['spec_form']}")
+    if out.get("positions"):
+        print("\n  Residue numbers in a spec are per chain. A bare number means "
+              "chain A;\n  write '1:115' for chain 1. See docs/DESIGN.md 1b.")
+    return 0
+
+
+#: The only command in this package that touches the network, and the only
+#: host it will contact. Everything else is offline by design.
+RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
+
+
+def cmd_fetch(args) -> int:
+    """Download a structure from the RCSB PDB by its ID.
+
+    Deliberately a command of its own rather than something a spec can trigger:
+    it is the single networked operation here, and a design run must never
+    silently reach the internet for its inputs.
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    pdb_id = str(args.pdb_id).strip().upper()
+    if not re.fullmatch(r"[0-9A-Z]{4}", pdb_id):
+        print(
+            f"not a PDB ID: {args.pdb_id!r}. Expected four characters, e.g. 2OMF "
+            f"or 1CRN. (Entries also have a longer 'pdb_00002omf' form; give the "
+            f"short one.)",
+            file=sys.stderr,
+        )
+        return 2
+
+    url = RCSB_URL.format(pdb_id=pdb_id)
+    out_path = Path(args.out or f"{pdb_id}.pdb")
+    if out_path.exists() and not args.force:
+        print(f"{out_path} already exists; pass --force to overwrite",
+              file=sys.stderr)
+        return 2
+    try:
+        with urllib.request.urlopen(url, timeout=args.timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        print(f"RCSB returned {exc.code} for {pdb_id}: no such entry?\n  {url}",
+              file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"could not reach RCSB ({type(exc).__name__}: {exc}).\n"
+              f"  This is the only command that needs the network. Download "
+              f"{url}\n  by hand and pass the file directly.", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(body)
+
+    result = {"pdb_id": pdb_id, "url": url, "path": str(out_path),
+              "bytes": len(body)}
+
+    if args.chain:
+        # Reduce to the requested chain(s), which is what a design usually
+        # wants: a spec naming residue numbers is per chain.
+        from .structure import Structure, StructureError
+
+        try:
+            st = Structure.load(out_path, chains=list(args.chain))
+            reduced = out_path.with_name(
+                f"{out_path.stem}_{''.join(args.chain)}{out_path.suffix}")
+            st.save(reduced)
+            result["chain_only"] = str(reduced)
+            result["chains_kept"] = list(args.chain)
+        except StructureError as exc:
+            print(f"downloaded {out_path}, but could not reduce to chain "
+                  f"{args.chain}: {exc}", file=sys.stderr)
+            result["chain_error"] = str(exc)
+
+    result["next_step"] = (
+        f"python3 -m ipro_agent inspect {result.get('chain_only', result['path'])} "
+        f"--positions A18,A20"
+    )
+    result["provenance_note"] = (
+        f"Record that this came from {url}. PDB coordinate files carry no "
+        f"copyright restriction, but a design is only as good as the structure: "
+        f"check the resolution, missing residues and any engineered mutations "
+        f"before trusting it."
+    )
+    print(json.dumps(result, indent=2) if args.json else
+          "\n".join(f"{k}: {v}" for k, v in result.items()))
+    return 0
+
+
 def cmd_goals(args) -> int:
     rows = []
     for name, cls in sorted(GOALS.items()):
@@ -566,6 +741,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("run_dir")
     p.add_argument("--tail", type=int, default=5)
     p.set_defaults(func=cmd_status)
+
+    p = add_json(sub.add_parser("inspect", help="what is in a structure file"))
+    p.add_argument("structure")
+    p.add_argument("--chain", action="append",
+                   help="restrict to this chain (repeatable)")
+    p.add_argument("--positions",
+                   help="residues to report the native identity of, e.g. 'A18,A20,38'")
+    p.set_defaults(func=cmd_inspect)
+
+    p = add_json(sub.add_parser(
+        "fetch", help="download a structure from the RCSB PDB (the only networked command)"))
+    p.add_argument("pdb_id", help="four-character PDB ID, e.g. 2OMF")
+    p.add_argument("-o", "--out", help="output path (default <ID>.pdb)")
+    p.add_argument("--chain", action="append",
+                   help="also write a copy reduced to this chain (repeatable)")
+    p.add_argument("--force", action="store_true", help="overwrite an existing file")
+    p.add_argument("--timeout", type=float, default=60.0)
+    p.set_defaults(func=cmd_fetch)
 
     p = add_json(sub.add_parser("goals", help="list goals and what each optimizes"))
     p.add_argument("--statement", help="a plain-language goal, to get a suggestion")

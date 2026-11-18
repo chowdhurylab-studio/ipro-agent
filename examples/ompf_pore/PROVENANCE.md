@@ -46,11 +46,24 @@ assembled from the PoreDesigner paper (Chowdhury et al., *Nat Commun* 9:3661,
   "bottleneck" that *passes* the sub-4 Å filter. The run reports the clearance
   and says it cannot vouch for the radius. docs/DESIGN.md §7d has the
   measurements; give `goal_options.pore_axis` to measure it directly.
-* **Where `2omf_A.pdb` came from.** RCSB PDB entry **2OMF** (OmpF porin,
-  Cowan et al. 1992), downloaded from `https://files.rcsb.org/download/2OMF.pdb`
-  and reduced to chain A. PDB coordinate files are distributed by the RCSB
-  without copyright restriction (CC0), which is why it can ship here; the MIT
-  licence of this repo does not purport to cover it.
+* **Where `2omf_A.pdb` came from, exactly.** RCSB PDB entry **2OMF** (OmpF
+  porin, Cowan et al. 1992), from `https://files.rcsb.org/download/2OMF.pdb`
+  (274 104 bytes), reduced to **chain A, protein only**. Re-verified on
+  2026-11-18 by re-downloading it with `python3 -m ipro_agent fetch 2OMF
+  --chain A`: the protein atoms are **identical, atom for atom and coordinate
+  for coordinate** (2627 atoms). The fetched chain A additionally carries 200
+  atoms this file does not: **72 of C8E** (octyl-POE detergent, which OmpF is
+  crystallised in) and **128 waters**.
+
+  Removing the detergent from a porin is a modelling decision, so here is the
+  number behind it: the nearest C8E atom is **9.0 Å** from the centre of the
+  constriction ring formed by the four design positions (median 18.4 Å, only 2
+  of 72 atoms within 10 Å). It sits at the barrel periphery, not in the eyelet,
+  so stripping it does not change the pore measurement.
+
+  PDB coordinate files are distributed by the RCSB without copyright
+  restriction, which is why this one can ship here; the MIT licence of this
+  repo does not purport to cover it.
 
 * **No published per-design energies exist** to compare against. The paper
   reports mutation sets, pore diameters and hydrophobicity scores only.
