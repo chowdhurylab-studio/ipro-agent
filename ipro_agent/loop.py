@@ -253,31 +253,50 @@ class IPROLoop:
         )
         return ctx
 
+    # -- measurement without designing -------------------------------------
+
+    def build_tables(self) -> EnergyTables:
+        """Self/pair energy tables for the current structures.
+
+        Public because both the loop and ``ipro-agent score`` need them, and
+        reaching into the loop's internals from the CLI was fragile.
+        """
+        if self._rotamer_cache is None:
+            self.prepare()
+        assert self._rotamer_cache is not None
+        template = build_template(
+            [self._design_st, *self._partners.values()],
+            [p.label for p in self.spec.positions],
+        )
+        return build_tables(
+            self._rotamer_cache,
+            template,
+            self.backend,
+            max_self_energy=float(self.spec.goal_options.get("max_self_energy", 50.0)),
+            pair_eps=float(self.spec.goal_options.get("pair_eps", 1e-3)),
+            energy_cutoff=self.spec.loop.energy_cutoff,
+            native=self._native,
+            reference_energies=self.spec.goal_options.get("reference_energies"),
+            strain_weight=float(self.spec.goal_options.get("strain_weight", 0.0)),
+        )
+
+    def measure_native(self) -> tuple[ScoreContext, EnergyTables]:
+        """Score the input as supplied, with the native identity where allowed.
+
+        This is what ``ipro-agent score`` reports: the reference an objective
+        may need (``goal_options.reference_interaction``), and a check that the
+        molecules are actually in contact.
+        """
+        tables = self.build_tables()
+        choice = self._native_choice(tables)
+        return self._context_for(self._rotamers_for(tables, choice)), tables
+
     # -- the loop ----------------------------------------------------------
 
     def run_loop(self) -> RunResult:
         spec = self.spec
-        if self._rotamer_cache is None:
-            self.prepare()
-        assert self._rotamer_cache is not None
-
-        template = build_template(
-            [self._design_st, *self._partners.values()],
-            [p.label for p in spec.positions],
-        )
-        self.run.log(f"template: {len(template)} fixed atoms")
-
-        tables = build_tables(
-            self._rotamer_cache,
-            template,
-            self.backend,
-            max_self_energy=float(spec.goal_options.get("max_self_energy", 50.0)),
-            pair_eps=float(spec.goal_options.get("pair_eps", 1e-3)),
-            energy_cutoff=spec.loop.energy_cutoff,
-            native=self._native,
-            reference_energies=spec.goal_options.get("reference_energies"),
-            strain_weight=float(spec.goal_options.get("strain_weight", 0.0)),
-        )
+        tables = self.build_tables()
+        self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
         if not spec.goal_options.get("reference_energies") and not self.backend.can_relax:
             self.notes.append(
                 "no amino-acid reference energies were supplied and the backend has "
@@ -286,7 +305,6 @@ class IPROLoop:
                 "goal_options.reference_energies, or use the PyRosetta backend, "
                 "before treating identities as a design result."
             )
-        self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
 
         # -- starting point: the native sequence, repacked --------------------
         start_choice = self._native_choice(tables)

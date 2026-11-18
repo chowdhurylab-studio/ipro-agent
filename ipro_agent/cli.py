@@ -260,24 +260,7 @@ def cmd_score(args) -> int:
 
     loop = IPROLoop(spec, args.run_dir or "runs/_score")
     loop.prepare()
-    import numpy as np  # noqa: F401  (ensures the numeric stack is importable)
-
-    tables_choice = None
-    # Score the native packing: the rotamer whose identity matches the native.
-    from .milp import build_tables
-    from .rotamers import build_template
-
-    template = build_template(
-        [loop._design_st, *loop._partners.values()],
-        [p.label for p in spec.positions],
-    )
-    tables = build_tables(
-        loop._rotamer_cache, template, loop.backend, native=loop._native,
-        energy_cutoff=spec.loop.energy_cutoff,
-        reference_energies=spec.goal_options.get("reference_energies"),
-    )
-    tables_choice = loop._native_choice(tables)
-    ctx = loop._context_for(loop._rotamers_for(tables, tables_choice))
+    ctx, _tables = loop.measure_native()
     goal = loop.goal
     payload = {
         "backend": loop.backend.describe(),
