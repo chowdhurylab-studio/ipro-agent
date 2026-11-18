@@ -203,6 +203,7 @@ def build_tables(
     pair_eps: float = 1e-3,
     energy_cutoff: float = 12.0,
     native: dict[str, str] | None = None,
+    reference_energies: dict[str, float] | None = None,
 ) -> EnergyTables:
     """Compute self/pair energies, pruning as described in the module docstring.
 
@@ -217,8 +218,26 @@ def build_tables(
     defaults to 0: PyMOL's strain is on its own scale and mixing it into a
     kcal/mol total without calibration would be unjustified. Set it
     deliberately if you want rotamer-probability-like behaviour.
+
+    ``reference_energies`` adds a per-amino-acid constant to the self energy.
+    **Read this before interpreting a design.** With no reference energies, a
+    rigid-backbone search of buried positions reliably collapses to the
+    smallest residue available -- usually all-alanine -- because a large side
+    chain in a cavity sized for the native one simply clashes, and nothing in
+    the energy rewards filling space. That is not a bug in the search; it is
+    what the energy function says. Real design codes correct for it with an
+    unfolded-state reference term per residue type: IPRO carries a hardcoded
+    20-entry amino-acid reference-energy table, and Rosetta's ref2015 includes
+    a ``ref`` term, which the PyRosetta backend therefore gets for free.
+
+    No default table is supplied here, because inventing one would put
+    unsourced numbers at the centre of the objective. Supply your own (via
+    ``goal_options.reference_energies``), or use the PyRosetta backend. If you
+    leave it empty and see an all-small-residue answer, that is the expected
+    behaviour and not a result.
     """
     native = native or {}
+    reference_energies = reference_energies or {}
     positions = sorted(rotamers)
     tab = EnergyTables(positions=positions, rotamers={}, stats={})
 
@@ -232,6 +251,7 @@ def build_tables(
             e = backend.interaction(rot.atoms, template)
             if strain_weight and rot.strain is not None:
                 e += strain_weight * rot.strain
+            e += reference_energies.get(rot.aa, 0.0)
             scored.append((e, rot))
 
         # Keep anything below the clash threshold; always keep at least one
@@ -297,6 +317,18 @@ def build_tables(
 # ---------------------------------------------------------------------------
 # The program
 # ---------------------------------------------------------------------------
+
+
+class Infeasible(RuntimeError):
+    """No assignment satisfies the constraints.
+
+    Distinct from a solver being missing or crashing, and deliberately *not*
+    retried with a different solver: infeasibility is a property of the program,
+    so substituting a heuristic would mean returning an assignment that violates
+    the user's constraints or re-visits a sequence an integer cut forbade. The
+    caller is expected to change the program -- a different window of positions,
+    fewer cuts -- or to stop.
+    """
 
 
 @dataclass
@@ -583,6 +615,11 @@ class RotamerMILP:
                 sol.lp_path = lp_path
                 sol.seconds = time.time() - t0
                 return sol
+            except Infeasible:
+                # Propagate immediately: see Infeasible's docstring. Trying
+                # another solver, or the heuristic, would return an assignment
+                # that breaks the constraints we were asked to honour.
+                raise
             except Exception as exc:  # try the next option
                 last_err = exc
                 log.info("MILP solver %r unavailable or failed: %s", which, exc)
@@ -740,16 +777,35 @@ class RotamerMILP:
 
         if not vals:
             raise RuntimeError(f"{name} solution file had no variable values")
+
+        # A solver that proves infeasibility still writes a solution file, with
+        # every variable at zero. Trusting it would invent a design the solver
+        # never endorsed (the first rotamer at every position), so reject any
+        # status that does not denote a usable solution...
+        low = status.lower()
+        for bad in ("infeasible", "no primal", "empty"):
+            if bad in low:
+                raise Infeasible(f"{name} proved the program infeasible (status {status!r})")
+        for bad in ("undefined", "unbounded"):
+            if bad in low:
+                raise RuntimeError(f"{name} reported status {status!r}")
+
+        # ...and verify structurally that what came back really is an
+        # assignment: exactly one selected rotamer per position. This catches a
+        # silently truncated or misparsed solution file, which a status string
+        # cannot.
         choices: dict[str, int] = {}
         for p in self.t.positions:
-            best_r, best_v = None, -1.0
-            for r in range(len(self.t.rotamers[p])):
-                v = vals.get(self._y(p, r), 0.0)
-                if v > best_v:
-                    best_r, best_v = r, v
-            if best_r is None:
-                raise RuntimeError(f"no rotamer variable found for {p}")
-            choices[p] = best_r
+            col = [vals.get(self._y(p, r), 0.0) for r in range(len(self.t.rotamers[p]))]
+            if not col:
+                raise RuntimeError(f"no rotamer variables for position {p}")
+            total = sum(col)
+            if abs(total - 1.0) > 1e-6:
+                raise RuntimeError(
+                    f"{name} returned a non-assignment at {p}: selected weight "
+                    f"{total:.6g}, expected 1 (status was {status!r})"
+                )
+            choices[p] = max(range(len(col)), key=lambda i: col[i])
         obj = self.evaluate(choices)
         # glpsol reports "INTEGER OPTIMAL" for a MIP and "OPTIMAL" for an LP;
         # CBC reports "Optimal". Anything else (time limit, feasible-only) must
@@ -803,11 +859,19 @@ class RotamerMILP:
                 choices[p] = best
                 if best != cur:
                     improved = True
-        feas = self._feasible(choices)
+        if not self._feasible(choices):
+            # Returning an infeasible assignment would mean handing back a
+            # design that violates the user's constraints, or one an integer
+            # cut already forbade. Say so instead.
+            raise Infeasible(
+                "the built-in heuristic could not find an assignment satisfying "
+                "the constraints (it does not prove infeasibility; install a MILP "
+                "solver for a definitive answer)"
+            )
         return MILPSolution(
             choices=choices,
             objective=self.evaluate(choices),
-            status="heuristic" + ("" if feas else "-INFEASIBLE"),
+            status="heuristic",
             solver="greedy (built-in heuristic; optimality NOT proven)",
             proven_optimal=False,
         )

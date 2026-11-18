@@ -281,12 +281,17 @@ class LoopSettings:
     ask for a very short run.
     """
 
-    #: Published cap is 10,000; the default here is small enough to be a
-    #: deliberate choice rather than an accidental multi-day run.
+    #: IPRO's own coded default is 3000 iterations (the Suite paper quotes a
+    #: 10,000 cap). The default here is deliberately small so that a run is a
+    #: considered choice rather than an accidental multi-day job; raise it for
+    #: real work.
     iterations: int = 100
     #: Stop early once this many designs have been accepted (IPRO's other
     #: termination condition). None means "run to the iteration cap".
     stop_after_accepted: int | None = None
+    #: Hard cap on rotamers per MILP, as IPRO caps at 1300. Exceeding it
+    #: triggers tighter pruning rather than an unsolvable program.
+    max_rotamers: int = 1300
 
     #: Residues within this distance (A) of a perturbed/mutated position are
     #: repacked alongside it, even if not design positions. IPRO uses a 4.5 A
@@ -295,11 +300,17 @@ class LoopSettings:
     #: Non-bonded energy cutoff (A). IPRO: 12 A vdW.
     energy_cutoff: float = 12.0
 
-    #: How many contiguous positions are re-designed per iteration. IPRO
-    #: re-designs 1-3 contiguous residues, not the whole set at once.
+    #: How many contiguous positions are re-designed per iteration. The IPRO
+    #: Suite paper describes 1-3 contiguous residues; the whole design set is
+    #: not re-chosen every iteration.
     design_per_iteration: tuple[int, int] = (1, 3)
-    #: Backbone perturbation: phi/psi offsets ~ N(0, sigma), truncated at +/-cap.
-    #: IPRO Suite reports sigma = 1.5 deg; the 2006 paper reports 1.65 deg.
+    #: Length of the backbone segment perturbed each iteration. IPRO's source
+    #: picks 1-5 consecutive residues; this is a separate choice from which
+    #: positions are re-designed.
+    perturbation_segment: tuple[int, int] = (1, 5)
+    #: Backbone perturbation: phi/psi offsets ~ N(0, sigma), rejection-truncated
+    #: at +/-cap. IPRO's source uses random.gauss(0, 1.5) truncated to +/-5 deg;
+    #: the 2006 paper reports sigma = 1.65 deg.
     perturbation_sigma_deg: float = 1.5
     perturbation_cap_deg: float = 5.0
     #: Half-width (residues) of the perturbation window either side of the
@@ -312,10 +323,22 @@ class LoopSettings:
     redock_sigma_angstrom: float = 0.2
     redock_sigma_deg: float = 2.0
 
-    #: Metropolis acceptance temperature in kelvin. IPRO's default, 3640 K,
-    #: is calibrated so that a 10 kcal/mol worsening is accepted 25% of the
-    #: time: exp(-10 / (R*3640)) = 0.251. Verified in tests/test_loop.py.
+    #: Metropolis acceptance temperature in kelvin. IPRO's default, 3640 K, is
+    #: calibrated so that a 10 kcal/mol worsening is accepted 25% of the time:
+    #: exp(-10 / (R * 3640)) = 0.251 with R = 1.987e-3. Verified in
+    #: tests/test_loop.py. IPRO's source draws an acceptance *window*
+    #: -R*T*ln(U) and compares it to the energy change, which is algebraically
+    #: the same test.
     temperature_k: float = 3640.0
+    #: IPRO runs the first fraction of iterations as pure downhill search, with
+    #: no thermal acceptance (its source disables simulated annealing for the
+    #: first 10% of iterations).
+    greedy_fraction: float = 0.10
+    #: Regardless of the Metropolis test, reject outright if the complex energy
+    #: worsens by more than max(hard_reject_kcal, hard_reject_fraction * |E|).
+    #: IPRO uses 40 kcal/mol or 5%.
+    hard_reject_kcal: float = 40.0
+    hard_reject_fraction: float = 0.05
 
     #: Forbid revisiting an already-evaluated sequence, via an integer ("no
     #: good") cut added to the MILP. This is IPRO's own behaviour.
@@ -335,13 +358,18 @@ class LoopSettings:
         return R_KCAL * self.temperature_k
 
     def __post_init__(self) -> None:
-        if isinstance(self.design_per_iteration, list):
-            self.design_per_iteration = tuple(self.design_per_iteration)  # from YAML
-        lo, hi = self.design_per_iteration
-        if lo < 1 or hi < lo:
-            raise SpecError(f"design_per_iteration must be (lo<=hi, lo>=1); got {(lo, hi)}")
+        # YAML gives lists where the dataclass wants tuples.
+        for attr in ("design_per_iteration", "perturbation_segment"):
+            val = getattr(self, attr)
+            if isinstance(val, list):
+                setattr(self, attr, tuple(val))
+            lo, hi = getattr(self, attr)
+            if lo < 1 or hi < lo:
+                raise SpecError(f"{attr} must be (lo<=hi) with lo>=1; got {(lo, hi)}")
         if self.temperature_k <= 0:
             raise SpecError("temperature_k must be positive")
+        if not 0.0 <= self.greedy_fraction <= 1.0:
+            raise SpecError("greedy_fraction must be between 0 and 1")
 
 
 @dataclass

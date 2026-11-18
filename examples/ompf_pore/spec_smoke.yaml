@@ -1,0 +1,288 @@
+# =============================================================================
+# ipro-agent example case -- PoreDesigner / OmpF  ::  SMOKE SPEC
+# =============================================================================
+#
+# WHAT THIS IS
+#   A deliberately tiny version of the PoreDesigner campaign: 4 design
+#   positions instead of 25, 8 iterations instead of a published-scale run.
+#   It exists to prove the pipeline turns over on a laptop in minutes, and to
+#   serve as the annotated format tutorial for DesignSpec.
+#
+#   It is NOT a reproduction of the paper. Run `spec_full.yaml` for that, and
+#   read `EXPECTED.md` before you compare anything to a published number.
+#
+# SOURCE OF THE SCIENCE
+#   Chowdhury, Ren, Shankla, Decker, Grisewood, Prabhakar, Baker, Golbeck,
+#   Aksimentiev, Kumar & Maranas, "PoreDesigner for tuning solute selectivity
+#   in a robust and highly permeable outer membrane pore",
+#   Nat Commun 9:3661 (2018).  doi:10.1038/s41467-018-06097-1
+#
+# SCHEMA
+#   Every key below is read by `DesignSpec.from_dict` in ipro_agent/config.py.
+#   Unknown top-level keys are REJECTED, not ignored -- a typo cannot silently
+#   change the design problem. The legal top-level keys are exactly:
+#       goal_statement, goal, molecules, positions, indels,
+#       loop, backends, goal_options, name, notes
+#
+#   Load it with:   DesignSpec.load("examples/ompf_pore/spec_smoke.yaml")
+#   and print `spec.summary()` to see what was actually parsed. Do that first,
+#   every time -- it is the cheapest way to catch a spec that reads differently
+#   from how it looks.
+# =============================================================================
+
+name: ompf_pore_smoke
+
+# Free text, carried verbatim into every report so a design can always be
+# traced back to what was actually asked for. Write it as the user said it.
+goal_statement: >
+  Smoke test of the PoreDesigner redesign of OmpF: shrink the porin eyelet
+  below 4 A by lining it with long hydrophobic side chains, using only four
+  of the paper's 25 pore-constriction positions so the run finishes in
+  minutes on a laptop.
+
+# -----------------------------------------------------------------------------
+# goal
+# -----------------------------------------------------------------------------
+# The goal *type*. config.py does NOT validate this string -- it is resolved by
+# `ipro_agent.goals`, which decides what objective the loop minimizes. If your
+# goals module names this objective differently, this is the one line to change;
+# if the name is unknown you will get an error at run time, not a wrong answer.
+#
+# Why a pore-geometry goal and not a binding goal:
+#   PoreDesigner's published objective was the interaction energy between the
+#   design molecule (OmpF) and a target molecule (a single-file water wire
+#   taken from an AQP1 MD trajectory), *maximized* -- which in IPRO's sign
+#   convention means WEAKENING binding to that wire, so the permeating water
+#   makes as few H-bonds with the pore wall as possible. Its pore-size
+#   criterion was a separate hard filter (discard any design whose bottleneck
+#   is outside the requested window) rather than part of the objective.
+#
+#   The water wire is not in 2OMF and was never deposited, so this example ships
+#   WITHOUT it and can only express the geometric half. See the commented
+#   `anti_target` block under `molecules:` for how to restore the paper's
+#   objective, and EXPECTED.md for what that omission costs you.
+goal: shrink_pore
+
+# -----------------------------------------------------------------------------
+# molecules
+# -----------------------------------------------------------------------------
+# Roles:  design       -- the molecule being mutated (exactly one, always)
+#         target       -- held fixed; the objective rewards BETTER interaction
+#         anti_target  -- held fixed; the objective PENALIZES interaction
+# Kinds:  protein | peptide | ligand | transition_state
+#
+# `path` is resolved relative to this file, so the example is portable.
+molecules:
+  - name: ompf
+    path: 2omf_A.pdb          # prepared input: see the header REMARKs in the file
+    kind: protein
+    role: design
+    chains: [A]               # empty list would mean "every chain in the file"
+    redock: false             # the design molecule is never redocked
+
+  # --- PoreDesigner's target molecule, NOT shipped -------------------------
+  # The paper's target was one of four representative water wires, clustered
+  # from ~100,000 wires harvested from a 10 ns AQP1 MD run. The wires were
+  # never deposited; Supplementary Table 1 publishes only their fitted
+  # elliptical-helix parameters (e.g. wire 1: x = 0.401 sin(t), y = 0.121
+  # cos(t), z = 2.31 t), with no water count and no O-O spacing. You can
+  # rebuild a plausible wire from those equations, but it will not be their
+  # wire. If you do, add it here -- as an ANTI-target, because the objective
+  # must weaken this interaction, not strengthen it:
+  #
+  # - name: water_wire_1
+  #   path: water_wire_1.pdb
+  #   kind: ligand            # an all-atom water column, not a polymer
+  #   role: anti_target
+  #   redock: true            # the paper re-placed the wire every iteration
+  #
+  # ...and change `goal:` above to whatever your goals module calls
+  # "weaken the interaction with a declared anti-target".
+  #
+  # Known limitation if you do this: the paper perturbed the wire with
+  # ANISOTROPIC translations, sigma = (0.2, 0.2, 2.0) A in (x, y, z) along the
+  # pore axis. `loop.redock_sigma_angstrom` is a single isotropic scalar, so
+  # that move set cannot be expressed in this schema as written.
+
+# -----------------------------------------------------------------------------
+# positions -- WHERE mutation is permitted, and to WHAT
+# -----------------------------------------------------------------------------
+# Two accepted spellings:
+#     "A115"                                  <- shorthand; allowed defaults to
+#                                                the 18-residue `standard` group
+#     {position: "A115", allowed: [...]}      <- explicit; use this one
+#
+# ALWAYS give `allowed` explicitly. The default (`standard` = all 20 minus PRO
+# and CYS) is 18 residues wide and is NOT this paper's design space.
+#
+# `allowed` accepts 1-letter codes, 3-letter codes, or group names from
+# AA_GROUPS. Three-letter codes are used below on purpose: they are
+# self-documenting, and a bare 1-letter `Y` or `N` is a YAML booby-trap in
+# parsers that follow YAML 1.1 (quote them -- "Y" -- if you prefer 1-letter).
+#
+# DO NOT reach for the `hydrophobic` group here. It is a 9-residue group and
+# the paper's alphabet is also 9 residues, but they are not the same nine:
+# `hydrophobic` contains GLY and omits TYR. Listing the nine explicitly is the
+# only honest way to state this design space.
+#
+# THE PAPER'S ALPHABET (identical at every design position, Supplementary
+# Methods): {Trp, Phe, Tyr, Met, Ile, Leu, Val, Pro, Ala}, split into
+#     LONG  = {TRP, PHE, TYR, MET}   and   SHORT = {ILE, LEU, VAL, PRO, ALA}
+# No charged, no polar, no Gly, no Cys.
+#
+# WHY THESE FOUR POSITIONS (V18, L20, M38, Y40), out of the paper's 25:
+#   1. They are spatially clustered, so every pair term in the MILP is real.
+#      All six CB-CB distances are short -- 18-20 5.1 A, 20-38 4.3 A,
+#      18-40 5.5 A, 20-40 6.8 A, 38-40 6.9 A, 18-38 8.2 A (max 8.2, mean 6.1).
+#      All six sit inside the 12 A energy cutoff, so the four positions form a
+#      fully connected interaction clique rather than four independent
+#      single-position problems. A randomly chosen 4-subset of the 25 would
+#      usually be 15-25 A apart and the pair block would be ~zero.
+#   2. They are one structural unit: the barrel-wall face of the eyelet, about
+#      7-9 A across the lumen from loop L3 (20-117 is 7.4 A, 38-117 8.7 A).
+#      They line the constriction from the opposite side to L3, so shrinking
+#      the pore here is the same physical move the paper was making.
+#   3. They have an unambiguous published answer. V18W, L20W, M38W and Y40W
+#      appear in ALL THREE experimentally tested designs (CSD, UCD and
+#      OCD-TFTrp). No other 4-subset of the 25 is unanimous like this, which
+#      makes this the sharpest cheap comparison available -- see EXPECTED.md.
+#   4. They perturb cleanly. With `perturbation_flank: 5` the 11-residue
+#      window centred on 18 spans 13-23 and catches both 18 and 20; the window
+#      centred on 38 spans 33-43 and catches both 38 and 40. Two windows cover
+#      all four positions, in beta-strand backbone rather than across the
+#      eyelet loop -- fewer confounders in an 8-iteration run.
+#
+# Note that V, L, M and Y are themselves all in the allowed alphabet, so
+# "stay wild type" is a legal answer at all four positions. That is faithful to
+# the paper (its MILP constraints 6 and 9 let an unmutated position keep its
+# wild-type rotamer), and it means an all-native result is a real outcome, not
+# a crash.
+positions:
+  - position: "A18"           # native VAL  -> W in CSD, UCD and OCD-TFTrp
+    allowed: [TRP, PHE, TYR, MET, ILE, LEU, VAL, PRO, ALA]
+  - position: "A20"           # native LEU  -> W in all three
+    allowed: [TRP, PHE, TYR, MET, ILE, LEU, VAL, PRO, ALA]
+  - position: "A38"           # native MET  -> W in all three
+    allowed: [TRP, PHE, TYR, MET, ILE, LEU, VAL, PRO, ALA]
+  - position: "A40"           # native TYR  -> W in all three
+    allowed: [TRP, PHE, TYR, MET, ILE, LEU, VAL, PRO, ALA]
+
+# Design space: 9^4 = 6561 sequences. `spec.design_space_size()` prints it, and
+# it is the single most useful number for telling a smoke test from a month of
+# CPU. The full campaign is 9^25 = 7.2e23, which is the whole reason the loop is
+# a Metropolis search over MILP sub-problems and not an enumeration.
+
+# -----------------------------------------------------------------------------
+# loop -- the IPRO iteration controls (ipro_agent.config.LoopSettings)
+# -----------------------------------------------------------------------------
+# Values marked [paper] are PoreDesigner's own; values marked [ours] are
+# choices this smoke test makes to finish in minutes and are not published
+# numbers. Keeping that distinction visible matters: see EXPECTED.md.
+loop:
+  iterations: 8               # [ours] laptop budget. Published runs are
+                              #        hundreds to thousands of iterations.
+  stop_after_accepted: 3      # [ours] stop early once 3 designs are accepted.
+                              #        The paper's condition is 30 accepted
+                              #        redesigns (SI step 8).
+
+  design_per_iteration: [1, 2]  # [ours] how many design positions may be
+                              #        redesigned per iteration. 2 is the most
+                              #        that any one 11-residue perturbation
+                              #        window can reach here (18+20, or 38+40).
+                              #        Stock IPRO uses [1, 3].
+
+  perturbation_flank: 5       # [paper] 11-residue window = chosen residue +/- 5
+  perturbation_sigma_deg: 1.5 # [paper] phi/psi perturbations ~ N(0, 1.5 deg)
+  perturbation_cap_deg: 5.0   # [ours]  truncation of that normal; IPRO's default
+
+  neighbour_cutoff: 4.5       # [paper] repack everything within 4.5 A of the
+                              #         perturbed region, design positions or not
+  energy_cutoff: 12.0         # [IPRO]  non-bonded cutoff, A
+
+  temperature_k: 3640.0       # [paper] Metropolis temperature. Calibrated so a
+                              #         10 kcal/mol worsening is kept ~25% of
+                              #         the time: exp(-10/(R*3640)) = 0.251.
+                              #         The SI quotes k = 0.33e-23 cal/K and
+                              #         T = 3640 K; R*T = 7.23 kcal/mol.
+  integer_cuts: true          # [paper] never revisit a design already seen
+                              #         (the SI's cumulative CUTS set)
+
+  ensemble_size: 5            # [ours] keep the 5 best, not just the best one
+  keep_structures: true       # [ours] write every accepted structure; cheap at
+                              #        8 iterations and you will want to look.
+                              #        Output lands in runs/ (git-ignored).
+  random_seed: 1              # [ours] the paper publishes NO seed. Fixing one
+                              #        makes YOUR run repeatable; it does not
+                              #        make it theirs.
+  max_minutes: 10             # [ours] hard wall-clock stop, checkpointed
+
+# Redocking knobs (redock_every / redock_moves / redock_sigma_angstrom /
+# redock_sigma_deg) are left at their defaults and do nothing here: no molecule
+# in this spec has `redock: true`, because the water wire is not shipped.
+
+# -----------------------------------------------------------------------------
+# backends -- which external program does each job
+# -----------------------------------------------------------------------------
+# `auto` resolves at run time to the best available option and falls back to
+# the built-in implementations, so this spec runs on a machine with no
+# PyRosetta, no PyMOL and no Vina. Run `python scripts/doctor.py` to see what
+# actually resolved -- and record it, because the answer changes your numbers.
+#
+# None of these is the paper's software. PoreDesigner named no MILP solver, no
+# rotamer library and no design-stage force field (CHARMM36 appears only in its
+# downstream NAMD validation, not in the design loop). There is therefore no
+# "correct" setting here to match, and no published energy to match it against.
+backends:
+  energy: auto                # auto | pyrosetta | builtin
+  mutate: auto                # auto | pymol | builtin
+  dock: auto                  # auto | vina | none
+  milp_solver: auto           # auto | cbc | glpk | cplex | gurobi | greedy
+
+# -----------------------------------------------------------------------------
+# goal_options -- knobs the goal implementation reads, not config.py
+# -----------------------------------------------------------------------------
+# This dict is free-form and is NOT validated by config.py; it is validated by
+# the goal named in `goal:` above. If that goal ignores a key, the key is
+# silently inert -- so check `spec.summary()` and your run log, and do not
+# assume a constraint is active because it is written here.
+goal_options:
+
+  # PoreDesigner's acceptance filter, SI section 3 step 3, "Check 1":
+  # accept a redesign only if the pore bottleneck D_min is below 4 A. A design
+  # outside the window is discarded immediately, BEFORE its interaction energy
+  # is computed. Bottleneck = smallest major axis over ~16 slices cut every
+  # 0.5 A through the ~8 A constriction region, each slice fitted with the
+  # largest ellipse that touches the vdW surfaces without enclosing an atom.
+  pore_diameter_max: 4.0
+  pore_diameter_min: null     # no lower bound in the sub-4 A campaign. The
+                              # paper's second campaign set a [D_min, D_max]
+                              # window in 1 A bins from 3 to 10 A instead
+                              # (worked example in the text: 5 to 6 A).
+
+  # The composition constraint, MILP constraint 4: at least half of the design
+  # positions must take a LONG side chain. In this tool's MILP that is a
+  # `min_class` constraint (ipro_agent/milp.py):
+  #
+  #     Constraint(kind="min_class", fraction=0.5,
+  #                residues=["TRP", "PHE", "TYR", "MET"],
+  #                label="PoreDesigner >=50% long side chains")
+  #
+  # With 4 positions, `fraction: 0.5` rounds up to at least 2 of 4 LONG. It is
+  # satisfiable but not vacuous, so it is a real check -- and the published
+  # answer at these four positions is 4/4 LONG (all Trp).
+  #
+  # Honest caveat carried from the source: the SI prose says "a minimum of 50%
+  # ... had to be either Trp, Phe or Tyr" while formal constraint 4 counts Met
+  # as long too. Those two statements disagree. The constraint as written is
+  # implemented here; if you want the stricter prose version, drop MET from
+  # `long_residues` and expect a different answer.
+  min_long_fraction: 0.5
+  long_residues: [TRP, PHE, TYR, MET]
+  short_residues: [ILE, LEU, VAL, PRO, ALA]
+
+notes: >
+  Smoke test only -- 4 of 25 positions, 8 of hundreds of iterations, and no
+  target molecule. Read EXPECTED.md before comparing any output of this run to
+  the paper. The one comparison this spec supports well is qualitative: do the
+  chosen identities concentrate in the LONG set, and does position 18, 20, 38
+  or 40 come out as Trp, as it did in all three published designs.

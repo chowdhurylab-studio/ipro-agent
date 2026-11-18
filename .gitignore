@@ -2,6 +2,9 @@
 # Kept locally for provenance, never committed (see AGENTS.md: bulk data out of git).
 refs/papers/
 refs/source/
+# Raw PDB downloads + structure-prep scratch (untrusted downloads; the *prepared*
+# input structures that an example case needs are committed under examples/).
+refs/pdb/
 
 # --- Run output: structures, trajectories, logs, solver files ---
 runs/
