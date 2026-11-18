@@ -37,6 +37,14 @@ from typing import Any
 # what the MILP chooses. CB is listed as side chain (GLY has none).
 BACKBONE = {"N", "CA", "C", "O", "OXT"}
 
+#: The wizard is always handed a *named* selection, never a selection
+#: expression, because ``do_select`` finishes with ``cmd.delete(selection)``.
+#: Given the expression ``prot and chain A and resi 16A`` that call matches and
+#: deletes the object ``prot`` itself, leaving nothing to harvest (verified on
+#: PyMOL 3.1.0: 327 atoms to 0). With a name, the same call removes only this
+#: temporary selection.
+POS_SELE = "_ipro_harvest_pos"
+
 
 def _selection(chain: str, number: int, icode: str, obj: str = "prot") -> str:
     """PyMOL selection for one residue.
@@ -98,7 +106,8 @@ def harvest(job_path: str, out_path: str) -> int:
                 w = cmd.get_wizard()
                 cmd.refresh_wizard()
                 w.set_mode(aa)
-                w.do_select(sel)
+                cmd.select(POS_SELE, sel)
+                w.do_select(POS_SELE)
                 cmd.refresh_wizard()
 
                 n_states = cmd.count_states("mutation")
@@ -136,6 +145,7 @@ def harvest(job_path: str, out_path: str) -> int:
                 try:
                     cmd.set_wizard()
                     cmd.delete("mutation")
+                    cmd.delete(POS_SELE)
                 except Exception:
                     pass
 

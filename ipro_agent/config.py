@@ -160,8 +160,15 @@ class Molecule:
 # ---------------------------------------------------------------------------
 
 _POS_RE = re.compile(
-    r"^\s*(?:(?P<chain>[A-Za-z0-9])[:/\-]?)?(?P<num>-?\d+)(?P<icode>[A-Za-z])?\s*$"
+    r"^\s*(?:(?P<chain>[A-Za-z])[:/_]?|(?P<nchain>[A-Za-z0-9])[:/_])?"
+    r"(?P<num>-?\d+)(?P<icode>[A-Za-z])?\s*$"
 )
+# A chain id is either a LETTER (with an optional separator), or any
+# alphanumeric followed by a REQUIRED separator. Without that asymmetry the
+# optional chain group eats the first digit of a bare residue number, so "115"
+# parsed as chain "1", residue 15 -- silently designing the wrong residue. A
+# numeric chain id must therefore be written with a separator, as "1:115". The
+# hyphen is deliberately not a separator, so "A-5" is residue -5 of chain A.
 
 
 @dataclass
@@ -211,7 +218,7 @@ class DesignPosition:
                 "'A:115', '115' or 'A115B'"
             )
         return cls(
-            chain=m.group("chain") or "A",
+            chain=m.group("chain") or m.group("nchain") or "A",
             number=int(m.group("num")),
             insertion_code=(m.group("icode") or "").upper(),
             allowed=list(allowed) if allowed else list(AA_GROUPS["standard"]),
@@ -383,9 +390,18 @@ class Backends:
     """
 
     energy: str = "auto"       # auto | pyrosetta | builtin
-    mutate: str = "auto"       # auto | pymol | builtin
+    #: auto | pymol. There is no built-in mutagenesis: rotamers come from
+    #: PyMOL's library, so PyMOL is effectively required.
+    mutate: str = "auto"
     dock: str = "auto"         # auto | vina | none
-    milp_solver: str = "auto"  # auto | cbc | glpk | cplex | gurobi | greedy
+    milp_solver: str = "auto"  # auto | cbc | glpk | cplex | gurobi | highs | greedy
+
+    def __post_init__(self) -> None:
+        if self.mutate not in ("auto", "pymol"):
+            raise SpecError(
+                f"backends.mutate must be 'auto' or 'pymol' (got {self.mutate!r}); "
+                "there is no built-in mutagenesis -- rotamers come from PyMOL"
+            )
 
 
 # ---------------------------------------------------------------------------
