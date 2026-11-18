@@ -79,6 +79,47 @@ To read it yourself, it is the operating manual: goal selection, spec format,
 encoding user constraints into the integer program, the degraded modes, and a
 validation checklist to work through before reporting a design.
 
+## Use it from another agent (MCP)
+
+The section above assumes an agent that has **cloned** this repo and can read
+`SKILL.md`. For an agent working somewhere else — or one that cannot read a repo
+at all — there is an MCP server, so the tool appears as eight typed tools
+instead of a manual to read:
+
+```bash
+pip install git+https://github.com/chowdhurylab-studio/ipro-agent
+```
+
+```json
+{"mcpServers": {"ipro-agent": {"command": "ipro-agent-mcp"}}}
+```
+
+That block goes in your client's MCP config (Claude Desktop's config file,
+`.mcp.json` for Claude Code, Cursor's settings — the shape is shared). From a
+clone instead of an install, use
+`{"command": "python3", "args": ["-m", "ipro_agent.mcp_server"], "cwd": "/path/to/ipro-agent"}`.
+
+| Tool | What it does |
+|---|---|
+| `ipro_doctor` | what resolved, and whether a design is possible at all |
+| `ipro_goals` | the five objectives and the paper each comes from |
+| `ipro_validate` | check a spec before spending CPU |
+| `ipro_positions` | propose design positions from the structure |
+| `ipro_score` | measure a structure without designing |
+| `ipro_milp` | emit the integer program, to prove the constraints are in it |
+| `ipro_run` | launch a run **detached**, returns a run id |
+| `ipro_status` | poll it; carries the mode and the notes |
+
+A spec can be a file path **or** inline YAML, since an agent usually has it in
+context rather than on disk. `ipro_run` refuses to launch when PyMOL has not
+resolved, rather than starting a job that dies at the first rotamer harvest.
+
+Two honest limits. It is a **local** server: whoever runs it still needs the
+conda environment, so MCP removes the cloning and the reading, not the
+dependency. And eight tool descriptions carry less than `SKILL.md` does — for an
+agent that *can* read this repo, the skill is still the better interface. This
+is additive.
+
 ## Documentation
 
 | File | Contents |

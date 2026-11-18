@@ -3933,3 +3933,170 @@ def test_a_zero_mutation_structure_says_it_is_not_a_design():
         if "REMARK   1 WARNING" in line and line.strip().startswith('"'):
             text = line.strip().strip('",')
             assert len(text) <= 80, (len(text), text)
+
+
+# ---------------------------------------------------------------------------
+# MCP server
+# ---------------------------------------------------------------------------
+
+
+def _mcp(messages: list[dict], timeout: float = 900.0) -> dict[int, dict]:
+    """Drive the MCP server over real stdio and return replies by id."""
+    payload = "\n".join(json.dumps(m) for m in messages) + "\n"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input=payload, capture_output=True, text=True, timeout=timeout, cwd=REPO,
+    )
+    assert p.returncode == 0, (p.returncode, p.stderr[-600:])
+    out: dict[int, dict] = {}
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        msg = json.loads(line)
+        if msg.get("id") is not None:
+            out[msg["id"]] = msg
+    return out
+
+
+_INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2025-06-18", "capabilities": {}}}
+
+
+def _call(mid: int, name: str, arguments: dict | None = None) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}}}
+
+
+def _body(reply: dict) -> tuple[bool, dict]:
+    """(isError, parsed payload) from a tools/call reply."""
+    res = reply["result"]
+    return bool(res["isError"]), json.loads(res["content"][0]["text"])
+
+
+def test_mcp_server_speaks_the_protocol():
+    """initialize / tools/list over stdio, and an unknown tool is a protocol
+    error rather than a crash. The server is a thin wrapper over the CLI with
+    no dependencies beyond the standard library, so this needs no MCP client."""
+    replies = _mcp([
+        _INIT,
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},   # no reply
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        _call(3, "ipro_nonexistent"),
+        {"jsonrpc": "2.0", "id": 4, "method": "ping"},
+    ])
+    init = replies[1]["result"]
+    assert init["protocolVersion"] == "2025-06-18", init   # echoes a known version
+    assert init["serverInfo"]["name"] == "ipro-agent"
+    assert "instructions" in init and "screening" in init["instructions"]
+
+    names = [t["name"] for t in replies[2]["result"]["tools"]]
+    assert names == ["ipro_doctor", "ipro_goals", "ipro_validate", "ipro_positions",
+                     "ipro_score", "ipro_milp", "ipro_run", "ipro_status"], names
+    for tool in replies[2]["result"]["tools"]:
+        assert tool["description"].strip(), tool["name"]
+        assert tool["inputSchema"]["type"] == "object", tool["name"]
+
+    assert "error" in replies[3], "an unknown tool must be a JSON-RPC error"
+    assert replies[4]["result"] == {}
+
+    # A notification must not get a reply.
+    assert set(replies) == {1, 2, 3, 4}
+
+
+def test_mcp_tools_return_parsed_json_not_prose():
+    """The CLI pretty-prints its JSON across many lines, so the wrapper cannot
+    parse per-line -- the first version did, and every call came back as "did
+    not return JSON". And where the CLI refuses a request with a one-line
+    explanation on stderr ("spec has no target molecule; pass --near or add
+    one"), that sentence has to BE the error, not be buried under a wrapper
+    message."""
+    smoke = "examples/ompf_pore/spec_smoke.yaml"
+    replies = _mcp([
+        _INIT,
+        _call(2, "ipro_validate", {"spec": smoke}),
+        _call(3, "ipro_goals"),
+        _call(4, "ipro_doctor"),
+        _call(5, "ipro_validate", {"spec": "no_such_spec_here.yaml"}),
+        _call(6, "ipro_positions", {"spec": smoke}),     # this spec has no target
+    ])
+    err, body = _body(replies[2])
+    assert not err, body
+    assert body["ok"] is True
+    assert body["info"]["design_space_sequences"] == 6561
+
+    err, body = _body(replies[3])
+    assert not err and body, body
+
+    err, body = _body(replies[4])
+    assert not err, body
+    for key in ("can_run", "can_design", "degraded", "resolved"):
+        assert key in body, body
+
+    err, body = _body(replies[5])
+    assert err and "spec not found" in body["error"], body
+
+    err, body = _body(replies[6])
+    assert err, body
+    assert "no target molecule" in body["error"], (
+        f"the CLI's own explanation must survive: {body['error']!r}"
+    )
+
+
+def test_mcp_accepts_an_inline_spec():
+    """An agent usually has the spec in context, not on disk."""
+    inline = (
+        "goal_statement: inline probe\n"
+        "goal: bind_tighter\n"
+        "molecules:\n"
+        "  - name: prot\n"
+        f"    path: {CRN}\n"
+        "    role: design\n"
+        f"  - name: LIG\n"
+        f"    path: {CRN}\n"
+        "    role: target\n"
+        "    kind: protein\n"
+        "positions: [A16]\n"
+    )
+    replies = _mcp([_INIT, _call(2, "ipro_validate", {"spec": inline})])
+    err, body = _body(replies[2])
+    assert not err, body
+    assert body["ok"] is True, body
+
+
+def test_mcp_run_refuses_rather_than_launching_a_doomed_job():
+    """`ipro_run` checks doctor first. Without PyMOL a run dies at the first
+    rotamer harvest, minutes in, having left a run directory that looks like a
+    started job -- so it is refused up front with the install command. It also
+    refuses a non-empty run_dir rather than writing into someone's results."""
+    from ipro_agent.mcp_server import ToolError, tool_run
+
+    # A non-empty directory is refused whatever is installed.
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "something.txt").write_text("not empty\n")
+    try:
+        tool_run({"spec": str(REPO / "examples/ompf_pore/spec_smoke.yaml"),
+                  "run_dir": str(tmp)})
+    except ToolError as exc:
+        assert "not empty" in str(exc), exc
+    else:
+        raise AssertionError("a non-empty run_dir must be refused")
+
+    # And the source states the can_design gate, which is what stops a doomed
+    # launch on a machine with no PyMOL.
+    src = (REPO / "ipro_agent" / "mcp_server.py").read_text()
+    assert 'if not rep.get("can_design")' in src
+    assert "start_new_session=True" in src, "a run must outlive the server"
+
+
+def test_status_json_carries_the_mode_and_notes():
+    """The house rules say a design is never reported without the run's `mode`
+    and `notes`, and `status --json` is the documented way for an agent to read
+    a run -- it is told to poll this and never to load iterations.jsonl. Both
+    fields were missing, so the one interface that instructs an agent to report
+    the mode did not supply it."""
+    from ipro_agent.state import RunDir
+
+    keys = set(RunDir(Path(tempfile.mkdtemp()) / "r", create=True).as_json())
+    for required in ("mode", "notes", "backend", "goal", "status", "accepted",
+                     "best_score", "start_score"):
+        assert required in keys, f"status --json must report {required}"

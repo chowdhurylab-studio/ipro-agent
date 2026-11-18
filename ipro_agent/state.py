@@ -180,18 +180,35 @@ class RunDir:
         return "\n".join(lines)
 
     def as_json(self) -> dict[str, Any]:
-        """Machine-readable status, for an agent that wants to branch on it."""
+        """Machine-readable status, for an agent that wants to branch on it.
+
+        ``mode`` and ``notes`` are in here because the house rules say a design
+        is never reported without them, and this is the documented way for an
+        agent to read a run -- it is told to poll this and never to load
+        ``iterations.jsonl``. They were missing, so the one interface that
+        instructs an agent to report the mode did not supply it.
+        """
         st = self.read_state()
         recs = list(self.iterations())
-        return {
+        accepted = sum(1 for r in recs if r.accepted)
+        out = {
             "run": str(self.path),
             "status": st.get("status"),
+            "mode": st.get("mode"),
             "iterations_done": len(recs),
             "total_iterations": st.get("total_iterations"),
-            "accepted": sum(1 for r in recs if r.accepted),
+            "accepted": accepted,
             "start_score": st.get("start_score"),
             "best_score": st.get("best_score"),
             "best_mutations": st.get("best_mutations", {}),
             "best_sequence": st.get("best_sequence", ""),
+            "notes": st.get("notes", []),
+            "backend": st.get("backend"),
+            "goal": st.get("goal"),
             "error": st.get("error"),
         }
+        if len(recs) and accepted == 0:
+            # Spelled out rather than left to be inferred from accepted: 0,
+            # because `best_*` above is then the starting point, not a design.
+            out["designed_nothing"] = True
+        return out

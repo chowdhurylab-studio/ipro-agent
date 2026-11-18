@@ -28,6 +28,13 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
 
 - **Installing dependencies**: `docs/INSTALL.md`.
 
+- **Driving this from another agent, without cloning it**: there is an MCP
+  server (`python3 -m ipro_agent.mcp_server`, or the `ipro-agent-mcp` console
+  script) exposing eight typed tools. See README.md, "Use it from another agent
+  (MCP)". If you are reading this file you have the repo, so prefer the skill:
+  it carries the degraded modes and the reporting rules that tool schemas
+  cannot.
+
 - **A worked example**: `examples/ompf_pore/`, with `EXPECTED.md` stating what
   is and is not reproducible.
 

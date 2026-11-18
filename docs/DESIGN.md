@@ -996,3 +996,45 @@ created exactly the unclosed break internal indels are refused for. SEQRES is
 now compared against the modelled span and the discrepancy reported.
 
 The suite is **149 tests**.
+
+### 7g. The MCP server, and the defect building it found
+
+The primary interface remains a clone plus `.claude/skills/ipro-agent/SKILL.md`.
+`ipro_agent/mcp_server.py` adds a second one for agents that cannot read this
+repo -- working in another project, or not code-capable at all -- exposing eight
+typed tools over stdio JSON-RPC: `ipro_doctor`, `ipro_goals`, `ipro_validate`,
+`ipro_positions`, `ipro_score`, `ipro_milp`, `ipro_run`, `ipro_status`.
+
+Three decisions worth recording:
+
+* **A thin wrapper over the CLI, deliberately.** Every tool shells out to
+  `python3 -m ipro_agent <subcommand> --json` rather than importing the loop, so
+  there is one code path to keep correct and the server cannot drift from the
+  command line. No science lives in it.
+* **`ipro_run` launches detached and returns a run id.** A real run is minutes
+  to days, which no request/response call can hold open, so the CLI's existing
+  `run`/`status` split maps directly onto MCP. The child gets its own session,
+  so it outlives both the server and the client that asked for it.
+* **`ipro_run` refuses rather than launching a doomed job.** It calls doctor
+  first: without PyMOL a run dies at the first rotamer harvest, minutes in,
+  having written a run directory that looks like a started job. The refusal
+  carries the install command.
+
+**The defect it found.** `status --json` -- the one interface the house rules
+and SKILL.md tell an agent to poll, and never to replace by loading
+`iterations.jsonl` -- **did not report `mode` or `notes`**. So the interface that
+instructs an agent to state the run's mode with every design did not supply it,
+and an agent driving this over MCP could not have complied. `RunDir.as_json`
+now carries `mode`, `notes`, `backend` and `goal`, plus a `designed_nothing`
+flag when iterations ran and none were accepted, since `best_*` is then the
+starting point rather than a design.
+
+Two wrapper bugs of the same family were caught by driving the server over real
+stdio in the tests rather than unit-testing the handlers: the CLI
+pretty-prints its JSON across many lines, so a per-line parse failed every call
+with "did not return JSON"; and where the CLI refuses a request with a one-line
+explanation on stderr ("spec has no target molecule; pass --near or add one"),
+that sentence was buried under a generic wrapper message instead of being the
+error the agent reads.
+
+The suite is **154 tests**.

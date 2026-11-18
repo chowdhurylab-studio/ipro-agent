@@ -64,6 +64,9 @@ test = ["pytest>=7.0"]
 
 [project.scripts]
 ipro-agent = "ipro_agent.cli:main"
+# So an MCP client config can be `{"command": "ipro-agent-mcp"}` with no
+# module path and no cwd assumption.
+ipro-agent-mcp = "ipro_agent.mcp_server:main"
 
 [tool.setuptools]
 # `ipro_agent.pymol_helpers` must be listed, or the two scripts PyMOL runs are
