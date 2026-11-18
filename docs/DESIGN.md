@@ -1037,4 +1037,29 @@ explanation on stderr ("spec has no target molecule; pass --near or add one"),
 that sentence was buried under a generic wrapper message instead of being the
 error the agent reads.
 
-The suite is **154 tests**.
+Three further additions closed the two limits the first version shipped with.
+
+**The manual is reachable remotely.** `ipro://skill` and seven other documents
+are MCP *resources*, so an agent on the other end of the server can fetch the
+operating manual, the house rules and an annotated example spec. The limit
+"eight tool descriptions carry less than SKILL.md" was real; serving SKILL.md
+answers it, and the server's own `instructions` field now tells the client to
+read it before anything beyond a single call.
+
+**The server can install its own dependencies.** It is pure standard library on
+purpose -- which is the only way it can start on a machine with nothing
+installed and *be* the thing that reports that. `ipro_setup` names what is
+missing, finds conda/mamba/micromamba, states the exact command and the
+download size, and installs nothing without `confirm: true`. Measured in an
+empty virtualenv: the server starts, reports `missing_required: ['numpy',
+'Bio', 'yaml']`, finds mamba, and refuses to act unasked. The residual limit is
+honest and stated in the tool's own result: the environment it creates must be
+the one the server runs in, so the client's MCP config has to be re-pointed at
+that interpreter afterwards.
+
+**Three prompts** (`ipro-redesign`, `ipro-check-setup`, `ipro-report`) encode
+the documented order rather than leaving an agent to infer it -- doctor, goal,
+spec, validate, score, run, report -- and the redesign prompt explicitly forbids
+weakening a constraint the user stated in order to clear a failure.
+
+The suite is **158 tests**.

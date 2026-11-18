@@ -114,11 +114,34 @@ A spec can be a file path **or** inline YAML, since an agent usually has it in
 context rather than on disk. `ipro_run` refuses to launch when PyMOL has not
 resolved, rather than starting a job that dies at the first rotamer harvest.
 
-Two honest limits. It is a **local** server: whoever runs it still needs the
-conda environment, so MCP removes the cloning and the reading, not the
-dependency. And eight tool descriptions carry less than `SKILL.md` does — for an
-agent that *can* read this repo, the skill is still the better interface. This
-is additive.
+**It also serves the documents, so a remote agent is not worse informed than
+one that cloned the repo.** Eight tool descriptions cannot carry the operating
+manual, so the manual is a resource instead:
+
+| Resource | |
+|---|---|
+| `ipro://skill` | the full operating manual — goal selection, spec format, degraded modes, validation checklist |
+| `ipro://house-rules` | the non-negotiables, short |
+| `ipro://example-spec` | an annotated spec to copy from |
+| `ipro://design-notes`, `ipro://milp`, `ipro://install`, `ipro://responsible-use`, `ipro://example-expectations` | provenance, the integer program, dependencies, scope of use, what the example can reproduce |
+
+**And three prompts**, which clients show as slash commands:
+`ipro-redesign` (walks the whole documented order for a new protein),
+`ipro-check-setup`, `ipro-report` (turns a finished run into an honest report).
+
+**It can install its own dependencies.** The server is pure standard library,
+so it starts on a machine with nothing installed — which is the only way it can
+be the thing that *tells* you nothing is installed. `ipro_doctor` names what is
+missing and `ipro_setup` reports the exact command; with `confirm=true` it runs
+the conda install itself. Measured in an empty virtualenv: the server starts,
+reports `missing_required: ['numpy', 'Bio', 'yaml']`, finds mamba, and hands
+back the command without installing anything.
+
+One honest limit remains. It is a **local** server, so the environment it
+installs has to be the one the server itself runs in — after `ipro_setup`
+finishes, point your MCP config at that environment's python
+(`.../envs/ipro-agent/bin/python -m ipro_agent.mcp_server`) or PyMOL still will
+not resolve. `ipro_setup` says so in its result.
 
 ## Documentation
 

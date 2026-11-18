@@ -333,6 +333,112 @@ def tool_status(args: dict) -> dict:
     return rep
 
 
+def tool_setup(args: dict) -> dict:
+    """Report what is missing and, on confirmation, install it.
+
+    The gap this closes: the server is pure standard library, so it starts
+    happily on a machine with nothing installed -- and then every useful tool
+    fails, leaving the agent to work out that `pymol-open-source` is conda-only
+    and that there is an `environment.yml` for it. That is exactly the
+    wheel-reinventing this interface exists to avoid.
+
+    Nothing is installed without ``confirm: true``. Creating a conda
+    environment downloads hundreds of megabytes and changes the machine, so the
+    default is a dry run that states the command.
+    """
+    rep = _doctor()
+    missing_required = list(rep.get("missing_required") or [])
+    needs_pymol = not rep.get("can_design")
+    env_file = REPO_ROOT / "environment.yml"
+
+    manager = next(
+        (m for m in ("mamba", "conda", "micromamba") if _which(m)), None
+    )
+    command = (
+        f"{manager} env create -f {env_file}" if manager else
+        f"conda env create -f {env_file}"
+    )
+
+    if not missing_required and not needs_pymol:
+        return {
+            "action": "none",
+            "can_run": True,
+            "can_design": True,
+            "resolved": rep.get("resolved", {}),
+            "degraded": rep.get("degraded", []),
+            "message": (
+                "Nothing to install: a design can run. Optional backends still "
+                f"missing: {rep.get('degraded') or 'none'} -- each has a "
+                "documented fallback, and the mode must be reported with any "
+                "design. See docs/INSTALL.md to add them."
+            ),
+        }
+
+    plan = {
+        "action": "install",
+        "can_run": rep.get("can_run"),
+        "can_design": rep.get("can_design"),
+        "missing_required_python_modules": missing_required,
+        "pymol_missing": needs_pymol,
+        "conda_manager_found": manager,
+        "command": command,
+        "environment_file": str(env_file),
+        "creates_environment": "ipro-agent",
+        "approximate_download": "~500 MB (PyMOL dominates it)",
+        "why_conda": (
+            "pymol-open-source is not on PyPI, so pip alone cannot supply it, "
+            "and rotamers come only from PyMOL's mutagenesis wizard -- there is "
+            "no fallback. That is why an environment file exists."
+        ),
+    }
+    if not manager:
+        plan["blocked"] = (
+            "No conda, mamba or micromamba on PATH, so this cannot install "
+            "PyMOL for you. Install Miniforge "
+            "(https://github.com/conda-forge/miniforge) and call this again, or "
+            "run the command above yourself. `pip install -r requirements.txt` "
+            "covers the Python modules but NOT PyMOL, so a design still will "
+            "not run."
+        )
+        return plan
+    if not args.get("confirm"):
+        plan["next_step"] = (
+            "This will change the machine: pass confirm=true to run it. The "
+            "install is launched detached and takes several minutes; poll the "
+            "log it returns, then call ipro_doctor again. Tell the user what "
+            "is about to be installed before you confirm on their behalf."
+        )
+        return plan
+
+    log = Path(tempfile.mkdtemp(prefix="ipro_setup_")) / "setup.log"
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen(
+            [manager, "env", "create", "-f", str(env_file)],
+            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            cwd=str(REPO_ROOT), start_new_session=True,
+        )
+    plan.update({
+        "launched": True,
+        "pid": proc.pid,
+        "log": str(log),
+        "next_step": (
+            f"Installing in the background; follow {log}. When it finishes, the "
+            "environment must be ACTIVATED for this server to see it: the "
+            "client's MCP config has to launch the server with the new "
+            "environment's python (e.g. "
+            "$CONDA_PREFIX/envs/ipro-agent/bin/python -m ipro_agent.mcp_server), "
+            "or PyMOL will still not resolve. Call ipro_doctor to check."
+        ),
+    })
+    return plan
+
+
+def _which(name: str) -> str | None:
+    import shutil
+
+    return shutil.which(name)
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "ipro_doctor",
@@ -343,6 +449,29 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
         "handler": tool_doctor,
+    },
+    {
+        "name": "ipro_setup",
+        "description": (
+            "Check whether this machine can actually run a design and, with "
+            "confirm=true, install what is missing. Call it when ipro_doctor "
+            "reports can_design=false. PyMOL is conda-only and has no "
+            "fallback, so pip cannot fix it. Installs nothing without "
+            "confirm=true; tell the user what it will do first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "false (default) reports the plan; true runs the conda "
+                        "install, which downloads ~500 MB and changes the machine"
+                    ),
+                }
+            },
+        },
+        "handler": tool_setup,
     },
     {
         "name": "ipro_goals",
@@ -468,6 +597,253 @@ TOOLS: list[dict[str, Any]] = [
 _BY_NAME = {t["name"]: t for t in TOOLS}
 
 
+# ---------------------------------------------------------------------------
+# Resources: the documents, so a remote agent is not worse informed
+# ---------------------------------------------------------------------------
+#
+# Eight tool descriptions cannot carry the operating manual -- the degraded
+# modes, the reporting rules, the validation checklist. An agent that clones the
+# repo reads SKILL.md and gets all of it; an agent on the other end of this
+# server used to get none of it. Exposing the documents as resources closes that
+# gap: the manual is a fetch away instead of unavailable.
+
+RESOURCES: list[dict[str, str]] = [
+    {
+        "uri": "ipro://skill",
+        "path": ".claude/skills/ipro-agent/SKILL.md",
+        "name": "Operating manual (SKILL.md)",
+        "description": (
+            "READ THIS FIRST for anything beyond a single tool call. Goal "
+            "selection, spec format, encoding a user's constraints into the "
+            "integer program, the degraded modes, and the validation checklist "
+            "to work through before reporting a design. Everything the tool "
+            "schemas cannot say."
+        ),
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://house-rules",
+        "path": "AGENTS.md",
+        "name": "House rules",
+        "description": (
+            "The non-negotiables: report the mode and notes with every design, "
+            "never present screening energies as published kcal/mol, never "
+            "quietly weaken a user's stated constraints, and when to stop and "
+            "ask a human."
+        ),
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://responsible-use",
+        "path": "README.md",
+        "name": "README, including Responsible use",
+        "description": (
+            "What the tool is, what it has actually been run on, its known open "
+            "defect, and the scope-of-use limits that need a human decision "
+            "before anything is run."
+        ),
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://design-notes",
+        "path": "docs/DESIGN.md",
+        "name": "Provenance and deviations (DESIGN.md)",
+        "description": (
+            "Every capability traced to the paper and equation it came from, "
+            "every deviation from the published method, and every defect found "
+            "by audit with the measurement that exposed it. Use it to answer "
+            "'where does this number come from'."
+        ),
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://milp",
+        "path": "docs/MILP.md",
+        "name": "The integer program",
+        "description": "The rotamer-selection formulation in full, with its constraints.",
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://install",
+        "path": "docs/INSTALL.md",
+        "name": "Dependencies and what each unlocks",
+        "description": (
+            "What PyMOL, PyRosetta, AutoDock Vina and a MILP solver each buy, "
+            "and what their absence costs. Pair with ipro_setup."
+        ),
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "ipro://example-spec",
+        "path": "examples/ompf_pore/spec_smoke.yaml",
+        "name": "Worked example spec (annotated)",
+        "description": (
+            "A complete, heavily commented spec to copy from: molecules, "
+            "positions, allowed residues, restraints, goal options. The fastest "
+            "way to write a correct spec for a new protein."
+        ),
+        "mimeType": "text/yaml",
+    },
+    {
+        "uri": "ipro://example-expectations",
+        "path": "examples/ompf_pore/EXPECTED.md",
+        "name": "What the worked example can and cannot reproduce",
+        "description": (
+            "An honest account of which comparisons against the published paper "
+            "are meaningful, and which are not available at all."
+        ),
+        "mimeType": "text/markdown",
+    },
+]
+
+_BY_URI = {r["uri"]: r for r in RESOURCES}
+
+
+def _resource_list() -> list[dict]:
+    return [
+        {k: r[k] for k in ("uri", "name", "description", "mimeType")}
+        for r in RESOURCES
+        if (REPO_ROOT / r["path"]).exists()
+    ]
+
+
+def _resource_read(uri: str) -> dict:
+    spec = _BY_URI.get(uri)
+    if spec is None:
+        raise ToolError(f"unknown resource {uri!r}; have {sorted(_BY_URI)}")
+    path = REPO_ROOT / spec["path"]
+    if not path.exists():
+        raise ToolError(
+            f"{uri} maps to {spec['path']}, which is not in this checkout"
+        )
+    return {
+        "contents": [{
+            "uri": uri,
+            "mimeType": spec["mimeType"],
+            "text": path.read_text(errors="replace"),
+        }]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Prompts: the client shows these as slash commands
+# ---------------------------------------------------------------------------
+
+PROMPTS: list[dict[str, Any]] = [
+    {
+        "name": "ipro-redesign",
+        "description": (
+            "Redesign a protein toward a stated goal, start to finish, the way "
+            "the operating manual says to."
+        ),
+        "arguments": [
+            {"name": "structure", "description": "path to the PDB/mmCIF file",
+             "required": True},
+            {"name": "goal", "description": "what to achieve, in plain words",
+             "required": True},
+            {"name": "positions",
+             "description": "residues that may change, e.g. 'A110, A113, A117' "
+                            "(omit to have them proposed from the structure)",
+             "required": False},
+        ],
+    },
+    {
+        "name": "ipro-check-setup",
+        "description": "Check whether this machine can run a design, and fix it if not.",
+        "arguments": [],
+    },
+    {
+        "name": "ipro-report",
+        "description": (
+            "Turn a finished run into an honest report, with the mode, the "
+            "notes and the caveats the house rules require."
+        ),
+        "arguments": [
+            {"name": "run", "description": "the run directory or run id",
+             "required": True},
+        ],
+    },
+]
+
+_PROMPT_NAMES = {p["name"] for p in PROMPTS}
+
+
+def _prompt_get(name: str, args: dict) -> dict:
+    if name not in _PROMPT_NAMES:
+        raise ToolError(f"unknown prompt {name!r}; have {sorted(_PROMPT_NAMES)}")
+
+    if name == "ipro-check-setup":
+        text = (
+            "Check whether this machine can actually run a protein design with "
+            "ipro-agent.\n\n"
+            "1. Call `ipro_doctor`. Report `can_run`, `can_design` and the "
+            "degraded backend list in plain words.\n"
+            "2. If `can_design` is false, call `ipro_setup` WITHOUT confirm "
+            "first, show me exactly what it would install and how large the "
+            "download is, and ask before confirming.\n"
+            "3. Tell me what the degraded backends change about the numbers I "
+            "will get -- read `ipro://install` if you need the detail.\n"
+        )
+    elif name == "ipro-report":
+        run = args.get("run", "(the run)")
+        text = (
+            f"Report the results of ipro-agent run `{run}` honestly.\n\n"
+            "1. Call `ipro_status`.\n"
+            "2. Read `ipro://house-rules` and follow it exactly.\n"
+            "3. If `accepted` is 0, say the search found nothing and show what "
+            "rejected the candidates -- do NOT present the best_* fields as a "
+            "design, because they are the starting point.\n"
+            "4. Otherwise give the mutation string, the score change, the "
+            "`mode`, every entry in `notes`, and where the coordinates are.\n"
+            "5. State plainly that energies from the built-in backend are a "
+            "screening scale, not kcal/mol comparable to the published papers, "
+            "and that the design is a hypothesis for the bench.\n"
+        )
+    else:
+        structure = args.get("structure", "(structure)")
+        goal = args.get("goal", "(goal)")
+        positions = args.get("positions")
+        where = (
+            f"The residues I am willing to change are: {positions}."
+            if positions else
+            "I have not chosen the positions -- propose them with "
+            "`ipro_positions` and show me the list before designing."
+        )
+        text = (
+            f"Redesign the protein in `{structure}`. My goal: {goal}\n"
+            f"{where}\n\n"
+            "Work in this order, and do not skip steps:\n\n"
+            "1. Read `ipro://skill` -- it is the operating manual and it covers "
+            "goal selection, the spec format and the reporting rules that the "
+            "tool descriptions cannot.\n"
+            "2. `ipro_doctor`. If a design is impossible, stop and use "
+            "`ipro_setup` rather than guessing.\n"
+            "3. `ipro_goals`, then pick the objective that matches my goal, and "
+            "tell me which one and why. If the goal needs an anti-target or a "
+            "transition-state analogue I have not given you, ask.\n"
+            "4. Write the spec, copying the shape from `ipro://example-spec`. "
+            "Put my goal in `goal_statement` **in my own words**. Any geometry "
+            "that must survive -- a catalytic contact, a metal site, a "
+            "disulfide -- has to be a restraint, because the optimizer will not "
+            "preserve it on its own.\n"
+            "5. `ipro_validate`. Fix every problem it reports before spending "
+            "CPU. Show me the design-space size.\n"
+            "6. `ipro_score` for the starting baseline.\n"
+            "7. `ipro_run` with a `max_minutes` budget, then poll "
+            "`ipro_status`. It is detached; do not block.\n"
+            "8. Report as `ipro://house-rules` requires: the mode, the notes, "
+            "and the fact that every design is a bench hypothesis. If nothing "
+            "was accepted, say so.\n\n"
+            "If a step fails and the only way past it is to weaken something I "
+            "specified -- a restraint, the allowed residues, an energy "
+            "threshold -- tell me instead of doing it."
+        )
+    return {
+        "description": f"ipro-agent: {name}",
+        "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
+    }
+
+
 def _tool_list() -> list[dict]:
     return [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS]
 
@@ -488,15 +864,29 @@ def handle(message: dict) -> dict | None:
         version = want if want in _PROTOCOL_VERSIONS else _PROTOCOL_VERSIONS[0]
         return _ok(mid, {
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False},
+            },
             "serverInfo": SERVER_INFO,
             "instructions": (
-                "Protein redesign via IPRO. Call ipro_doctor first and report "
-                "the mode it gives with any result. Validate a spec before "
-                "running one. ipro_run is detached: poll ipro_status. A run "
-                "with accepted: 0 designed nothing. Energies from the built-in "
-                "backend are a screening scale, not kcal/mol comparable to the "
-                "published papers. Every design is a hypothesis for the bench."
+                "Protein redesign via IPRO.\n\n"
+                "Read the resource `ipro://skill` before anything beyond a "
+                "single tool call -- it is the operating manual, and it carries "
+                "the degraded modes, the spec format and the validation "
+                "checklist that these tool descriptions cannot. "
+                "`ipro://house-rules` is the short version.\n\n"
+                "Call ipro_doctor first and report the mode it gives with any "
+                "result; if it says can_design is false, use ipro_setup rather "
+                "than guessing at the install. Validate a spec before running "
+                "one. ipro_run is detached: poll ipro_status, never read "
+                "iterations.jsonl. A run with accepted: 0 designed nothing -- "
+                "its best_* fields are the starting point. Energies from the "
+                "built-in backend are a screening scale, not kcal/mol "
+                "comparable to the published papers. Never quietly weaken a "
+                "constraint the user stated to make a failing run succeed. "
+                "Every design is a hypothesis for the bench."
             ),
         })
 
@@ -525,8 +915,27 @@ def handle(message: dict) -> dict | None:
             return _ok(mid, _content(
                 {"error": f"{type(exc).__name__}: {exc}"}, is_error=True))
 
-    if method in ("resources/list", "prompts/list"):
-        return _ok(mid, {"resources": [], "prompts": []})
+    if method == "resources/list":
+        return _ok(mid, {"resources": _resource_list()})
+
+    if method == "resources/read":
+        try:
+            return _ok(mid, _resource_read(params.get("uri", "")))
+        except ToolError as exc:
+            return _err(mid, -32602, str(exc))
+
+    if method == "prompts/list":
+        return _ok(mid, {"prompts": PROMPTS})
+
+    if method == "prompts/get":
+        try:
+            return _ok(mid, _prompt_get(params.get("name", ""),
+                                        params.get("arguments") or {}))
+        except ToolError as exc:
+            return _err(mid, -32602, str(exc))
+
+    if method == "resources/templates/list":
+        return _ok(mid, {"resourceTemplates": []})
 
     return _err(mid, -32601, f"method not found: {method}")
 

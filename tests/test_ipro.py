@@ -3990,8 +3990,12 @@ def test_mcp_server_speaks_the_protocol():
     assert "instructions" in init and "screening" in init["instructions"]
 
     names = [t["name"] for t in replies[2]["result"]["tools"]]
-    assert names == ["ipro_doctor", "ipro_goals", "ipro_validate", "ipro_positions",
-                     "ipro_score", "ipro_milp", "ipro_run", "ipro_status"], names
+    assert names == ["ipro_doctor", "ipro_setup", "ipro_goals", "ipro_validate",
+                     "ipro_positions", "ipro_score", "ipro_milp", "ipro_run",
+                     "ipro_status"], names
+    # doctor first: it is the one the others' descriptions tell you to call
+    # before anything else, and clients show the list in order.
+    assert names[0] == "ipro_doctor"
     for tool in replies[2]["result"]["tools"]:
         assert tool["description"].strip(), tool["name"]
         assert tool["inputSchema"]["type"] == "object", tool["name"]
@@ -4100,3 +4104,115 @@ def test_status_json_carries_the_mode_and_notes():
     for required in ("mode", "notes", "backend", "goal", "status", "accepted",
                      "best_score", "start_score"):
         assert required in keys, f"status --json must report {required}"
+
+
+def test_mcp_exposes_the_manual_as_a_resource():
+    """Eight tool descriptions cannot carry the operating manual -- the
+    degraded modes, the spec format, the validation checklist. An agent that
+    clones the repo reads SKILL.md and gets all of it; an agent on the other
+    end of the server used to get none of it. The documents are resources, so
+    the manual is a fetch away rather than unavailable."""
+    replies = _mcp([
+        _INIT,
+        {"jsonrpc": "2.0", "id": 2, "method": "resources/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+         "params": {"uri": "ipro://skill"}},
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/read",
+         "params": {"uri": "ipro://nope"}},
+    ])
+    caps = replies[1]["result"]["capabilities"]
+    assert "resources" in caps and "prompts" in caps, caps
+    # The server must point an agent at the manual in its own instructions.
+    assert "ipro://skill" in replies[1]["result"]["instructions"]
+
+    uris = [r["uri"] for r in replies[2]["result"]["resources"]]
+    for required in ("ipro://skill", "ipro://house-rules", "ipro://design-notes",
+                     "ipro://example-spec"):
+        assert required in uris, uris
+
+    skill = replies[3]["result"]["contents"][0]
+    assert skill["uri"] == "ipro://skill"
+    on_disk = (REPO / ".claude" / "skills" / "ipro-agent" / "SKILL.md").read_text()
+    assert skill["text"] == on_disk, "the resource must serve the real file"
+    assert len(skill["text"]) > 10_000
+
+    assert "error" in replies[4], "an unknown resource must be an error"
+
+
+def test_mcp_prompts_walk_the_documented_order():
+    """Prompts are what a client shows as slash commands. They have to encode
+    the order SKILL.md requires -- doctor, goal, spec, validate, score, run,
+    report -- or they are just a free-text box with extra steps."""
+    replies = _mcp([
+        _INIT,
+        {"jsonrpc": "2.0", "id": 2, "method": "prompts/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+         "params": {"name": "ipro-redesign",
+                    "arguments": {"structure": "/tmp/p.pdb", "goal": "prefer C12"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "prompts/get",
+         "params": {"name": "ipro-report", "arguments": {"run": "runs/x"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "prompts/get",
+         "params": {"name": "ipro-nope", "arguments": {}}},
+    ])
+    names = [p["name"] for p in replies[2]["result"]["prompts"]]
+    assert names == ["ipro-redesign", "ipro-check-setup", "ipro-report"], names
+
+    text = replies[3]["result"]["messages"][0]["content"]["text"]
+    assert "/tmp/p.pdb" in text and "prefer C12" in text
+    for step in ("ipro://skill", "ipro_doctor", "ipro_goals", "ipro_validate",
+                 "ipro_run", "ipro_status", "goal_statement"):
+        assert step in text, f"the redesign prompt must mention {step}"
+    # No positions given -> it must propose them rather than invent them.
+    assert "ipro_positions" in text
+    # And it must forbid silently weakening the user's constraints.
+    assert "weaken" in text
+
+    report = replies[4]["result"]["messages"][0]["content"]["text"]
+    assert "runs/x" in report
+    assert "accepted" in report and "screening" in report
+
+    assert "error" in replies[5]
+
+
+def test_mcp_setup_diagnoses_without_installing():
+    """The server is pure standard library, so it starts on a machine with
+    nothing installed -- and then every useful tool fails, leaving the agent to
+    work out for itself that pymol-open-source is conda-only. Measured in a
+    bare venv: the server starts, doctor reports missing ['numpy', 'Bio',
+    'yaml'], and setup names the exact command. Nothing is installed without
+    confirm=true, because creating the environment downloads ~500 MB and
+    changes the machine."""
+    replies = _mcp([_INIT, _call(2, "ipro_setup")])
+    err, body = _body(replies[2])
+    assert not err, body
+    assert body["action"] in ("none", "install"), body
+
+    if body["action"] == "install":
+        assert "command" in body and "environment.yml" in body["command"]
+        assert "next_step" in body or "blocked" in body
+        assert body.get("launched") is not True, "must not install without confirm"
+    else:
+        # This machine can design, so there is nothing to do -- and it still has
+        # to say what the optional backends change.
+        assert body["can_design"] is True
+        assert "degraded" in body
+
+    # The guard itself, so the default cannot drift to installing.
+    src = (REPO / "ipro_agent" / "mcp_server.py").read_text()
+    assert 'if not args.get("confirm"):' in src
+    assert "pymol-open-source is not on PyPI" in src
+
+
+def test_mcp_server_needs_nothing_but_the_standard_library():
+    """It has to start on a machine where numpy is not installed, or it cannot
+    be the thing that tells you numpy is not installed."""
+    import ast
+    import sys as _sys
+
+    tree = ast.parse((REPO / "ipro_agent" / "mcp_server.py").read_text())
+    top = {n.module.split(".")[0] for n in ast.walk(tree)
+           if isinstance(n, ast.ImportFrom) and n.module and n.col_offset == 0}
+    top |= {a.name.split(".")[0] for n in ast.walk(tree)
+            if isinstance(n, ast.Import) and n.col_offset == 0 for a in n.names}
+    outside = sorted(top - set(_sys.stdlib_module_names) - {"ipro_agent"})
+    assert not outside, f"module-level non-stdlib imports: {outside}"
