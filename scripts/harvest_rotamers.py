@@ -47,15 +47,26 @@ POS_SELE = "_ipro_harvest_pos"
 
 
 def _selection(chain: str, number: int, icode: str, obj: str = "prot") -> str:
-    """PyMOL selection for one residue.
+    r"""PyMOL selection for one residue.
 
-    Insertion codes need the ``resi`` form with the code appended, e.g.
-    ``resi 100A``; the slash form does not take them reliably.
+    Always the ``resi`` form, with a negative number escaped. Both of the
+    obvious alternatives are silently wrong for the negative residue numbers
+    an N-terminal insertion creates (it numbers downward so that nothing
+    existing is renumbered):
+
+    * ``/prot//A/-1`` selects **0 atoms** -- the slash form does not take a
+      leading minus at all;
+    * ``resi -1`` selects **residues -1, 0 and 1** -- PyMOL reads ``-`` as its
+      range operator, so this is the range "up to 1" (measured: 15 atoms where
+      the residue has 4).
+
+    ``resi \-1`` is the one form that selects exactly that residue. Insertion
+    codes append to the number, e.g. ``resi 16A``.
     """
     resi = f"{number}{icode}".strip()
-    if icode:
-        return f"{obj} and chain {chain} and resi {resi}"
-    return f"/{obj}//{chain}/{resi}"
+    if number < 0:
+        resi = "\\" + resi
+    return f"{obj} and chain {chain} and resi {resi}"
 
 
 def harvest(job_path: str, out_path: str) -> int:

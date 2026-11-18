@@ -2358,3 +2358,68 @@ def test_regression_psi_moves_the_terminal_hydroxyl_hydrogen():
 
     assert "HXT" in _PSI_MOVES
     assert not (_PHI_FIXED & _PSI_MOVES), "an atom cannot be both phi-fixed and psi-moving"
+
+
+def test_regression_negative_residue_selection_is_escaped():
+    """A negative residue number is what an N-terminal insertion creates, and
+    both obvious PyMOL selection forms are silently wrong for it:
+    `/prot//A/-1` selects 0 atoms, and `resi -1` is read as the RANGE "up to 1"
+    and selects residues -1, 0 and 1 (measured: 15 atoms where the residue has
+    4). Only `resi \\-1` selects that residue. Before this was escaped, a design
+    position at A-1 harvested no rotamers and the run reported one mutation
+    where two were requested -- without raising."""
+    import importlib.util
+
+    for script in ("scripts/apply_design.py", "scripts/harvest_rotamers.py"):
+        spec = importlib.util.spec_from_file_location("s", REPO / script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod._selection("A", -1, "") == "prot and chain A and resi \\-1", script
+        assert mod._selection("A", 16, "") == "prot and chain A and resi 16", script
+        assert mod._selection("A", 0, "") == "prot and chain A and resi 0", script
+        assert mod._selection("A", 16, "A") == "prot and chain A and resi 16A", script
+
+    if not _have_pymol():
+        print("    (selection strings checked; PyMOL resolution skipped)")
+        return
+
+    # and the string really does resolve to exactly that one residue
+    import subprocess
+    import tempfile as _tf
+
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import apply_terminal, classify
+    from ipro_agent.output import write_complex
+    from ipro_agent.structure import Structure
+
+    work = Path(_tf.mkdtemp())
+    st = Structure.load(CRN)
+    apply_terminal(
+        st, classify(st, [IndelSpec(kind="insert", chain="A", after=0, length=2)]).terminal
+    )
+    pdb = work / "neg.pdb"
+    write_complex(pdb, st, {})
+    probe = work / "probe.py"
+    probe.write_text(
+        "import sys\n"
+        "from pymol import cmd\n"
+        "cmd.load(sys.argv[1], 'prot')\n"
+        "for num in (-1, 0, 1):\n"
+        "    resi = ('\\\\' if num < 0 else '') + str(num)\n"
+        "    sele = 'prot and chain A and resi ' + resi\n"
+        "    got = sorted({int(a.resi) for a in cmd.get_model(sele).atom})\n"
+        "    print(num, got)\n"
+    )
+    from ipro_agent.mutate import find_pymol_python
+
+    out = subprocess.run(
+        [find_pymol_python(), str(probe), str(pdb)],
+        capture_output=True, text=True, timeout=180,
+    )
+    seen = dict(
+        (int(ln.split()[0]), eval(ln.split(maxsplit=1)[1]))
+        for ln in out.stdout.strip().splitlines()
+        if ln and ln.split()[0].lstrip("-").isdigit()
+    )
+    for num in (-1, 0, 1):
+        assert seen.get(num) == [num], f"resi for {num} selected {seen.get(num)}"
