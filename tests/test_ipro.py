@@ -4374,3 +4374,96 @@ def test_fetch_is_the_only_networked_command_and_validates_its_input():
         f"only the fetch command may use the network; found: {offenders}"
     )
     assert offenders["ipro_agent/cli.py"] == ["urllib"], offenders
+
+
+def test_regression_mcp_never_replies_to_a_notification():
+    """A message with no `id` is a notification, and JSON-RPC 2.0 says a server
+    must not respond to one. The unknown-method branch replied anyway with
+    `"id": null`, so a client sending any notification this server did not
+    recognise got back an error frame it never asked for -- which a strict
+    client can treat as a protocol desync. The *known* notifications were
+    handled; it was the unknown ones that leaked."""
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='{"jsonrpc":"2.0","method":"notifications/unknown_thing"}\n'
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}\n',
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+    )
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "", f"replied to a notification: {p.stdout!r}"
+
+    # A request with an unknown method still gets a proper error.
+    p2 = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='{"jsonrpc":"2.0","id":5,"method":"no_such_method"}\n',
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+    )
+    err = json.loads(p2.stdout.strip())
+    assert err["id"] == 5 and err["error"]["code"] == -32601, err
+
+
+def test_regression_a_json_rpc_batch_does_not_kill_the_server():
+    """A top-level JSON array is a JSON-RPC batch, which MCP allowed before the
+    2025-06-18 revision and which some clients still send. It reached handle()
+    as a list and killed the entire server process with `AttributeError: 'list'
+    object has no attribute 'get'` -- one message ending the session.
+
+    And more generally: no single malformed message may wedge the server."""
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='[{"jsonrpc":"2.0","id":1,"method":"ping"},'
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}]\n',
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+    )
+    assert p.returncode == 0, (p.returncode, p.stderr[-400:])
+    assert "Traceback" not in p.stderr, p.stderr[-400:]
+    batch = json.loads(p.stdout.strip())
+    assert isinstance(batch, list) and [r["id"] for r in batch] == [1, 2], batch
+
+    # A batch of only notifications gets no reply at all.
+    p2 = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='[{"jsonrpc":"2.0","method":"notifications/initialized"}]\n',
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+    )
+    assert p2.stdout.strip() == "", p2.stdout
+
+    # Garbage, then good messages: the server must carry on.
+    p3 = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='not json at all\n'
+              '{"jsonrpc":"2.0","id":7,"method":"ping"}\n'
+              '"a bare string"\n'
+              '{"jsonrpc":"2.0","id":8,"method":"tools/list"}\n',
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+    )
+    assert p3.returncode == 0, p3.stderr[-300:]
+    ids = [json.loads(l).get("id") for l in p3.stdout.splitlines() if l.strip()]
+    assert 7 in ids and 8 in ids, f"did not recover after bad input: {ids}"
+
+
+def test_regression_mcp_stdout_carries_nothing_but_jsonrpc():
+    """stdout IS the protocol channel on stdio. Anything else printed there --
+    a stray print, a warning, a library banner -- corrupts the stream, and it
+    is the classic way an MCP server fails for everyone but its author. Every
+    line must parse as JSON."""
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
+              '{"protocolVersion":"2025-06-18","capabilities":{}}}\n'
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":'
+              '{"name":"ipro_doctor","arguments":{}}}\n'
+              '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":'
+              '{"name":"ipro_validate","arguments":'
+              '{"spec":"examples/ompf_pore/spec_smoke.yaml"}}}\n',
+        capture_output=True, text=True, cwd=REPO, timeout=900,
+    )
+    assert p.returncode == 0, p.stderr[-400:]
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            raise AssertionError(f"non-JSON on stdout corrupts the stream: {line[:200]!r}")
+        assert msg.get("jsonrpc") == "2.0", msg

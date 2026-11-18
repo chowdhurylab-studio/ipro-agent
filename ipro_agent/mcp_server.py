@@ -1009,10 +1009,25 @@ def _tool_list() -> list[dict]:
 
 
 def handle(message: dict) -> dict | None:
-    """Handle one JSON-RPC message; None means "a notification, send nothing"."""
+    """Handle one JSON-RPC message; None means "a notification, send nothing".
+
+    A message with no ``id`` member is a **notification**, and JSON-RPC 2.0 says
+    a server must not respond to one. The unknown-method branch at the bottom
+    used to reply anyway, with ``"id": null`` -- so a client that sent any
+    notification this server did not recognise got back an error frame it had
+    not asked for, which a strict client can treat as a protocol desync. The
+    known notifications were handled; it was the unknown ones that leaked.
+    """
+    if not isinstance(message, dict):
+        return _err(None, -32600, "invalid request: expected a JSON object")
     method = message.get("method")
+    is_notification = "id" not in message
     mid = message.get("id")
     params = message.get("params") or {}
+    if not isinstance(params, dict):
+        return None if is_notification else _err(
+            mid, -32602, f"params must be an object, got {type(params).__name__}"
+        )
 
     if method == "initialize":
         want = params.get("protocolVersion")
@@ -1092,6 +1107,9 @@ def handle(message: dict) -> dict | None:
     if method == "resources/templates/list":
         return _ok(mid, {"resourceTemplates": []})
 
+    if is_notification:
+        # Unknown, and a notification: silence is the correct response.
+        return None
     return _err(mid, -32601, f"method not found: {method}")
 
 
@@ -1124,7 +1142,24 @@ def serve(stdin=None, stdout=None) -> int:
             stdout.write(json.dumps(_err(None, -32700, "parse error")) + "\n")
             stdout.flush()
             continue
-        reply = handle(message)
+        # A top-level ARRAY is a JSON-RPC batch, which MCP allowed before the
+        # 2025-06-18 revision and which some clients still send. It used to
+        # reach handle() as a list and kill the whole server with
+        # `AttributeError: 'list' object has no attribute 'get'` -- one message
+        # taking down the session.
+        try:
+            if isinstance(message, list):
+                replies = [r for r in (handle(m) for m in message) if r is not None]
+                reply = replies or None     # an all-notification batch: silence
+            else:
+                reply = handle(message)
+        except Exception as exc:           # pragma: no cover - belt and braces
+            # No single malformed message may end the session. A request gets an
+            # error frame; a notification gets silence, as the spec requires.
+            mid = message.get("id") if isinstance(message, dict) else None
+            reply = None if mid is None else _err(
+                mid, -32603, f"internal error: {type(exc).__name__}: {exc}"
+            )
         if reply is not None:
             stdout.write(json.dumps(reply, default=str) + "\n")
             stdout.flush()
