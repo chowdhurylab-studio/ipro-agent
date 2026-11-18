@@ -43,7 +43,7 @@ ONE_TO_THREE = dict(zip("ARNDCQEGHILKMFPSTWYV", [
     "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
 ]))
 # Written out rather than inverted from ONE_TO_THREE so the mapping is readable
-# and greppable; checked for consistency in tests/test_config.py.
+# and greppable; checked for consistency in tests/test_ipro.py.
 THREE_TO_ONE = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q",
     "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
@@ -679,7 +679,7 @@ class LoopSettings:
     #: Metropolis acceptance temperature in kelvin. IPRO's default, 3640 K, is
     #: calibrated so that a 10 kcal/mol worsening is accepted 25% of the time:
     #: exp(-10 / (R * 3640)) = 0.251 with R = 1.987e-3. Verified in
-    #: tests/test_loop.py. IPRO's source draws an acceptance *window*
+    #: tests/test_ipro.py. IPRO's source draws an acceptance *window*
     #: -R*T*ln(U) and compares it to the energy change, which is algebraically
     #: the same test.
     temperature_k: float = 3640.0

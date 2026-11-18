@@ -26,7 +26,7 @@ downstream by a bare integer ``state``, which means nothing on its own. It
 indexes PyMOL's rotamer set for that residue at that position, in the order
 PyMOL enumerates it. Committing the choice with any other builder -- even one
 using the same library -- would silently apply a different conformation than
-the MILP scored. ``scripts/harvest_rotamers.py`` and this script are therefore
+the MILP scored. ``ipro_agent/pymol_helpers/harvest_rotamers.py`` and this script are therefore
 two halves of one contract.
 
 Mutations are applied one at a time against the progressively mutated object,
@@ -64,7 +64,7 @@ def _is_hydrogen(atom) -> bool:
 
     The state check below compares the applied side chain against the rotamer
     the MILP scored, and the rotamers are heavy-atom-only (see
-    ``scripts/harvest_rotamers.py``). Including hydrogens here made the check
+    ``ipro_agent/pymol_helpers/harvest_rotamers.py``). Including hydrogens here made the check
     fail on an atom that is not part of the rotamer at all: on a protonated
     input it reported "applied side chain is not rotamer state 4: 1 atom(s)
     differ (H)", the whole structure write was suppressed, and the run blamed
@@ -227,7 +227,7 @@ def apply_design(job_path: str, out_path: str) -> int:
                     f"{len(off)} atom(s) differ ({', '.join(sorted(off)[:5])}). "
                     f"This PyMOL build may choose the applied state "
                     f"differently; see the module docstring of "
-                    f"scripts/apply_design.py"
+                    f"ipro_agent/pymol_helpers/apply_design.py"
                 )
             result["applied"][label] = [aa, state]
         except Exception as exc:  # one bad position must not kill the design

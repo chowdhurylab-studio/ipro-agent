@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 for PEP 639 (`license` as an SPDX expression + `license-files`).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +9,33 @@ version = "0.1.0"
 description = "Agent-drivable Iterative Protein Redesign and Optimization (IPRO), generalized to an arbitrary protein and a stated design goal"
 readme = "README.md"
 requires-python = ">=3.10"
+# MIT covers this implementation only. The method belongs to its papers, the
+# optional dependencies are separately licensed (PyRosetta needs its own), and
+# refs/ is git-ignored rather than redistributed -- see LICENSE and README.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Supantha Dey" }]
+keywords = [
+    "protein-design",
+    "protein-engineering",
+    "IPRO",
+    "mutagenesis",
+    "rotamer",
+    "MILP",
+    "computational-biology",
+]
+# No `License ::` classifier: PEP 639 forbids pairing one with the SPDX
+# `license` field above, and setuptools errors on the combination.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
 # Only what the loop cannot run without. PyMOL, PyRosetta, AutoDock Vina and a
 # MILP solver are optional at install time and resolved at run time; see
 # docs/INSTALL.md for what each unlocks and scripts/doctor.py to check.
@@ -16,6 +44,14 @@ dependencies = [
     "biopython>=1.81",
     "pyyaml>=6.0",
 ]
+
+# Sub-tables come after every bare key of [project]: a sub-table opened above
+# `dependencies` would have captured it as one of its own keys, leaving the
+# package with no dependencies and three bogus URLs.
+[project.urls]
+Repository = "https://github.com/chowdhurylab-studio/ipro-agent"
+"Design notes" = "https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/DESIGN.md"
+Installation = "https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/INSTALL.md"
 
 [project.optional-dependencies]
 # PuLP 4.x no longer bundles CBC, hence the extra.
@@ -30,4 +66,7 @@ test = ["pytest>=7.0"]
 ipro-agent = "ipro_agent.cli:main"
 
 [tool.setuptools]
-packages = ["ipro_agent", "ipro_agent.energy"]
+# `ipro_agent.pymol_helpers` must be listed, or the two scripts PyMOL runs are
+# absent from the wheel and an installed copy validates a spec, then dies at
+# the first rotamer harvest with "harvest script missing".
+packages = ["ipro_agent", "ipro_agent.energy", "ipro_agent.pymol_helpers"]

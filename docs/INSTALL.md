@@ -1,12 +1,17 @@
 # Installing ipro-agent's dependencies
 
+**Verified on:** macOS 26.3.1 (darwin 25.3.0), Apple Silicon, conda-forge —
+one machine, one platform. Nothing in this file was checked on Linux or
+Windows, so treat the measured numbers as that platform's receipts rather
+than guarantees.
+
 **Versions and install routes in this file were checked on 2026-11-17** against the
 upstream package indexes (conda-forge, PyPI, GitHub releases) and, where noted,
 against this machine (macOS 26.3.1, darwin 25.3.0, Apple Silicon). Package
 indexes move; re-check anything that fails rather than assuming this file is
-current. Items I could not verify are marked **[unverified]**.
+current. Anything that was not verified is marked **[unverified]**.
 
-ipro-agent is a clean-room reimplementation of IPRO (Iterative Protein Redesign
+ipro-agent is an independent reimplementation of IPRO (Iterative Protein Redesign
 and Optimization, Maranas group). The original suite needs CHARMM (licensed),
 GAMS or CPLEX, and prebuilt Linux x86-64 C++ binaries, and it is Python 2. None
 of that is required here; the substitutions are:
@@ -44,7 +49,7 @@ buys and what its absence costs.
 
 | Backend | Unlocks | Degradation if absent |
 |---|---|---|
-| **PyMOL** (`pymol-open-source`) | both halves of the mutation contract: rotamer enumeration at every design position (`ipro_agent/rotamers.py` -> `scripts/harvest_rotamers.py`) and committing the chosen design to coordinates (`ipro_agent/mutate.py` -> `scripts/apply_design.py`), using PyMOL's mutagenesis wizard and its rotamer library, with per-rotamer strain from the wizard's `bump_scores` | **Effectively fatal.** `ipro_agent.rotamers.harvest()` raises `RotamerError`. `backends.mutate: builtin` is accepted by the config and `doctor.py` prints a `builtin (rotamer-library sidechain swap)` label, but no built-in rotamer builder exists in the tree — PyMOL is the only rotamer source. It is also not substitutable after the fact: a rotamer is identified downstream by a bare integer index into *PyMOL's* enumeration for that residue, so rebuilding the side chain with another library would write coordinates the MILP never scored. Treat PyMOL as required. |
+| **PyMOL** (`pymol-open-source`) | both halves of the mutation contract: rotamer enumeration at every design position (`ipro_agent/rotamers.py` -> `ipro_agent/pymol_helpers/harvest_rotamers.py`) and committing the chosen design to coordinates (`ipro_agent/mutate.py` -> `ipro_agent/pymol_helpers/apply_design.py`), using PyMOL's mutagenesis wizard and its rotamer library, with per-rotamer strain from the wizard's `bump_scores` | **Effectively fatal.** `ipro_agent.rotamers.harvest()` raises `RotamerError`. `backends.mutate: builtin` is accepted by the config and `doctor.py` prints a `builtin (rotamer-library sidechain swap)` label, but no built-in rotamer builder exists in the tree — PyMOL is the only rotamer source. It is also not substitutable after the fact: a rotamer is identified downstream by a bare integer index into *PyMOL's* enumeration for that residue, so rebuilding the side chain with another library would write coordinates the MILP never scored. Treat PyMOL as required. |
 | **PyRosetta** | (a) backbone relaxation, (b) whole-structure and interface scoring in Rosetta Energy Units — and with it the **full** IPRO protocol: backbone perturbation + restrained minimization, then whole-complex relaxation | No relaxation at all: `EnergyBackend.relax()` raises `NotImplementedError` and `can_relax` stays `False`, so `loop.py` sets `mode = "fixed-backbone"` (`self.mode = "full" if self.backend.can_relax else "fixed-backbone"`) and runs sequence + side-chain packing over a frozen backbone, dropping the perturbation and relaxation steps. That mode is recorded in `state.json` as `mode: fixed-backbone`; it is a real protocol but **not** the published IPRO one, and the file says so rather than letting the two be confused. Energies then come from `ipro_agent/energy/builtin.py` (`builtin-screen`): Amber parm94/99 Lennard-Jones 12-6 at the **element** level, capped repulsion, Coulomb on formally charged side-chain atoms with a distance-dependent dielectric eps(r) = 4r, and a distance-only H-bond well. Units are `kcal/mol (screening scale, not comparable to Rosetta energy units)`. A screening function, not a publication-grade force field. |
 | **AutoDock Vina** | rigid-body re-docking of target molecules (`loop.redock_every`, per-molecule `redock: true`, `backends.dock`) | `doctor.py` resolves `dock -> none (input poses kept; set redock:false)`. Nothing is re-docked; input poses are carried through unchanged for the whole run. Set `backends.dock: none` and `redock: false` so the spec records that honestly. **Dated caveat (file state 2026-11-17):** no module in the tree consumes `backends.dock` yet — `grep -rn "backends.dock" ipro_agent` returns nothing, and the redock step is listed in `loop.py`'s docstring but not implemented — so installing Vina currently only changes what the doctor reports. Re-run that grep before assuming the step is live. |
 | **A MILP solver** (CPLEX, Gurobi, CBC, GLPK) | a *proven optimal* rotamer assignment for the emitted integer program, with your linear constraints enforced | `MILP.solve()` falls through to `_solve_greedy()`: iterated best-improvement over single-position reassignments. It respects one-rotamer-per-position by construction and checks user constraints, but `proven_optimal=False` and `status="heuristic"`. Quality is a lower bound, not the optimum. |
@@ -66,10 +71,10 @@ Two different products share the name:
 |---|---|---|
 | package | conda-forge `pymol-open-source` **3.1.0** (builds for py39–py314; `linux-64`, `linux-aarch64`, `linux-ppc64le`, `osx-64`, `osx-arm64`, `win-64`) | installers / `pymol-bundle` from pymol.org, currently **3.1.9** (updated 2026-10-07) |
 | cost | free | paid licence (licence file required) |
-| mutagenesis wizard | **yes** — verified on this machine: `.../pymol_env/lib/python3.9/site-packages/pymol/wizard/mutagenesis.py`, `pymol-open-source 3.1.0 py39hddd9dd7_0` | present in the same codebase, but I did not verify it in a licensed build **[unverified]** |
+| mutagenesis wizard | **yes** — verified on this machine: `.../pymol_env/lib/python3.9/site-packages/pymol/wizard/mutagenesis.py`, `pymol-open-source 3.1.0 py39hddd9dd7_0` | present in the same codebase, but not verified in a licensed build **[unverified]** |
 
 Use the open-source build. ipro-agent only ever drives PyMOL headless
-(`pymol -cq`) through `scripts/harvest_rotamers.py`, which calls
+(`pymol -cq`) through `ipro_agent/pymol_helpers/harvest_rotamers.py`, which calls
 `cmd.wizard("mutagenesis")`; nothing needs the GUI or a licence file.
 
 ```bash
@@ -114,8 +119,8 @@ shadow PyMOL's. Timeout is 3600 s for the whole harvest.
 
 ## 3. PyRosetta
 
-> **Installed and exercised on this machine, 2026-11-18**, on the owner's
-> instruction and under their own licence:
+> **Installed and exercised, 2026-11-18**, under its own licence (which each
+> user must obtain for themselves):
 >
 > ```bash
 > mamba create -y -n ipro_rosetta -c conda-forge python=3.12 numpy biopython pyyaml
@@ -201,7 +206,7 @@ Whether the download still requires a username/password: **route (a) was run on
 
 ## 4. AutoDock Vina
 
-> **Installed and exercised on this machine, 2026-11-18.** Vina **1.2.7** and
+> **Installed and exercised, 2026-11-18.** Vina **1.2.7** and
 > Open Babel **3.2.1** are in the conda env `ipro_vina`:
 >
 > ```bash
@@ -294,11 +299,11 @@ Open Babel PDBQT output is adequate for screening but does not do Meeko's
 typing, macrocycle handling or flexible-side-chain bookkeeping; prefer Meeko
 when the docking result matters. `prepare_ligand4.py` / `prepare_receptor4.py`
 come from AutoDockTools / the ADFR suite; `doctor.py` will use them if present,
-but I did not test an ADFR install on Apple Silicon **[unverified]**.
+but an ADFR install on Apple Silicon was not tested **[unverified]**.
 
 ### Do not bother with Homebrew for Vina
 
-`brew info autodock-vina` fails on this machine (Homebrew 6.0.21):
+`brew info autodock-vina` fails on the reference machine (Homebrew 6.0.21):
 
 ```
 Error: Refusing to load formula brewsci/bio/autodock-vina from untrusted tap brewsci/bio.
@@ -330,7 +335,7 @@ Preference order to install, best first:
 
 | Solver | Route | Notes |
 |---|---|---|
-| CPLEX | IBM Academic Initiative (<https://academic.ibm.com>): free, no model-size limit, registration + eligibility check | IPRO's original solver. `doctor.py` probes a `cplex` binary. Users report portal friction (Download Director vs HTTP, SkillsBuild redirects); I did not verify the current download path **[unverified]** |
+| CPLEX | IBM Academic Initiative (<https://academic.ibm.com>): free, no model-size limit, registration + eligibility check | IPRO's original solver. `doctor.py` probes a `cplex` binary. Users report portal friction (Download Director vs HTTP, SkillsBuild redirects); the current download path was not verified **[unverified]** |
 | Gurobi | free academic named-user licence (<https://www.gurobi.com/academia/academic-program-and-licenses/>) | faculty/staff/students at degree-granting institutions, research and teaching only, one user + one machine, not usable in containers (use WLS there). `doctor.py` probes `gurobi_cl`, so install the full distribution, not just `gurobipy`. Licence term is stated inconsistently across Gurobi's own pages (6 months vs 1 year) **[unverified]** |
 | CBC | `conda install -c conda-forge coin-or-cbc` (2.10.13), or `pip install 'pulp[cbc]'` | gives a `cbc` on `PATH`, which satisfies both PuLP's `COIN_CMD` and milp.py's binary path |
 | HiGHS | `conda install -c conda-forge highs` (1.16.0) / `pip install 'pulp[highs]'` | **see the gap below** |
@@ -369,9 +374,17 @@ will say so: `greedy (built-in heuristic; optimality NOT proven)`.
 
 ## 6. Recipes
 
-There is no `pyproject.toml` in the repo yet, so these install dependencies and
-run from the repo root (`python3 scripts/doctor.py`, `import ipro_agent` with the
-repo root as cwd or on `PYTHONPATH`).
+Two supported ways to use it, and the recipes below cover both:
+
+1. **From a clone** (what the docs and the skill assume): create one of the
+   environments below and run from the repo root — `python3 scripts/doctor.py`,
+   `python3 -m ipro_agent ...`. Nothing needs installing.
+2. **Installed** (`pip install .`, or
+   `pip install git+https://github.com/chowdhurylab-studio/ipro-agent`): this
+   adds an `ipro-agent` console script and works from any directory. The two
+   scripts PyMOL runs ship inside the package, so an installed copy can design
+   — but PyMOL itself is still conda-only, so install it with one of the
+   environments below either way.
 
 ### (a) Minimal — runs with every fallback engaged, no licences
 
@@ -422,35 +435,35 @@ export IPRO_PYMOL_PYTHON=/opt/miniconda3/envs/pymol_env/bin/python
 
 ### `environment.yml`
 
-Save as `environment.yml`, then `conda env create -f environment.yml`. PyRosetta
-is deliberately left commented out: it is licensed per user, so putting it in a
-shared env file invites redistribution.
+**This file ships in the repo** — `conda env create -f environment.yml` from a
+clone, no copying needed. It is reproduced here for readers who are not looking
+at a checkout; if the two ever disagree, the shipped file is authoritative.
+PyRosetta is deliberately left commented out: it is licensed per user, so
+putting it in a shared env file invites redistribution.
 
 ```yaml
-name: ipro
+# Conda environment for ipro-agent, including PyMOL in the same env so no
+# IPRO_PYMOL_PYTHON indirection is needed.
+#
+#   conda env create -f environment.yml && conda activate ipro-agent
+#   python3 scripts/doctor.py
+#
+# PyRosetta is deliberately absent: it needs a free academic licence and its own
+# channel. See docs/INSTALL.md. Without it the loop runs `fixed-backbone` or
+# `backbone-mc` and says so.
+name: ipro-agent
 channels:
   - conda-forge
 dependencies:
-  - python=3.12
-  # --- required ---
-  - numpy
-  - biopython
-  - pyyaml
-  # --- recommended backends ---
-  - pymol-open-source=3.1.0      # mutagenesis wizard = rotamers
-  - vina=1.2.7                   # CLI + python bindings
-  - meeko                        # mk_prepare_ligand.py / mk_prepare_receptor.py
-  - openbabel                    # obabel, fallback ligand prep
-  - coin-or-cbc                  # cbc: MILP
-  - glpk                         # glpsol: MILP (LP-file path)
-  - pulp                         # modelling layer milp.py tries first
-  # --- optional ---
-  - scipy                        # probed by doctor.py; not imported by the package
+  - python>=3.10
+  - numpy>=1.24
+  - biopython>=1.81
+  - pyyaml>=6.0
+  - pymol-open-source>=3.0     # rotamers and mutagenesis
+  - glpk                        # a real MILP solver, so optimality is proven
   - pip
-  # - pip:
-  #   # PyRosetta: academic/non-commercial licence required, not redistributable.
-  #   # Install it yourself, under your own licence:
-  #   #   pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
+  - pip:
+      - pulp[cbc]>=3.0          # drives CBC/HiGHS/CPLEX/Gurobi if present
 ```
 
 ---
@@ -516,7 +529,7 @@ design.
 |---|---|---|
 | `import pymol` works but `cmd.wizard("mutagenesis")` fails / no rotamers come back | PyMOL installed without the wizard package, or a stub/partial install (e.g. `pymol` from a non-conda-forge source, or only `pymol-open-source`'s python shim) | Check the wizard file exists: `ls $(dirname $(python -c "import pymol,os;print(pymol.__file__)"))/wizard/mutagenesis.py`. If absent, reinstall from conda-forge: `conda install -c conda-forge pymol-open-source` |
 | `RotamerError: no PyMOL available` / `find_pymol_python()` returns nothing | no env on the search path can `import pymol`; or `$IPRO_PYMOL_PYTHON` points at the wrong interpreter (a logged warning, then discovery continues); or PyMOL lives somewhere not scanned (venv, `/usr/local`, a non-standard conda root) | `export IPRO_PYMOL_PYTHON=/path/to/env/bin/python` and confirm `"$IPRO_PYMOL_PYTHON" -c "import pymol"` exits 0. Note the probe runs with `PYTHONNOUSERSITE=1`, so a user-site PyMOL is invisible on purpose |
-| `rotamer harvest produced no output (rc=...)` | the harvest subprocess died — usually a PyMOL that cannot start headless, or a PDB it refuses | Read the `stderr tail` in the exception, then run it by hand: `"$IPRO_PYMOL_PYTHON" -I scripts/harvest_rotamers.py jobs.json out.json` |
+| `rotamer harvest produced no output (rc=...)` | the harvest subprocess died — usually a PyMOL that cannot start headless, or a PDB it refuses | Read the `stderr tail` in the exception, then run it by hand: `"$IPRO_PYMOL_PYTHON" -I ipro_agent/pymol_helpers/harvest_rotamers.py jobs.json out.json` |
 | `ImportError: No module named pyrosetta`, or `energy backend 'pyrosetta' requested but unavailable` | not installed, or installed in a different env | Install per section 3 and check `python3 -c "import pyrosetta"`. With `backends.energy: auto` this is a silent downgrade to the screening function *and* to `mode: fixed-backbone` — use `backends.energy: pyrosetta` to make it a hard error, or gate with `doctor.py --require pyrosetta` |
 | A finished run reports `mode: fixed-backbone` when you expected the published protocol | the resolved energy backend cannot relax (`can_relax == False`), i.e. no PyRosetta | Install PyRosetta (section 3); `mode` is derived from the backend, not configurable |
 | PyRosetta import succeeds but a licence/EULA error appears, or `pip` cannot find a wheel | wrong find-links index for your Python/platform, or an expired weekly `devel` build that has been removed from the server | Use the quarterly index (section 3); wheels exist for cp39–cp314 on `linux_x86_64`, `macosx_12_0_arm64`, `macosx_12_0_x86_64`. Commercial use needs a paid UW CoMotion licence — that is a licence problem, not an install problem |
@@ -533,9 +546,9 @@ design.
 
 ---
 
-## 9. What I could not verify
+## 9. What was not verified
 
-- Whether the licensed Schrödinger PyMOL build ships the mutagenesis wizard in the same importable form. The open-source build does (verified on this machine); the paid build was not available to test.
+- Whether the licensed Schrödinger PyMOL build ships the mutagenesis wizard in the same importable form. The open-source build does; the paid build was not available to test.
 - ~~Whether the PyRosetta download endpoints still require credentials, and whether the published install commands succeed end-to-end.~~ **Closed 2026-11-18**: route (a) installed `2026.29+releasequarterly` on Apple Silicon with no credentials. What is still unverified is `relax` on anything but a single-chain protein (several chains, a parameterized ligand, `relax_cycles > 1`) — see `energy/pyrosetta_backend.UNEXERCISED`.
 - Current IBM CPLEX academic download path, and the exact term of a free Gurobi academic licence (Gurobi's own pages state 6 months in one place and 1 year in another).
 - ADFR suite / AutoDockTools (`prepare_ligand4.py`, `prepare_receptor4.py`) on Apple Silicon: `doctor.py` probes these names, but no ADFR install was tested.

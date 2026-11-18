@@ -2370,7 +2370,8 @@ def test_regression_negative_residue_selection_is_escaped():
     where two were requested -- without raising."""
     import importlib.util
 
-    for script in ("scripts/apply_design.py", "scripts/harvest_rotamers.py"):
+    for script in ("ipro_agent/pymol_helpers/apply_design.py",
+                   "ipro_agent/pymol_helpers/harvest_rotamers.py"):
         spec = importlib.util.spec_from_file_location("s", REPO / script)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -3697,3 +3698,221 @@ def test_regression_doctor_only_claims_an_in_process_energy_backend():
     assert "<function" not in json.dumps(rep), (
         "a module's version() function was printed instead of called"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the pre-publication readiness audit
+#
+# Five dimensions were audited before the first public release (leaks, fresh
+# clone, agent entry, packaging, claim integrity) and each finding was
+# adversarially verified. These lock in the ones that could mislead a stranger
+# or an agent. See docs/DESIGN.md section 7f.
+# ---------------------------------------------------------------------------
+
+
+def test_regression_a_rejected_candidate_is_never_the_best_design():
+    """The best-score tracker was a sibling of `if ok:` rather than nested in
+    it, so a candidate the goal's hard filter had vetoed still overwrote
+    best_score, best_mutations and best_sequence, and still had
+    best/design.pdb written for it.
+
+    Measured on this repo's own full example: 14 iterations, **0 accepted**,
+    every one rejected with "bottleneck 7.12 A is above pore_diameter_max
+    4.00 A" -- and `status` still printed a 14-mutation best design at 0.7297
+    against a start of 1.2574. An agent following SKILL.md's checklist ("the
+    score improved; if not, say the search found nothing") would have reported
+    those 14 mutations as a pore-narrowing design when nothing met the
+    constraint."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "if ok and score < best_score:" in src, (
+        "the best-design tracker must be gated on acceptance"
+    )
+    # And a run that accepts nothing has to say so itself.
+    assert "NO DESIGN WAS ACCEPTED" in src
+
+
+def test_regression_a_pip_installed_copy_can_reach_the_pymol_helpers():
+    """`pip install .` created a working `ipro-agent` command that could
+    validate a spec and then died at the first rotamer harvest: the two scripts
+    PyMOL runs lived in the repo's top-level `scripts/`, and
+    `Path(__file__).parent.parent / "scripts"` resolves to a
+    `site-packages/scripts/` that does not exist. Measured in a clean venv: the
+    wheel had 29 entries and neither helper.
+
+    They now live inside the package, so they ship in the wheel. Both the
+    clone workflow and an installed copy resolve them the same way."""
+    from ipro_agent.mutate import APPLY_SCRIPT
+    from ipro_agent.rotamers import HARVEST_SCRIPT
+
+    for path in (HARVEST_SCRIPT, APPLY_SCRIPT):
+        assert path.exists(), f"missing PyMOL helper: {path}"
+        # Inside the package, not beside it -- that is what puts it in the wheel.
+        assert path.parent.name == "pymol_helpers", path
+        assert path.parent.parent.name == "ipro_agent", path
+
+    # The declared package list must carry it, or the wheel drops it silently.
+    import tomllib
+
+    cfg = tomllib.loads((REPO / "pyproject.toml").read_text())
+    assert "ipro_agent.pymol_helpers" in cfg["tool"]["setuptools"]["packages"]
+    # ... and the metadata must not have lost the dependencies to a sub-table.
+    assert cfg["project"]["dependencies"], "dependencies went missing from [project]"
+    assert cfg["project"]["license"] == "MIT"
+    assert set(cfg["project"]["urls"]) >= {"Repository"}
+
+
+def test_regression_doctor_separates_can_run_from_can_design():
+    """`can_run` was `bool(numpy available)` -- so a missing Biopython or
+    PyYAML read as fine -- and nothing reported whether a *design* was
+    possible. PyMOL has no fallback (rotamers come only from its mutagenesis
+    wizard and `backends.mutate: builtin` is refused), so `can run: True` with
+    no PyMOL told an agent the gate was green when `run` could not produce a
+    design at all. AGENTS.md tells agents to trust this gate."""
+    p = subprocess.run([sys.executable, str(REPO / "scripts" / "doctor.py"), "--json"],
+                       capture_output=True, text=True, timeout=600)
+    assert p.returncode in (0, 1), p.stderr
+    rep = json.loads(p.stdout)
+
+    for key in ("can_run", "can_design", "missing_required"):
+        assert key in rep, f"doctor must report {key}"
+    # can_run means every REQUIRED module imports -- all three, not just numpy.
+    assert rep["can_run"] is (not rep["missing_required"])
+    for mod in ("py:numpy", "py:Bio", "py:yaml"):
+        assert mod in rep["checks"], mod
+        if not rep["checks"][mod]["available"]:
+            assert mod.split(":", 1)[1] in rep["missing_required"]
+    # can_design additionally requires a mutagenesis backend.
+    assert rep["can_design"] is bool(
+        rep["can_run"] and rep["checks"]["pymol"]["available"]
+    )
+    if not rep["checks"]["pymol"]["available"]:
+        assert rep["can_design"] is False
+
+
+def test_regression_a_mistyped_spec_path_is_one_line_not_a_traceback():
+    """The agent-facing CLI answered a mistyped path with a 20-line traceback,
+    which an agent has to parse past to find the one fact it needs."""
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "validate", "definitely_not_here.yaml"],
+        capture_output=True, text=True, cwd=REPO, timeout=120,
+    )
+    err = p.stderr.strip()
+    assert "Traceback" not in err, err
+    assert "spec not found" in err, err
+    assert len(err.splitlines()) <= 2, err
+
+
+def test_the_public_facing_claims_are_consistent():
+    """Claims a stranger can falsify from the repo itself.
+
+    The audit found the README telling readers the licence was "not yet
+    chosen" while an MIT LICENSE shipped; DESIGN.md section 1b saying
+    restraints and assemblies were "not implemented" while sections 1c and 1d
+    documented both; section 2 calling the docking anneal "not implemented"
+    while it runs by default; and the repo describing itself as "clean-room"
+    -- a term meaning the implementers had no access to the original -- while
+    DESIGN.md records reading the released source and preferring its values.
+    No upstream code is copied, which is the claim that actually matters, so
+    the accurate word is "independent"."""
+    readme = (REPO / "README.md").read_text()
+    licence = (REPO / "LICENSE").read_text()
+    design = (REPO / "docs" / "DESIGN.md").read_text()
+
+    assert "Not yet chosen" not in readme
+    assert "**MIT**" in readme and "MIT License" in licence
+
+    # The *claim* must not reappear anywhere tracked. The term itself may
+    # appear in quotes where LICENSE and DESIGN.md explain why it is NOT used,
+    # so this looks for the asserting forms rather than the bare word.
+    asserting = ("clean-room reimplementation", "is a clean-room",
+                 "is clean-room", "clean room reimplementation")
+    tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                             cwd=REPO).stdout.split()
+    for f in tracked:
+        path = REPO / f
+        if path.suffix.lower() in (".pdb", ".gif", ".jpg", ".png", ".xml", ".html"):
+            continue
+        if f == "tests/test_ipro.py":
+            continue      # names the phrases above in order to forbid them
+        try:
+            text = path.read_text(errors="ignore").lower()
+        except OSError:
+            continue
+        for phrase in asserting:
+            assert phrase not in text, f"{f} still claims {phrase!r}"
+
+    assert "None is implemented here." not in design
+    assert "| docking anneal | not implemented |" not in design
+    # PyMOL must be stated as required, not as a fallback-having optional.
+    assert "no fallback" in readme
+    # The open pore-axis defect has to be disclosed on the landing page.
+    assert "pore_axis" in readme
+    # Responsible-use scope, for a tool published for autonomous agents.
+    assert "## Responsible use" in readme
+
+
+def test_the_documented_environment_matches_the_shipped_one():
+    """docs/INSTALL.md pasted a different environment.yml than the one that
+    ships: env name `ipro` against `ipro-agent`, and 13 dependencies against 8.
+    A reader who copied the doc block got an environment the README's
+    `conda activate ipro-agent` could not find, and a different dependency set
+    from `conda env create -f environment.yml`. The doc now reproduces the
+    shipped file verbatim; this keeps them that way."""
+    import re
+
+    try:
+        import yaml
+    except ImportError:                      # pragma: no cover
+        print("    (skipped: no PyYAML)")
+        return
+
+    doc = (REPO / "docs" / "INSTALL.md").read_text()
+    m = re.search(r"### `environment\.yml`.*?```yaml\n(.*?)```", doc, re.S)
+    assert m, "docs/INSTALL.md no longer shows an environment.yml block"
+    pasted = yaml.safe_load(m.group(1))
+    shipped = yaml.safe_load((REPO / "environment.yml").read_text())
+    assert pasted == shipped, (
+        "the environment.yml in docs/INSTALL.md has drifted from the shipped "
+        f"file: doc={pasted!r} shipped={shipped!r}"
+    )
+    # The name the README tells people to activate.
+    assert shipped["name"] == "ipro-agent"
+    # PyMOL must be in it: it is the one required dependency pip cannot supply.
+    deps = " ".join(d for d in shipped["dependencies"] if isinstance(d, str))
+    assert "pymol" in deps
+
+
+def test_regression_an_indel_at_an_unmodelled_terminus_is_reported():
+    """This module's justification is that a terminus has no second cut end, so
+    the edit is exact -- and it refuses internal indels because an unclosed
+    break "still looks like a protein". But "terminal" was taken to mean the
+    last residue *present in the coordinates*. On a structure with disordered
+    termini, that residue is in the middle of the real chain, so appending
+    there creates exactly the unclosed break internal indels are refused for,
+    with nothing to catch it. SEQRES says how long the chain really is."""
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import classify
+    from ipro_agent.structure import Structure
+
+    # Fully modelled: silent.
+    full = classify(Structure.load(CRN),
+                    [IndelSpec(kind="insert", chain="A", after=46, sequence="G")])
+    assert full.notes == [], full.notes
+
+    # Coordinates truncated to residue 43 while SEQRES still declares 46.
+    tmp = Path(tempfile.mkdtemp()) / "trunc.pdb"
+    tmp.write_text("".join(
+        ln for ln in CRN.read_text().splitlines(True)
+        if not (ln.startswith("ATOM") and int(ln[22:26]) > 43)
+    ))
+    plan = classify(Structure.load(tmp),
+                    [IndelSpec(kind="insert", chain="A", after=43, sequence="G")])
+    assert plan.terminal, "still classified terminal, which is why the note matters"
+    assert plan.notes, "a chain modelled short of SEQRES must be reported"
+    note = plan.notes[0]
+    for fragment in ("SEQRES declares 46", "modelled as 43", "INTERNAL edit"):
+        assert fragment in note, note
+
+    # And the note has to reach the run: apply_terminal takes plan.terminal,
+    # not the plan, so the loop must carry plan.notes itself.
+    assert "self.notes.extend(plan.notes)" in (REPO / "ipro_agent" / "loop.py").read_text()

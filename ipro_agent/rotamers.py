@@ -1,7 +1,7 @@
 """Rotamer enumeration, and the fixed "template" the MILP scores against.
 
 Rotamers come from PyMOL's mutagenesis wizard, which already ships a rotamer
-library and builds ideal side-chain geometry. ``scripts/harvest_rotamers.py``
+library and builds ideal side-chain geometry. ``ipro_agent/pymol_helpers/harvest_rotamers.py``
 runs inside a PyMOL-capable interpreter and returns coordinates as JSON; this
 module finds that interpreter, drives it, and turns the JSON into
 :class:`ipro_agent.milp.Rotamer` objects.
@@ -31,7 +31,11 @@ from .structure import Structure, is_hydrogen
 
 log = logging.getLogger(__name__)
 
-HARVEST_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "harvest_rotamers.py"
+#: Run by PyMOL's interpreter, not imported. Inside the package so that it
+#: ships in the wheel -- from the repo's top-level ``scripts/`` it resolved to a
+#: ``site-packages/scripts/`` that does not exist, so a pip-installed copy could
+#: validate a spec and then died at the first harvest.
+HARVEST_SCRIPT = Path(__file__).resolve().parent / "pymol_helpers" / "harvest_rotamers.py"
 
 #: Backbone atom names. ``OT1``/``OT2``/``OT`` are the CHARMM/AMBER spellings of
 #: the C-terminal carboxylate that ``OXT`` covers in PDB files: without them, a

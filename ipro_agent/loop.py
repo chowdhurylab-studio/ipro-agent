@@ -288,6 +288,13 @@ class IPROLoop:
             self._design_pdb = edited
             self.notes.append(f"indels applied: {result.describe()}")
             self.notes.extend(result.notes)
+            # `classify` raises its own notes -- chiefly the SEQRES check, which
+            # says when a chain is modelled short of its deposited ends, so that
+            # an "append after the last residue" is really an internal edit with
+            # an unclosed break. `apply_terminal` takes plan.terminal rather
+            # than the plan, so those notes do not travel in `result` and would
+            # otherwise be computed and dropped.
+            self.notes.extend(plan.notes)
             if result.added:
                 self.notes.append(
                     "inserted residues are glycine in the structure; list them as "
@@ -1620,7 +1627,21 @@ class IPROLoop:
                 current_aa = self._identities(current_choice, tables)
                 current_asm_energy = {k: v.total for k, v in per_asm.items()}
 
-            if score < best_score:
+            # `ok and`, not just the score. A candidate the goal's hard filter
+            # vetoed is not a design at all -- PoreDesigner discards a pore of
+            # the wrong size *before* its energy counts -- yet this tracker was
+            # a sibling of `if ok:` rather than nested in it, so a rejected
+            # candidate still overwrote best_score, best_mutations and
+            # best_sequence in state.json and still had best/design.pdb written
+            # for it. Measured on this repo's own full example: 14 iterations,
+            # **0 accepted**, every one rejected with "bottleneck 7.12 A is
+            # above pore_diameter_max 4.00 A" -- and `status` still printed a
+            # 14-mutation best design at 0.7297 against a start of 1.2574. An
+            # agent following SKILL.md's checklist ("the score improved; if
+            # not, say the search found nothing") would have reported those 14
+            # mutations as a pore-narrowing design when nothing met the
+            # constraint.
+            if ok and score < best_score:
                 best_score, best_ctx = score, ctx
                 best_identities = dict(identities)
                 self.run.update_state(
@@ -1657,6 +1678,22 @@ class IPROLoop:
                 break
 
         # -- finish ----------------------------------------------------------
+        if accepted == 0:
+            # Said plainly, because the numbers alone read as a result: with no
+            # accepted iteration the "best" design IS the starting point, and
+            # best_score == start_score. SKILL.md tells an agent to report the
+            # mutation string and the score change, so a run that designed
+            # nothing has to announce that itself rather than leave an agent to
+            # infer it from accepted: 0.
+            self.notes.append(
+                f"NO DESIGN WAS ACCEPTED: {n_done} iteration(s) ran and every one "
+                f"was rejected, so the reported best design is the starting "
+                f"point, not a redesign, and the score did not improve. Report "
+                f"this as 'the search found nothing', and read the per-iteration "
+                f"'reason' fields (ipro-agent status) to see what rejected them "
+                f"-- a goal filter rejecting everything usually means the filter "
+                f"window or the design positions need changing, not more iterations."
+            )
         # The mode is a claim about what the protocol did, and it is reported
         # with every design, so it has to match what happened. "full" means
         # relaxation ran; if every attempt failed, say "backbone-mc".

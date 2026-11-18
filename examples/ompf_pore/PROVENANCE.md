@@ -27,20 +27,31 @@ assembled from the PoreDesigner paper (Chowdhury et al., *Nat Commun* 9:3661,
   not print its design positions; they were reconstructed by aligning the
   sequences in the supplementary figures. Two of the published designs also
   carry a mutation at Y310, outside the 25.
-* **The full 25-position native-identity check was never completed.** The
-  process assembling these files was interrupted before it reported that
-  check, so only the four smoke-spec positions have been confirmed above.
-  Before relying on `spec_full.yaml`, run
-  `python3 -m ipro_agent validate examples/ompf_pore/spec_full.yaml` and
-  confirm every native identity matches the published mutation list.
+* **The 25-position native-identity check is complete.**
+  `python3 -m ipro_agent validate examples/ompf_pore/spec_full.yaml` passes, and
+  reports that the native residue is not an allowed choice at 13 of the 25
+  positions — which is intended, since the published designs mutate them, and
+  the run's notes say so. Re-run it after any edit to the spec.
 * **The water-wire probe molecule is not here and was never deposited.**
   Without it the `reshape_channel` objective is degenerate: the run optimizes
   packing subject to the composition constraint. The loop says so in its
   notes. This is weaker than the published objective.
-* **No pore-geometry measurement is implemented**, so the paper's hard
-  bottleneck filter (discard any design whose constriction is outside the
-  requested window) cannot be applied. The `pore_diameter_*` options in the
-  specs are inert.
+* **Pore geometry IS measured now, and the paper's hard filter is applied** —
+  `pore_diameter_min`/`pore_diameter_max` reject a design before its energy is
+  considered, as published (see docs/DESIGN.md §1h). Two caveats carry:
+  the inscribed-circle measurement is this tool's, not the paper's ellipse fit;
+  and **the fitted axis can miss the lumen entirely** when the design positions
+  do not ring the channel — in the 4-position smoke spec it runs inside the wall
+  (0.30 Å clearance where a water needs 1.4 Å) and reports a 1.53 Å
+  "bottleneck" that *passes* the sub-4 Å filter. The run reports the clearance
+  and says it cannot vouch for the radius. docs/DESIGN.md §7d has the
+  measurements; give `goal_options.pore_axis` to measure it directly.
+* **Where `2omf_A.pdb` came from.** RCSB PDB entry **2OMF** (OmpF porin,
+  Cowan et al. 1992), downloaded from `https://files.rcsb.org/download/2OMF.pdb`
+  and reduced to chain A. PDB coordinate files are distributed by the RCSB
+  without copyright restriction (CC0), which is why it can ship here; the MIT
+  licence of this repo does not purport to cover it.
+
 * **No published per-design energies exist** to compare against. The paper
   reports mutation sets, pore diameters and hydrophobicity scores only.
 

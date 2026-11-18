@@ -226,8 +226,13 @@ loop:
 # -----------------------------------------------------------------------------
 # `auto` resolves at run time to the best available option and falls back to
 # the built-in implementations, so this spec runs on a machine with no
-# PyRosetta, no PyMOL and no Vina. Run `python scripts/doctor.py` to see what
-# actually resolved -- and record it, because the answer changes your numbers.
+# PyRosetta and no Vina. **PyMOL is the exception: it is required.** Rotamers
+# come only from its mutagenesis wizard, there is no built-in rotamer builder,
+# and `mutate: builtin` is refused by the config -- so `run` cannot produce a
+# design without it, however many fallbacks the other three have. Install it
+# with `conda env create -f environment.yml`. Run `python3 scripts/doctor.py`
+# to see what actually resolved -- and record it, because the answer changes
+# your numbers.
 #
 # None of these is the paper's software. PoreDesigner named no MILP solver, no
 # rotamer library and no design-stage force field (CHARMM36 appears only in its

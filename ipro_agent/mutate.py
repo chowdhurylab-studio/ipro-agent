@@ -12,7 +12,7 @@ has no meaning outside that enumeration, so rebuilding the side chain with any
 other tool -- even one using a published rotamer library -- would put a
 different conformation into the structure than the MILP scored, and the
 energies reported for the design would not describe the coordinates written.
-``scripts/apply_design.py`` is the PyMOL-side half of the contract.
+``ipro_agent/pymol_helpers/apply_design.py`` is the PyMOL-side half of the contract.
 
 The interpreter dance is the same as the harvest's: PyMOL usually lives in its
 own conda environment, so it is driven as a subprocess rather than imported
@@ -39,7 +39,9 @@ from .rotamers import find_pymol_python
 
 log = logging.getLogger(__name__)
 
-APPLY_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "apply_design.py"
+#: Run by PyMOL's interpreter, not imported; inside the package so it ships in
+#: the wheel (see ipro_agent/pymol_helpers/__init__.py).
+APPLY_SCRIPT = Path(__file__).resolve().parent / "pymol_helpers" / "apply_design.py"
 
 
 class MutateError(RuntimeError):

@@ -1,6 +1,6 @@
 # Design document: what came from where
 
-This repo is a **clean-room reimplementation** of the published IPRO procedure.
+This repo is an **independent reimplementation** of the published IPRO procedure.
 It was written from the papers and from reading the released source for
 behaviour the papers leave ambiguous; no upstream code is reproduced.
 
@@ -87,7 +87,7 @@ The Suite paper defines the vocabulary verbatim:
 | **DM** — design molecule | a protein permitted to mutate | `role: design` |
 | **TM** — target molecule | what it binds: a protein, peptide or small ligand | `role: target` |
 | **DP** — design position | the residues within a DM allowed to mutate | `positions:` |
-| **BA** — binding assembly | the totality of molecules interacting with a particular binding topology; multiple DMs and TMs may take part | **not modelled** — see below |
+| **BA** — binding assembly | the totality of molecules interacting with a particular binding topology; multiple DMs and TMs may take part | **implemented** — see §1d (`assemblies:`). One shared backbone across assemblies is the remaining limit. |
 
 It also settles a definition this implementation depends on. IPRO deliberately
 does **not** use binding energy:
@@ -118,7 +118,7 @@ accepts:
 | how to repack rotamers | implicit (the MILP is always used) |
 | how to use the force field | `backends.energy` |
 | how to use implicit solvation | **not modelled at all** by the built-in energy — it has no desolvation term (see §4). PyRosetta's score function brings one. |
-| the BAs | **not modelled** (single assembly only) |
+| the BAs | `assemblies:` — see §1d |
 | whether to share Metropolis-retained results between processors | **not applicable** (single process) |
 | how to do ensemble structure refinements | partial — `loop.ensemble_size` keeps an ensemble but does not refine it |
 
@@ -129,11 +129,14 @@ must satisfy several binding topologies at once cannot be expressed. Second,
 IPRO offers **four kinds of atom-position restraint, "rigorously enforced
 throughout all functions"** — atoms fixed in place, atoms held near their input
 positions, a distance restraint between two atoms, and a dihedral restraint on
-four atoms. **None is implemented here.** That matters more than it sounds: the
-distance restraint is the mechanism the thioesterase work used to preserve
-catalytic geometry while redesigning specificity (catalytic distances held to
-±0.2 Å), so "redesign this site but keep the catalysis intact" is currently not
-expressible. It is the single most useful thing to add next.
+four atoms. **All four are implemented here** (`restraints:`); §1c gives the
+mechanism. That matters more than it sounds: the distance restraint is what the
+thioesterase work used to preserve catalytic geometry while redesigning
+specificity (catalytic distances held to ±0.2 Å), so "redesign this site but
+keep the catalysis intact" is expressible. The remaining limits are stated in
+§1c: a restraint spanning three or more design positions is reported rather
+than enforced as a veto, and a restraint that cannot name which molecule it
+means is refused rather than guessed.
 
 ### 1c. How restraints are enforced
 
@@ -462,7 +465,7 @@ stated.
 | Parameter | Value here | Source | Note |
 |---|---|---|---|
 | `temperature_k` | 3640 K | IPRO Suite, confirmed in the paper itself | The paper states the Boltzmann factor uses 3640 K, "which retains 25% of designs within 10 kcal mol⁻¹ of the best design", and separately that docking anneals from 3640 K to 2190 K, retaining 25% and **10%** of positions within 10 kcal/mol. **Both calibrations were checked and both hold with `R = 1.987e-3 kcal/(mol·K)`:** `exp(−10/(R·3640)) = 0.2509` and `exp(−10/(R·2190)) = 0.1005`. A secondary source's `k = 0.333e-3` fits neither (it gives 0.0003 and 1e-6), so it was discarded. Checked in `tests/test_ipro.py`. |
-| docking anneal | not implemented | IPRO Suite | 3640 K → 2190 K on a constant cooling schedule, inside the 500-move rigid-body docking loop. The **outer** accept/reject temperature is constant; the annealing belongs to docking, which this tool does not run inside the iteration. |
+| docking anneal | 3640 K → 2190 K, **implemented** | IPRO Suite | A constant cooling schedule inside the 500-move rigid-body docking loop, run by `backends.dock: builtin` (the default when Vina is absent) every `redock_every` iterations — see §1e and `loop.redock_temperature_end_k`. Still true, and the reason this row used to read "not implemented": the **outer** accept/reject temperature is constant, and only the docking sub-loop anneals. |
 | `perturbation_sigma_deg` | 1.5 | IPRO Suite and source (`random.gauss(0, 1.5)`) | The 2006 paper reports 1.65°. The source value was chosen. |
 | `perturbation_cap_deg` | 5.0 | both | Rejection-truncated, not clipped. |
 | `perturbation_segment` | (1, 5) | source (`randint(0,4)`-based split) | 1–5 consecutive residues. |
@@ -500,8 +503,7 @@ distributed with either release. Every substitution below is deliberate.
 | MILP solver | CPLEX via GAMS | CPLEX / Gurobi / CBC / HiGHS / GLPK, or an LP file | Same formulation, same optimum. |
 | Language | Python 2 | Python ≥ 3.10 | — |
 
-**Note:** the user's requested dependency stack (PyMOL, AutoDock Vina,
-PyRosetta) is this substitution set, not IPRO's own. It was adopted as
+**Note:** this dependency stack (PyMOL, AutoDock Vina, PyRosetta) is this substitution set, not IPRO's own. It was adopted as
 specified, and this table is the record of what that changes.
 
 ---
@@ -563,27 +565,43 @@ choice rather than a defect — but each changes how a number should be read:
 
 ## 6. Sources, and what could not be obtained
 
-Obtained in full: Biophys J 2006 and 2007 (PMC1459523, PMC1861794 — neither has
-supplementary material, confirmed); Nat Commun 2018 and its SI; Structure 2020
-(including STAR Methods); ACS Catal 2017 main text (PMC5784442); the IPRO Suite
-source, in two independent copies whose MILP files are byte-identical; and
-Protein-InDelMaker.
+### What this implementation was written from
 
-**Not obtained, and the gaps that leaves:**
+Every capability in §1 traces to one of these. All are cited in full below.
 
-| Missing | Why | What is unresolved |
+| Source | What it supplied |
+|---|---|
+| Biophys J 2006 (PMC1459523) | the IPRO procedure itself: the iteration, the Metropolis test, the 12 Å cutoff |
+| Biophys J 2007 (PMC1861794) | the specificity-switching case and its decoy-ligand treatment |
+| J Comput Chem 2015 (10.1002/jcc.23796) | the IPRO Suite formulation — its equations (1), (2), (4) and (5) match docs/MILP.md; the DM/TM/DP/BA vocabulary in §1b; both temperature calibrations verified in §2 |
+| PLoS ONE 2013 (OptZyme) | the three kinetic objectives and their equations 7, 17, 18 (§1, `goals.py`) |
+| ACS Catal 2017 (PMC5784442) + its Supporting Information | the ΔIE selectivity metric, the catalytic-distance restraints, and the position-selection rule recorded in §1a |
+| Nat Commun 2018 (PoreDesigner) + SI | the pore objective, the ≥50% long-residue constraint, and the sub-4 Å acceptance filter (§1h) |
+| Structure 2020 (IPRO+/−) | the insertion/deletion formulation and its loop-closure requirement (§1i) |
+| The released IPRO Suite source | **numeric defaults the papers leave ambiguous only** — the eight values marked "source" in §2's table, plus the variable declarations, coefficient clamp and cut forms noted in docs/MILP.md. No code was copied; see the note below. |
+| Protein-InDelMaker | the published terminal-indel geometry this tool follows |
+
+**On reading the released source.** It was read, and this document says so
+wherever it mattered: §2 marks eight defaults as coming from the source rather
+than a paper, and in one case (`perturbation_sigma_deg`) records that the
+source's value was preferred over the paper's. That is why this repo is
+described as an **independent reimplementation** and never as "clean-room" —
+the latter means the implementers had no access to the original, which is not
+what happened. What *is* true, and is what the MIT licence relies on, is that
+**no upstream code is copied**: the implementation was written from the
+formulations, and every value taken from the source is cited as such.
+
+### Sources that could not be obtained, and what that leaves unresolved
+
+| Missing | Why | Unresolved |
 |---|---|---|
-| ~~IPRO Suite paper, JCC 2015~~ (10.1002/jcc.23796) | **Obtained 2026-11-18** by the user through ISU's Wiley subscription. | Closed. Its equations (1), (2), (4), (5) confirm the formulation in docs/MILP.md verbatim; its input-requirement list and the DM/TM/DP/BA vocabulary are recorded in §1b; both temperature calibrations are verified in §2. |
-| ~~ACS Catal 2017 supporting information~~ | **Obtained 2026-11-18** through the user's own Chrome; ACS serves Supporting Information free of charge even off campus. 30 pp., Tables S1–S6 + Figures S1–S5. | Closed. The position-selection rule it documents is now recorded in §1a. |
-| **IPRO's rotamer library** | Not in either release; referenced as an external path | Why PyMOL's library is used instead. |
-| **A public IPRO+/− release** | `maranasgroup/ipro--` is an empty repository | Indels exist publicly only as Protein-InDelMaker. |
-| **PoreDesigner's water-wire probe** | Never deposited; the SI publishes only fitted helix parameters | The example case cannot express the published pore objective. |
+| **IPRO's rotamer library** | not in either release; referenced as an external path | why PyMOL's library is used instead, with different rotamer sets and therefore different optima (§3) |
+| **A public IPRO+/− release** | the upstream repository is empty | indels are available publicly only as Protein-InDelMaker, so §1i follows that geometry |
+| **PoreDesigner's water-wire probe** | never deposited; the SI publishes only fitted helix parameters | the example case cannot express the published pore objective, and substitutes a geometric one (§1h) |
 
-Two routes remain open if the user wants these gaps closed: the ISU VPN plus
-their own browser for the Wiley PDF and the ACS SI, and the open-access 2018
-Penn State dissertation by the Suite paper's second author
-(`etda.libraries.psu.edu/catalog/15087mjg5185`), which is the highest-value
-free source still unread.
+The open-access 2018 Penn State dissertation by the Suite paper's second author
+(`etda.libraries.psu.edu/catalog/15087mjg5185`) is the highest-value free source
+still unread, if any of the above matters to you.
 
 ### Citations
 
@@ -849,8 +867,8 @@ backend.
 
 **PyRosetta: installed, and three of the five declared paths were defective.**
 PyRosetta **2026.29+releasequarterly** (native arm64, 1.5 GB wheel, 3.0 GB
-installed) went into the conda env `ipro_rosetta` on the user's instruction,
-under their own licence. Every path named in the old `UNEXERCISED` list was then
+installed) was installed into the conda env `ipro_rosetta` under its own
+licence, which each user must obtain for themselves. Every path named in the old `UNEXERCISED` list was then
 run. What it found:
 
 | # | Defect | Measured |
@@ -904,3 +922,77 @@ fallbacks are exercised) and 141 under the `ipro_rosetta` interpreter.
 
 **Cost, for the record.** The wheel is 1.5 GB and the environment 3.0 GB; with
 pip's cache the install took this machine from 31 GB free to 23 GB.
+
+### 7f. Pre-publication readiness audit
+
+Before the first public release, five further independent reviews were run over
+the **49 tracked files** — the publication set, not the 1.1 GB working tree — on
+the dimensions that matter when strangers and autonomous agents clone a repo:
+what must not be published, whether a fresh clone works, whether an agent can
+use it on a protein the repo has never seen, packaging and licence wiring, and
+whether any claim overstates what was verified. Every finding was adversarially
+verified; **23 survived**, plus 9 from a completeness critic.
+
+One was a correctness blocker of the familiar kind:
+
+| Defect | Effect |
+|---|---|
+| **A candidate the goal's hard filter rejected was still recorded as the run's best design.** The tracker was a sibling of `if ok:` rather than nested in it. | Measured on this repo's own `spec_full.yaml`: 14 iterations, **0 accepted**, every one rejected with "bottleneck 7.12 A is above pore_diameter_max 4.00 A" — and `status` still printed a **14-mutation best design** at 0.7297 against a start of 1.2574, with `best/design.pdb` written for it. An agent following SKILL.md's own checklist ("the score improved; if not, say the search found nothing") would have reported those mutations as a pore-narrowing design when nothing met the published constraint. Now gated on acceptance, and a run with `accepted: 0` states plainly that nothing was designed. |
+
+Two were problems of **claim and licence** rather than code:
+
+* **"Clean-room" was the wrong term, and it sat in the LICENSE as the
+  justification for publishing.** Clean-room means the implementers had no
+  access to the original. This repo had access: §2 marks eight defaults as
+  taken from the released source, and in one case records preferring the
+  source's value over the paper's. The verifier normalized every ≥40-character
+  non-comment line of the tracked Python against all three upstream clones and
+  found **two matches, both non-copyrightable boilerplate** — so the claim that
+  actually matters, *no upstream code is copied*, is true and now stated
+  everywhere the false one used to be.
+* **A 125-word verbatim quotation from the paywalled JCC 2015 paper sat inside
+  an MIT-licensed file**, which would have purported to license Wiley's prose
+  for sublicensing and sale. The passage is now a summary of the protocol's
+  facts (the sigmas, the move count, the annealing endpoints) with the citation
+  kept, and the LICENSE carves out quotations explicitly.
+
+Packaging was broken in a way that only an installed copy would show: `pip
+install .` produced a working `ipro-agent` command that could validate a spec
+and then **died at the first rotamer harvest**, because the two scripts PyMOL
+runs lived in the repo's top-level `scripts/` and
+`Path(__file__).parent.parent / "scripts"` resolves to a `site-packages/scripts/`
+that does not exist. They now live in `ipro_agent/pymol_helpers/`, ship in the
+wheel, and were verified from a clean venv outside the repo.
+
+`doctor.py` — the gate AGENTS.md tells every agent to trust — reported
+`can run: True` with no PyMOL, when PyMOL has no fallback and `run` cannot
+produce a design without it. It now reports `can_run` (all three required
+modules, not just numpy) and `can_design` (which additionally needs a
+mutagenesis backend) separately, and names what is missing.
+
+Also corrected: §1b claimed restraints and binding assemblies were "not
+implemented" while §1c and §1d documented both; §2 called the docking anneal
+"not implemented" while it runs by default; §6 was an internal acquisition log
+and is now a sources table for a reader; `docs/INSTALL.md` said this repo has no
+`pyproject.toml` and pasted an `environment.yml` that differed from the shipped
+one in name and in five dependencies (a test now keeps those two identical); the
+README offered no install command at all and claimed "there is no setup step for
+the agent" when the one unavoidable step is conda-installing PyMOL; and the
+modified `1crn_icode.pdb` fixture presented itself as the deposited entry.
+
+From the critic, two additions the audit dimensions had not asked for: a
+**Responsible use** section, since a tool published so that agents can propose
+mutations to "any protein" said nothing about what it should not be pointed at;
+and a rule, in both AGENTS.md and the skill's checklist, that **an agent must
+report any constraint it loosened** to make a failing run succeed — the
+troubleshooting tables offer exactly those knobs, and each one changes the
+user's scientific question. The long-run recipe gained `--max-minutes`, `setsid`
+and a "submit through the scheduler on a shared machine" line.
+
+One further correctness fix came from the critic: a terminal indel trusted the
+last residue *present in the coordinates*, so on a structure with disordered
+termini — where that residue sits in the middle of the real chain — appending
+created exactly the unclosed break internal indels are refused for. SEQRES is
+now compared against the modelled span and the discrepancy reported.
+
+The suite is **148 tests**.

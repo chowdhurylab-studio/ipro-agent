@@ -1,0 +1,137 @@
+cff-version: 1.2.0
+title: "ipro-agent: an agent-drivable, generalized reimplementation of IPRO"
+message: >-
+  Cite the original papers for the METHOD and this repository only for the
+  IMPLEMENTATION. This is an independent reimplementation: no upstream IPRO
+  code is copied, and the released source was consulted only for parameter
+  values the papers leave ambiguous, each one cited as such in docs/DESIGN.md
+  section 2. The
+  method's references are listed under `references` below and in full, with the
+  equation each capability came from, in docs/DESIGN.md.
+type: software
+authors:
+  - family-names: Dey
+    given-names: Supantha
+repository-code: "https://github.com/chowdhurylab-studio/ipro-agent"
+license: MIT
+version: 0.1.0
+date-released: "2026-11-18"
+
+abstract: >-
+  IPRO as published is a suite of programs wired to specific case studies: the
+  molecules, the design positions and the objective live in a per-case input
+  deck. ipro-agent keeps the machinery and replaces the wiring with a
+  declarative problem statement, so one optimizer can be pointed at an arbitrary
+  protein and an arbitrary stated goal -- specificity switching, pore or channel
+  reshaping, interface affinity, catalytic parameters, stability, and terminal
+  insertions or deletions -- by a person or by an LLM agent. Rotamer selection
+  is a MILP, so a user's composition and identity constraints are enforced
+  exactly rather than approximated by an annealing packer. Energies from the
+  built-in backend are a screening scale and are NOT comparable to the kcal/mol
+  reported in the IPRO papers; every design is a hypothesis for the bench.
+
+keywords:
+  - protein design
+  - protein engineering
+  - IPRO
+  - mixed-integer linear programming
+  - rotamer selection
+  - computational biology
+
+references:
+  - type: article
+    title: "IPRO: an iterative computational protein library redesign and optimization procedure"
+    authors:
+      - family-names: Saraf
+        given-names: Manish C.
+      - family-names: Moore
+        given-names: Gregory L.
+      - family-names: Goodey
+        given-names: Nina M.
+      - family-names: Cao
+        given-names: Vania Y.
+      - family-names: Benkovic
+        given-names: Stephen J.
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "Biophysical Journal"
+    volume: 90
+    issue: 11
+    start: 4167
+    end: 4180
+    year: 2006
+  - type: article
+    title: "The Iterative Protein Redesign and Optimization (IPRO) suite of programs"
+    authors:
+      - family-names: Pantazes
+        given-names: Robert J.
+      - family-names: Grisewood
+        given-names: Matthew J.
+      - family-names: Li
+        given-names: Tong
+      - family-names: Gifford
+        given-names: Nathanael P.
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "Journal of Computational Chemistry"
+    volume: 36
+    issue: 4
+    start: 251
+    end: 263
+    year: 2015
+    doi: "10.1002/jcc.23796"
+  - type: article
+    title: "PoreDesigner for tuning solute selectivity in a robust and highly permeable outer membrane pore"
+    authors:
+      - family-names: Chowdhury
+        given-names: Ratul
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "Nature Communications"
+    volume: 9
+    start: 3661
+    year: 2018
+    doi: "10.1038/s41467-018-06097-1"
+    notes: "Author list abbreviated; see docs/DESIGN.md for the full citation."
+  - type: article
+    title: "IPRO+/-: computational protein design tool allowing for insertions and deletions"
+    authors:
+      - family-names: Chowdhury
+        given-names: Ratul
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "Structure"
+    volume: 28
+    issue: 12
+    start: 1344
+    year: 2020
+    doi: "10.1016/j.str.2020.08.003"
+    notes: "Author list abbreviated; see docs/DESIGN.md for the full citation."
+  - type: article
+    title: "Computational redesign of acyl-ACP thioesterase with improved selectivity toward medium-chain-length fatty acids"
+    authors:
+      - family-names: Grisewood
+        given-names: Matthew J.
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "ACS Catalysis"
+    volume: 7
+    issue: 6
+    start: 3837
+    end: 3849
+    year: 2017
+    doi: "10.1021/acscatal.7b00408"
+    notes: "Author list abbreviated; see docs/DESIGN.md for the full citation."
+  - type: article
+    title: "OptZyme: computational enzyme redesign using transition state analogues"
+    authors:
+      - family-names: Grisewood
+        given-names: Matthew J.
+      - family-names: Maranas
+        given-names: Costas D.
+    journal: "PLoS ONE"
+    volume: 8
+    issue: 10
+    start: "e75358"
+    year: 2013
+    notes: "Author list abbreviated; see docs/DESIGN.md for the full citation."

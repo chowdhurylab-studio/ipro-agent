@@ -39,6 +39,19 @@ def _load(path: str) -> DesignSpec:
     except SpecError as exc:
         print(f"spec error: {exc}", file=sys.stderr)
         raise SystemExit(2)
+    except FileNotFoundError:
+        # A mistyped path used to come back as a 20-line traceback from an
+        # agent-facing CLI, which is noise an agent has to parse past to find
+        # the one fact it needs.
+        print(f"spec not found: {path}", file=sys.stderr)
+        raise SystemExit(2)
+    except IsADirectoryError:
+        print(
+            f"spec path is a directory, not a file: {path}\n"
+            f"  did you mean {path.rstrip('/')}/spec_smoke.yaml ?",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------

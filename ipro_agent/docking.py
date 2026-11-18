@@ -1,18 +1,23 @@
 """IPRO's redocking step: local rigid-body Monte Carlo with annealing.
 
 Worth being precise about what this is, because it is easy to assume otherwise.
-The IPRO Suite paper describes step three of an iteration as
+Step three of an IPRO iteration, as the IPRO Suite paper specifies it
+(Pantazes et al., *J Comput Chem* **36**:251-263, 2015, which the paper calls a
+"local, rigid-body" redocking), is summarized here rather than quoted, since
+that paper is paywalled and this file is MIT licensed:
 
-    a **local, rigid-body** redocking of the TMs ... Docking uses **the same
-    energy functions as the rotamer selection step**. During docking, a TM is
-    randomly perturbed along and around the X, Y and Z axes using a Gaussian
-    distribution centered at zero, with standard deviations of 0.2 A and 2.0
-    [degrees] ... the movement of the TM is retained if the net interaction
-    energy has improved. Each TM is randomly perturbed and 500 iterations are
-    performed. A constant cooling schedule is used for simulated annealing. The
-    temperature at the start (3640 K) and end (2190 K) of docking retain 25 and
-    10%, respectively, of positions within 10 kcal/mol of the best solutions
-    thus far.
+* each target molecule is perturbed along and about X, Y and Z, by Gaussian
+  offsets centred at zero with sigma **0.2 A** and **2.0 degrees**;
+* a move is kept if the **net interaction energy** improves;
+* **500** such moves are performed per molecule;
+* scoring uses **the same energy function as rotamer selection**, not a
+  docking-specific one;
+* simulated annealing runs on a constant cooling schedule from **3640 K** to
+  **2190 K**, the two temperatures that retain 25% and 10% of positions within
+  10 kcal/mol of the best solution so far.
+
+Those are facts about a protocol, not the paper's expression of them. See
+docs/DESIGN.md section 1e for the same numbers with their provenance.
 
 So it is **not** a docking program. It is a short local search in the six
 rigid-body degrees of freedom, scored with the same energy the MILP uses, which

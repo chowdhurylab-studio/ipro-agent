@@ -15,7 +15,10 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
   running the loop, and the degraded modes that change how a result must be
   reported.
 
-- **Before anything else**, run `python3 scripts/doctor.py`. The protocol
+- **Before anything else**, run `python3 scripts/doctor.py --require pymol`.
+  PyMOL has no fallback — rotamers come only from its mutagenesis wizard — so
+  without it `run` cannot produce a design, and `--require pymol` makes that a
+  non-zero exit instead of something to discover mid-run. The protocol also
   degrades in documented ways when PyRosetta, AutoDock Vina or a MILP solver is
   absent, and the mode must be stated when reporting a design.
 
@@ -33,7 +36,16 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
 - Energies from the built-in backend are a screening scale, not kcal/mol
   comparable to the IPRO papers. Never present them as published quantities.
 - Never report a design without also reporting the run's `mode` and its `notes`.
+- A run with `accepted: 0` designed nothing. Its "best design" is the input, so
+  report it as "the search found nothing", never as a design.
+- Never quietly weaken what the user specified to make a failing run succeed.
+  Loosening a restraint, widening `allowed`, raising `max_self_energy` or
+  adding positions each change the scientific question: report the change, or
+  ask first.
+- Some targets and goals need a human decision before anything runs, not after
+  the result arrives — see README.md, "Responsible use".
 - `iterations.jsonl` grows without limit; read progress with
   `python3 -m ipro_agent status <run-dir>`, never by loading the file.
-- This is a clean-room reimplementation. Cite the original papers for the
+- This is an independent reimplementation: no upstream IPRO code is copied.
+  Cite the original papers for the
   method, this repo only for the implementation.

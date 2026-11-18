@@ -300,6 +300,15 @@ are almost all Phe.
      and with each published design's set. The overlap should be substantial;
      position-for-position identity should **not** be expected (§4).
 
+**4b. What the shipped smoke run actually produces.** Recorded so you can tell
+a working install from a result: `spec_smoke.yaml` with its shipped seed accepts
+3 iterations and reports **zero mutations** — 0 of 4 positions come out Trp. The
+native residues win because nothing offsets the packing bias against large side
+chains (no reference-energy term; the run says so in its `notes`). That is a
+successful smoke test and **not** a reproduction of anything in the paper. For a
+run that mutates, use `spec_full.yaml` or set
+`goal_options.reference_energies`.
+
 **5. Did the geometric filter actually bite?** Every accepted design should have a
 bottleneck below the `pore_diameter_max` of 4.0 Å, and rejected proposals should
 dominate the iteration log. If almost nothing is rejected, the pore measurement is not

@@ -275,7 +275,21 @@ def check() -> dict:
         "dock": "vina" if vina["available"] else "none (input poses kept; set redock:false)",
         "milp": milp["preferred"],
     }
-    report["can_run"] = bool(C["py:numpy"]["available"])
+    # Two different questions, kept apart because conflating them misreported
+    # the mode. `can_run` is "the package imports at all" and needs all three
+    # required modules -- it used to check numpy only, so a missing Biopython
+    # or PyYAML read as fine. `can_design` is "a design can actually be
+    # produced", which additionally needs PyMOL: rotamers come only from its
+    # mutagenesis wizard, there is no built-in rotamer builder, and
+    # `backends.mutate: builtin` is refused by the config. Reporting can_run
+    # True with no PyMOL told an agent the gate was green when `run` could not
+    # produce a design at all -- and AGENTS.md tells agents to trust this gate.
+    required_py = ["py:numpy", "py:Bio", "py:yaml"]
+    report["missing_required"] = [
+        k.split(":", 1)[1] for k in required_py if not C[k]["available"]
+    ]
+    report["can_run"] = not report["missing_required"]
+    report["can_design"] = bool(report["can_run"] and pymol["available"])
     report["degraded"] = [
         k for k, v in (("pymol", pymol), ("pyrosetta", pyros), ("vina", vina),
                        ("milp", milp)) if not v["available"]
@@ -325,11 +339,25 @@ def main() -> int:
         print("\nwhat a run will use")
         for k, v in rep["resolved"].items():
             print(f"  {k:8s} -> {v}")
-        if rep["degraded"]:
-            print("\nmissing (run is still possible, with the fallbacks above):")
-            print("  " + ", ".join(rep["degraded"]))
+        # Name what is missing. This block used to print only "can run: False",
+        # leaving the reader to guess which of numpy, Biopython or PyYAML it
+        # meant.
+        if rep["missing_required"]:
+            print("\nREQUIRED and missing: " + ", ".join(rep["missing_required"]))
+            print("  conda env create -f environment.yml   (or: pip install -r requirements.txt)")
+        optional_missing = [d for d in rep["degraded"] if d != "pymol"]
+        if optional_missing:
+            print("\nmissing (a run is still possible, with the fallbacks above):")
+            print("  " + ", ".join(optional_missing))
             print("  see docs/INSTALL.md for what each one changes")
-        print(f"\ncan run: {rep['can_run']}")
+        if not rep["checks"]["pymol"]["available"]:
+            print("\nPyMOL is MISSING and has no fallback: rotamers come only from its")
+            print("  mutagenesis wizard, so `run` cannot produce a design. validate,")
+            print("  positions, milp, score and goals still work.")
+            print("  conda env create -f environment.yml   (pymol-open-source is conda-only)")
+        print(f"\ncan run:    {rep['can_run']}")
+        print(f"can design: {rep['can_design']}"
+              + ("" if rep["can_design"] else "   <- no PyMOL, see above"))
 
     missing = [r for r in args.require if not rep["checks"].get(r, {}).get("available")]
     if missing:

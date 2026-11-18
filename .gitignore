@@ -17,6 +17,9 @@ runs/
 __pycache__/
 *.py[cod]
 *.egg-info/
+# Build artefacts: `pip wheel .` / `python -m build` drop these in the repo root.
+build/
+dist/
 .venv/
 venv/
 .pytest_cache/

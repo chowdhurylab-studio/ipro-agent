@@ -1,4 +1,6 @@
 HEADER    PLANT PROTEIN                           30-APR-81   1CRN              
+REMARK   9 TEST FIXTURE FOR ipro-agent. SOURCE: RCSB PDB ENTRY 1CRN,
+REMARK   9 https://files.rcsb.org/download/1CRN.pdb  (UNMODIFIED COORDINATES).
 TITLE     WATER STRUCTURE OF A HYDROPHOBIC PROTEIN AT ATOMIC RESOLUTION.        
 TITLE    2 PENTAGON RINGS OF WATER MOLECULES IN CRYSTALS OF CRAMBIN             
 COMPND    MOL_ID: 1;                                                            

@@ -42,6 +42,12 @@ Spend your effort on 1–3 and on reading the result honestly.
   variant with Protein-InDelMaker first, then design on that structure.
 - **The goal is a property with no structural handle** (expression,
   solubility, immunogenicity). There is no objective here for those.
+- **The target or the goal needs a human decision first, not a result
+  afterwards.** Stop and ask before running if the molecule is a toxin,
+  virulence factor or select agent, if the aim touches host range,
+  transmissibility, immune escape or drug resistance, or if a sequence is
+  heading for synthesis. Making a protein better at harming is not a use this
+  tool supports. See README.md, "Responsible use".
 
 ## Workflow
 
@@ -413,11 +419,18 @@ with `ipro-agent score`.
 python3 -m ipro_agent run spec.yaml --run-dir runs/case1 --json
 ```
 
-For a long run, launch it detached and poll:
+For a long run, launch it detached **with a wall-clock cap**, and poll:
 
 ```bash
-nohup python3 -m ipro_agent run spec.yaml --run-dir runs/case1 > runs/case1.out 2>&1 &
+setsid python3 -m ipro_agent run spec.yaml --run-dir runs/case1 --max-minutes 240 > runs/case1.out 2>&1 < /dev/null &
 ```
+
+`setsid` rather than `nohup ... &` so the job survives the session ending, and
+`--max-minutes` always, so an unattended run stops at a checkpoint instead of
+occupying the machine indefinitely. **On a shared or scheduled machine, submit
+through the scheduler** (`sbatch`, `qsub`) rather than launching in the login
+session — a 3000-iteration run at ~85 s/iteration is days of CPU, and a login
+node is not where it belongs.
 
 ```bash
 python3 -m ipro_agent status runs/case1 --json
@@ -492,7 +505,19 @@ Before reporting a design, confirm:
 - [ ] every user-stated constraint appears in the LP file
 - [ ] the native residue was an allowed choice at every position (or the note is reported)
 - [ ] `proven_optimal` is true, or the heuristic packing is disclosed
+- [ ] `accepted` is greater than 0. If it is 0, **nothing was designed**: the
+      reported best design is the starting point, the run's `notes` say so, and
+      the honest report is "the search found nothing" plus the per-iteration
+      `reason` fields showing what rejected everything
 - [ ] the score *improved* (`best_score` < `start_score`); if not, say the search found nothing
+- [ ] **every change made to the spec after a failure is reported to the user as
+      a change to their problem** — a loosened restraint, a widened `allowed`
+      set, a raised `max_self_energy` or `temperature_k`, an added position, a
+      relaxed `pore_diameter` window. The troubleshooting table below offers
+      these knobs because they are sometimes right; turning one is never a
+      silent fix, because each one changes the scientific question the user
+      asked. If a failure can only be cleared by weakening what the user
+      specified, say so and ask
 - [ ] reference energies were set, or the all-small-residue caveat is reported
 - [ ] if the design must work in more than one complex, assemblies are declared (otherwise every partner is scored in one combined complex, which is a different problem)
 - [ ] any geometry that must survive the redesign is stated as a restraint (a catalytic contact, a metal site, a disulfide) — the optimizer will not preserve it on its own
@@ -529,7 +554,7 @@ Before reporting a design, confirm:
 
 ## What this is not
 
-This is a clean-room reimplementation of the published IPRO procedure, not the
+This is an independent reimplementation of the published IPRO procedure, not the
 Maranas group's code. It substitutes an open stack (PyMOL, AutoDock Vina,
 PyRosetta, an open MILP solver) for the original's CHARMM, GAMS/CPLEX and
 in-house Monte-Carlo docking. Energies are therefore **not** comparable to

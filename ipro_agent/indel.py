@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -145,6 +146,47 @@ class IndelPlan:
         return bool(self.internal)
 
 
+def _seqres_span(structure, chain, first, last, numbers) -> str | None:
+    """Warn when the modelled chain is shorter than the deposited sequence.
+
+    An insertion "after the last residue" is only a terminal edit if that
+    residue really is the end of the chain. On a structure with disordered
+    termini it is not, and appending there puts a free chain end in the middle
+    of the molecule -- the same unclosed break that :func:`classify` refuses
+    internal indels for, except nothing catches it. Returns a note naming the
+    discrepancy, or None when SEQRES is absent or agrees.
+
+    Read from the raw file rather than Biopython's header, because
+    ``PDBParser`` does not retain SEQRES.
+    """
+    path = getattr(structure, "path", None)
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(errors="ignore")
+    except OSError:
+        return None
+
+    declared = 0
+    for line in text.splitlines():
+        if line.startswith("SEQRES") and len(line) > 11 and line[11] == str(chain):
+            declared += len(line[19:70].split())
+    if not declared:
+        return None                      # no SEQRES for this chain: say nothing
+
+    observed = len(numbers)
+    if observed >= declared:
+        return None
+    return (
+        f"chain {chain} is modelled as {observed} residues ({first}-{last}) but "
+        f"SEQRES declares {declared}: {declared - observed} residue(s) are "
+        f"missing from the coordinates. A terminal indel is only exact at a real "
+        f"chain end -- if the missing residues are at the terminus being edited, "
+        f"this is an INTERNAL edit with an unclosed break, however much it looks "
+        f"terminal. Check which residues are absent before trusting the result."
+    )
+
+
 def classify(structure, indels: list[IndelSpec]) -> IndelPlan:
     """Split the requested indels into terminal (doable) and internal (not).
 
@@ -161,6 +203,18 @@ def classify(structure, indels: list[IndelSpec]) -> IndelPlan:
             raise IndelError(f"chain {spec.chain!r} has no residues")
         numbers = [int(r.id[1]) for r in residues]
         first, last = numbers[0], numbers[-1]
+
+        # "Terminal" has to mean the end of the *molecule*, not the end of what
+        # was modelled. This module's whole justification is that a terminus has
+        # no second cut end, so the edit is exact -- but on a structure whose
+        # termini are disordered and therefore absent from the coordinates, the
+        # last modelled residue sits in the middle of the real chain, and
+        # "appending" after it creates exactly the unclosed break that internal
+        # indels are refused for. SEQRES, when the file has it, says how long
+        # the chain really is.
+        modelled = _seqres_span(structure, spec.chain, first, last, numbers)
+        if modelled is not None:
+            plan.notes.append(modelled)
 
         if spec.kind is IndelKind.INSERT:
             # An insertion is terminal when it goes before the first residue or
