@@ -34,6 +34,7 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Atom-position restraints (fix, tether, distance, dihedral) | `restraints.py`, `Constraint` vetoes in `milp.py` | IPRO Suite: four kinds of restraint "rigorously enforced throughout all functions"; the ±0.2 Å catalytic-distance form is from ACS Catal 2017 |
 | Design/target/anti-target vocabulary | `config.Role` | IPRO's own **DM** / **TM** / **DP** input vocabulary (design molecule, target molecule, design position); `anti_target` is this repo's addition |
 | Rotamer enumeration and mutagenesis | `rotamers.py`, `mutate.py`, `scripts/*.py` | PyMOL's mutagenesis wizard — **a substitution**, see §3 |
 
@@ -128,6 +129,55 @@ catalytic geometry while redesigning specificity (catalytic distances held to
 ±0.2 Å), so "redesign this site but keep the catalysis intact" is currently not
 expressible. It is the single most useful thing to add next.
 
+### 1c. How restraints are enforced
+
+IPRO offers four kinds of atom-position restraint "rigorously enforced
+throughout all functions". All four are expressed here, and the mechanism is
+worth stating because it is exact rather than approximate.
+
+During rotamer selection the only coordinates that change are side-chain atoms
+at design positions. A restraint is therefore a **veto** on rotamer choices,
+classified by how many design positions its atoms depend on:
+
+| Design positions involved | Becomes | MILP form |
+|---|---|---|
+| 0 | nothing to decide — measured once and reported | — |
+| 1 | a rotamer veto | `y[i,r] = 0` |
+| 2 | a pair veto | `y[i,r] + y[j,s] ≤ 1` |
+| ≥3 | **not expressible**; reported, never dropped silently | — |
+
+The vetoed assignments are *precisely* those that violate the restraint, so the
+MILP optimum is the best design that complies. Verified against constrained
+brute force for both the one-position and two-position cases, on both solver
+paths (`tests/test_ipro.py::test_restraint_*`).
+
+`y[i,r] + y[j,s] ≤ 1` is used rather than `w[i,r,j,s] = 0` because a negligible
+pair block has no `w` variables at all (see §7 defect 1), while `y` always
+exists.
+
+Three things learned while implementing it, all of which the tool now reports
+rather than leaving to be discovered:
+
+1. **A restraint on Cβ is nearly vacuous.** Cβ's position is pinned by the
+   backbone — across 11 rotamers at one position it moved by 0.01 Å. Restrain a
+   side-chain *tip* atom (the same position's Cζ2 ranged over 3.8–9.0 Å).
+2. **Naming a side-chain atom silently narrows the residue types.** A restraint
+   on `A20:CG` cannot be satisfied by ALA or GLY, so those rotamers are vetoed.
+   `ipro-agent validate` says so before the run.
+3. **Dead-end elimination runs before restraints**, so the rotamers that would
+   have satisfied a restraint may already have been pruned for clashing. When
+   that leaves nothing, the error says how many were pruned and names
+   `goal_options.max_self_energy` — and points out that a restraint satisfiable
+   only by a clashing rotamer is itself the finding.
+
+A one-sided bound (`minimum`/`maximum`) on a **dihedral** is refused: it has no
+unambiguous meaning on a circular quantity. Dihedrals take `target` with
+`tolerance`, compared with proper wraparound.
+
+A `fix` or `tether` on a **backbone** atom cannot be enforced by rotamer choice.
+In `full` mode it is handed to the relaxation backend; in `fixed-backbone` mode
+it is already satisfied, and the run says so.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -202,7 +252,6 @@ specified, and this table is the record of what that changes.
 | **Vina re-docking inside the loop** | `dock.py` exists and is tested in dry-run; it is not wired into the iteration. | Vina is not installed in this environment, so a wired-in untested path would be a liability. When wiring it: re-score Vina poses with the energy backend, and **never** add Vina affinities to the objective — the scales are unrelated. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
-| **Atom-position restraints** (4 kinds: fixed, tethered, distance, dihedral) | **Not implemented.** | IPRO enforces these throughout. The distance restraint is how the published work preserved catalytic geometry while redesigning specificity (±0.2 Å on catalytic distances). Without it, "redesign this pocket but keep the catalysis" cannot be stated. Highest-value addition. |
 | **Multiple binding assemblies (BAs)** | Not modelled; one assembly only. | IPRO requires every BA to pass acceptance for an iteration to be retained, which is how it designs against several binding topologies at once. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
 

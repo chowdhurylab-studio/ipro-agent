@@ -791,6 +791,237 @@ def test_regression_position_with_no_rotamers_is_rejected():
         raise AssertionError("a rotamer-less position should be infeasible")
 
 
+# ---------------------------------------------------------------------------
+# Restraints
+# ---------------------------------------------------------------------------
+
+
+def _geom_tables(coords_by_pos: dict[str, list[tuple[str, float]]]) -> EnergyTables:
+    """Toy tables whose rotamers carry a 'CG' atom at a chosen x-offset.
+
+    Needs no PyMOL, so the restraint algebra is tested deterministically and in
+    milliseconds. `coords_by_pos` maps a position to (residue name, x) pairs;
+    every rotamer also carries a CB at the origin of its position.
+    """
+    positions = sorted(coords_by_pos)
+    rotamers: dict[str, list[Rotamer]] = {}
+    for pi, p in enumerate(positions):
+        rots = []
+        for st, (aa, x) in enumerate(coords_by_pos[p], start=1):
+            base = np.array([pi * 10.0, 0.0, 0.0])
+            rots.append(
+                Rotamer(
+                    position=p, aa=aa, state=st,
+                    atoms=AtomSet(
+                        names=["CB", "CG"],
+                        coords=[base, base + np.array([x, 0.0, 0.0])],
+                        resnames=[aa, aa],
+                        reskeys=[("A", pi + 1, ""), ("A", pi + 1, "")],
+                    ),
+                )
+            )
+        rotamers[p] = rots
+    t = EnergyTables(positions=positions, rotamers=rotamers)
+    for p in positions:
+        for i in range(len(rotamers[p])):
+            # Deliberately make the LAST rotamer cheapest, so a restraint that
+            # forbids it must actually change the answer.
+            t.self_energy[(p, i)] = -float(i)
+    return t
+
+
+def test_restraint_spec_validation():
+    from ipro_agent.config import AtomRef, Restraint
+
+    assert str(AtomRef.parse("A115:CB")) == "A115:CB"
+    assert AtomRef.parse("X1:C1").chain == "X"
+    assert AtomRef.parse("A115B:OD1").insertion_code == "B"
+    # a real condition in a readable form
+    r = Restraint(kind="distance", atoms=["A1:CG", "A2:CG"], target=3.2, tolerance=0.2)
+    assert r.interval() == (3.0, 3.4000000000000004) or abs(r.interval()[0] - 3.0) < 1e-9
+    assert Restraint(kind="fix", atoms=["A1:CB"]).interval()[1] > 0
+
+    bad = [
+        dict(kind="distance", atoms=["A1:CB"], target=3.0, tolerance=0.1),       # arity
+        dict(kind="distance", atoms=["A1:CB", "A2:CB"], target=3.0),             # no tolerance
+        dict(kind="tether", atoms=["A1:CB"], target=3.0, tolerance=0.1),         # tether+target
+        dict(kind="distance", atoms=["A1:CB", "A2:CB"]),                         # no condition
+        dict(kind="distance", atoms=["A1:CB", "A2:CB"], minimum=5.0, maximum=3.0),  # empty
+    ]
+    for kw in bad:
+        try:
+            Restraint(**kw)
+        except SpecError:
+            pass
+        else:
+            raise AssertionError(f"should have been rejected: {kw}")
+
+
+def test_restraint_single_position_veto_is_exact():
+    """A restraint on one design position must forbid exactly the rotamers that
+    violate it, and the optimum must equal the constrained brute force."""
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import plan_restraints
+    from ipro_agent.structure import Structure
+
+    # CG sits 1, 5 or 9 A along x from A1's origin; the anchor is a real atom.
+    t = _geom_tables({"A1": [("SER", 1.0), ("SER", 5.0), ("SER", 9.0)],
+                      "A2": [("ALA", 1.0), ("ALA", 2.0)]})
+    st = Structure.load(CRN)
+    anchor = st.find("A", 30).child_dict["CA"].coord
+    # Place the restraint so only the nearest CG qualifies.
+    import numpy as _np
+    d0 = float(_np.linalg.norm(_np.array([1.0, 0.0, 0.0]) - _np.array(anchor)))
+    r = Restraint(kind="distance", atoms=["A1:CG", "A30:CA"],
+                  maximum=d0 + 0.5, label="near")
+    plan = plan_restraints([r], t, st, [])
+    assert plan.rotamer_vetoes, "expected some rotamer to be forbidden"
+    assert all(p == "A1" for p, _ in plan.rotamer_vetoes)
+    assert not plan.pair_vetoes
+
+    m = RotamerMILP(t, native={p: "ALA" for p in t.positions},
+                    rotamer_vetoes=plan.rotamer_vetoes)
+    for solver in ("auto", "greedy"):
+        sol = m.solve(solver=solver)
+        assert (("A1", sol.choices["A1"]) not in plan.rotamer_vetoes), solver
+        assert m._feasible(sol.choices), solver
+    exact = m.solve(solver="auto")
+    # constrained brute force: the best assignment using no vetoed rotamer
+    import itertools as _it
+    bb = None
+    for combo in _it.product(*[range(len(t.rotamers[p])) for p in t.positions]):
+        ch = dict(zip(t.positions, combo))
+        if any((p, r) in plan.rotamer_vetoes for p, r in ch.items()):
+            continue
+        e = m.evaluate(ch)
+        if bb is None or e < bb:
+            bb = e
+    assert abs(exact.objective - bb) < 1e-6, (exact.objective, bb)
+
+
+def test_restraint_two_position_pair_veto_is_exact():
+    """A restraint spanning two design positions becomes pair vetoes, and both
+    solver paths must respect them."""
+    import itertools as _it
+
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import plan_restraints
+
+    # A1's CG at x in {1,5}; A2's origin is at x=10, CG at +{1,5}.
+    t = _geom_tables({"A1": [("SER", 1.0), ("SER", 5.0)],
+                      "A2": [("SER", 1.0), ("SER", 5.0)]})
+    # CG-CG distances: 10, 14, 6, 10 -> forbid anything above 11 A.
+    r = Restraint(kind="distance", atoms=["A1:CG", "A2:CG"], maximum=11.0, label="close")
+    plan = plan_restraints([r], t, None, [])     # no fixed atoms needed
+    assert plan.pair_vetoes, "expected forbidden pairs"
+    assert not plan.rotamer_vetoes
+
+    m = RotamerMILP(t, native={p: "SER" for p in t.positions},
+                    pair_vetoes=plan.pair_vetoes)
+    bb = None
+    for combo in _it.product(*[range(len(t.rotamers[p])) for p in t.positions]):
+        ch = dict(zip(t.positions, combo))
+        key = ("A1", ch["A1"], "A2", ch["A2"])
+        if key in plan.pair_vetoes:
+            continue
+        e = m.evaluate(ch)
+        if bb is None or e < bb:
+            bb = e
+    for solver in ("auto", "greedy"):
+        sol = m.solve(solver=solver)
+        assert m._feasible(sol.choices), solver
+        got = ("A1", sol.choices["A1"], "A2", sol.choices["A2"])
+        assert got not in plan.pair_vetoes, (solver, got)
+    assert abs(m.solve(solver="auto").objective - bb) < 1e-6
+
+
+def test_restraint_forbidding_everything_raises_with_an_explanation():
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import RestraintError, plan_restraints
+
+    t = _geom_tables({"A1": [("SER", 1.0), ("SER", 2.0)]})
+    r = Restraint(kind="distance", atoms=["A1:CG", "A1:CB"], minimum=50.0, label="impossible")
+    try:
+        plan_restraints([r], t, None, [])
+    except RestraintError as exc:
+        assert "forbid every rotamer" in str(exc)
+    else:
+        raise AssertionError("should have refused")
+
+
+def test_restraint_on_a_missing_atom_is_caught_before_the_run():
+    """check_restraints needs no rotamer library, so a typo is caught cheaply."""
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import check_restraints
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    r = Restraint(kind="distance", atoms=["A30:CA", "A30:ZZ9"], maximum=5.0, label="typo")
+    problems, _ = check_restraints([r], st, [], [])
+    assert problems and "ZZ9" in problems[0], problems
+
+
+def test_restraint_with_no_design_position_is_reported_not_enforced():
+    """If nothing the design controls affects the measurement, say so."""
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import plan_restraints
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    t = _geom_tables({"A1": [("SER", 1.0)]})
+    # Both atoms are fixed, and deliberately far apart.
+    r = Restraint(kind="distance", atoms=["A30:CA", "A31:CA"], maximum=0.5, label="fixedpair")
+    plan = plan_restraints([r], t, st, [])
+    assert not plan.rotamer_vetoes and not plan.pair_vetoes
+    assert plan.native_violations and "violated by the input structure" in plan.native_violations[0]
+
+
+def test_dihedral_rejects_one_sided_bounds():
+    """A one-sided bound on a circular quantity is ambiguous; refuse it."""
+    from ipro_agent.config import Restraint
+    from ipro_agent.restraints import RestraintError, plan_restraints
+
+    t = _geom_tables({"A1": [("SER", 1.0)]})
+    r = Restraint(kind="dihedral", atoms=["A1:CB", "A1:CG", "A1:CB", "A1:CG"],
+                  minimum=60.0, label="amb")
+    try:
+        plan_restraints([r], t, None, [])
+    except RestraintError as exc:
+        assert "ambiguous" in str(exc) or "minimum" in str(exc)
+    else:
+        raise AssertionError("a one-sided dihedral bound should be refused")
+
+
+def test_dihedral_and_distance_geometry():
+    """The geometry helpers themselves, against known values."""
+    from ipro_agent.restraints import angular_deviation, dihedral, distance
+
+    assert abs(distance([0, 0, 0], [3, 4, 0]) - 5.0) < 1e-12
+
+    # Both outer bonds along +x: eclipsed (cis), 0 degrees.
+    cis = dihedral([1, 1, 0], [0, 1, 0], [0, 0, 0], [1, 0, 0])
+    assert abs(cis) < 1e-6, cis
+    # Outer bonds opposed: anti (trans), 180 degrees.
+    trans = dihedral([1, 1, 0], [0, 1, 0], [0, 0, 0], [-1, 0, 0])
+    assert abs(abs(trans) - 180.0) < 1e-6, trans
+    # Outer bonds perpendicular: 90 degrees.
+    perp = dihedral([1, 1, 0], [0, 1, 0], [0, 0, 0], [0, 0, 1])
+    assert abs(abs(perp) - 90.0) < 1e-6, perp
+    # Degenerate inputs must raise rather than return a meaningless number.
+    for pts in (
+        ([0, 0, 0], [1, 1, 1], [1, 1, 1], [2, 0, 0]),     # central atoms coincide
+        ([0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]),     # collinear
+    ):
+        try:
+            dihedral(*pts)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"degenerate dihedral should raise: {pts}")
+    assert abs(angular_deviation(179.0, -179.0) - 2.0) < 1e-9   # wraps
+    assert abs(angular_deviation(10.0, 350.0) - 20.0) < 1e-9
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

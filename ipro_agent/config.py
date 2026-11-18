@@ -23,6 +23,7 @@ anti-target molecule
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -269,6 +270,190 @@ class IndelSpec:
 
 
 # ---------------------------------------------------------------------------
+# Restraints
+# ---------------------------------------------------------------------------
+
+_ATOM_RE = re.compile(r"^\s*(?P<pos>[^:\s]+)\s*[:.]\s*(?P<atom>[A-Za-z0-9'*]+)\s*$")
+
+
+@dataclass(frozen=True)
+class AtomRef:
+    """One atom, named by its residue and atom name: ``"A115:CB"``.
+
+    The residue part accepts the same spellings as a design position, so
+    ``A115:CB``, ``A:115:CB`` and ``X1:C1`` (a ligand atom) all work.
+    """
+
+    chain: str
+    number: int
+    atom: str
+    insertion_code: str = ""
+
+    @property
+    def position(self) -> str:
+        return f"{self.chain}{self.number}{self.insertion_code}".strip()
+
+    @property
+    def key(self) -> tuple[str, int, str]:
+        return (self.chain, self.number, self.insertion_code)
+
+    def __str__(self) -> str:
+        return f"{self.position}:{self.atom}"
+
+    @classmethod
+    def parse(cls, text: str) -> "AtomRef":
+        m = _ATOM_RE.match(str(text))
+        if not m:
+            raise SpecError(
+                f"cannot parse atom reference {text!r}; expected "
+                "'<chain><residue>:<atom>', e.g. 'A115:CB' or 'X1:C1'"
+            )
+        pos = DesignPosition.parse(m.group("pos"), allowed=["ALA"])
+        return cls(
+            chain=pos.chain, number=pos.number,
+            insertion_code=pos.insertion_code, atom=m.group("atom").upper(),
+        )
+
+
+class RestraintKind(str, Enum):
+    #: Hold a distance between two atoms. The capability the published
+    #: thioesterase work used to preserve catalytic geometry while redesigning
+    #: specificity.
+    DISTANCE = "distance"
+    #: Keep one atom near where it started.
+    TETHER = "tether"
+    #: Hold a dihedral defined by four atoms.
+    DIHEDRAL = "dihedral"
+    #: Keep one atom exactly where it started; a tether with a tight tolerance.
+    FIX = "fix"
+
+
+#: Tolerance used for a ``fix`` when the user gives none (Angstroms).
+FIX_TOLERANCE = 0.05
+
+
+@dataclass
+class Restraint:
+    """A geometric condition every accepted design must satisfy.
+
+    IPRO enforces four kinds of atom-position restraint "rigorously ... throughout
+    all functions": atoms fixed in place, atoms held near their input positions, a
+    distance between two atoms, and a dihedral over four atoms. All four are
+    expressed here.
+
+    Every restraint reduces to an **interval** that a measured geometric quantity
+    must lie in. Give either ``target`` with ``tolerance``, or ``minimum`` and/or
+    ``maximum``:
+
+    * ``target: 3.2, tolerance: 0.2`` -> the quantity must lie in [3.0, 3.4];
+    * ``minimum: 4.0`` -> at least 4.0 (keep two atoms apart);
+    * ``maximum: 3.5`` -> at most 3.5 (keep a contact).
+
+    For ``tether`` and ``fix``, ``target`` is omitted: the reference is the atom's
+    position in the input structure, and the interval bounds its displacement.
+
+    Distances are Angstroms, dihedrals degrees.
+    """
+
+    kind: RestraintKind | str
+    atoms: list[str] = field(default_factory=list)
+    target: float | None = None
+    tolerance: float | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+    label: str = ""
+    #: Refuse to run when the input structure already violates this restraint,
+    #: rather than reporting it and continuing.
+    strict: bool = False
+
+    #: Resolved atom references, filled in by __post_init__.
+    refs: list[AtomRef] = field(default_factory=list, repr=False)
+
+    _ARITY = {
+        RestraintKind.DISTANCE: 2,
+        RestraintKind.TETHER: 1,
+        RestraintKind.FIX: 1,
+        RestraintKind.DIHEDRAL: 4,
+    }
+
+    def __post_init__(self) -> None:
+        self.kind = RestraintKind(str(self.kind).lower())
+        self.refs = [AtomRef.parse(a) for a in self.atoms]
+        want = self._ARITY[self.kind]
+        if len(self.refs) != want:
+            raise SpecError(
+                f"a {self.kind.value} restraint needs exactly {want} atom(s); "
+                f"got {len(self.refs)} ({self.atoms})"
+            )
+        if self.kind is RestraintKind.FIX and self.tolerance is None:
+            self.tolerance = FIX_TOLERANCE
+        if self.kind in (RestraintKind.TETHER, RestraintKind.FIX):
+            if self.target is not None:
+                raise SpecError(
+                    f"a {self.kind.value} restraint measures displacement from the "
+                    "input structure, so it takes no 'target'; use 'tolerance' "
+                    "(or 'maximum') to say how far the atom may move"
+                )
+            if self.tolerance is None and self.maximum is None:
+                raise SpecError(
+                    f"a {self.kind.value} restraint needs 'tolerance' or 'maximum' "
+                    "(how far the atom may move, in Angstroms)"
+                )
+        if self.target is not None and self.tolerance is None:
+            raise SpecError(
+                f"restraint {self.describe()} gives 'target' but no 'tolerance'; "
+                "an exact equality can never be met by floating-point geometry"
+            )
+        if self.target is None and self.tolerance is not None and self.kind not in (
+            RestraintKind.TETHER, RestraintKind.FIX
+        ):
+            raise SpecError(
+                f"restraint {self.describe()} gives 'tolerance' but no 'target'"
+            )
+        if self.target is None and self.tolerance is None and (
+            self.minimum is None and self.maximum is None
+        ):
+            raise SpecError(
+                f"restraint {self.describe()} states no condition; give "
+                "'target'+'tolerance', or 'minimum'/'maximum'"
+            )
+        lo, hi = self.interval()
+        if lo > hi:
+            raise SpecError(f"restraint {self.describe()} has an empty interval [{lo}, {hi}]")
+
+    def interval(self) -> tuple[float, float]:
+        """The closed interval the measured quantity must fall in."""
+        lo, hi = -math.inf, math.inf
+        if self.target is not None and self.tolerance is not None:
+            lo, hi = self.target - self.tolerance, self.target + self.tolerance
+        elif self.tolerance is not None:   # tether / fix: displacement from input
+            lo, hi = 0.0, self.tolerance
+        if self.minimum is not None:
+            lo = max(lo, float(self.minimum))
+        if self.maximum is not None:
+            hi = min(hi, float(self.maximum))
+        return lo, hi
+
+    @property
+    def is_displacement(self) -> bool:
+        return self.kind in (RestraintKind.TETHER, RestraintKind.FIX)
+
+    @property
+    def unit(self) -> str:
+        return "deg" if self.kind is RestraintKind.DIHEDRAL else "A"
+
+    def describe(self) -> str:
+        lo, hi = self.interval()
+        atoms = ", ".join(str(r) for r in self.refs) or ",".join(map(str, self.atoms))
+        what = "displacement" if self.is_displacement else self.kind.value
+        bound = (
+            f"[{lo:g}, {hi:g}]" if math.isfinite(lo) and math.isfinite(hi)
+            else (f">= {lo:g}" if math.isfinite(lo) else f"<= {hi:g}")
+        )
+        return f"{self.label or self.kind.value}: {what}({atoms}) in {bound} {self.unit}"
+
+
+# ---------------------------------------------------------------------------
 # Optimizer settings
 # ---------------------------------------------------------------------------
 
@@ -421,6 +606,8 @@ class DesignSpec:
     molecules: list[Molecule] = field(default_factory=list)
     positions: list[DesignPosition] = field(default_factory=list)
     indels: list[IndelSpec] = field(default_factory=list)
+    #: Geometric conditions every accepted design must satisfy.
+    restraints: list[Restraint] = field(default_factory=list)
     loop: LoopSettings = field(default_factory=LoopSettings)
     backends: Backends = field(default_factory=Backends)
     #: Free-form, goal-specific knobs (e.g. a target pore radius). Validated by
@@ -491,6 +678,7 @@ class DesignSpec:
                 raise SpecError(f"cannot read position entry {item!r}")
 
         indels = [IndelSpec(**i) for i in d.pop("indels", [])]
+        restraints = [Restraint(**r) for r in d.pop("restraints", [])]
         loop = LoopSettings(**d.pop("loop", {}))
         backends = Backends(**d.pop("backends", {}))
 
@@ -505,7 +693,7 @@ class DesignSpec:
             )
         return cls(
             molecules=mols, positions=positions, indels=indels,
-            loop=loop, backends=backends, **d,
+            restraints=restraints, loop=loop, backends=backends, **d,
         )
 
     @classmethod
@@ -543,6 +731,9 @@ class DesignSpec:
             m["role"] = str(m["role"].value if hasattr(m["role"], "value") else m["role"])
         for i in d["indels"]:
             i["kind"] = str(i["kind"].value if hasattr(i["kind"], "value") else i["kind"])
+        for r in d.get("restraints", []):
+            r["kind"] = str(r["kind"].value if hasattr(r["kind"], "value") else r["kind"])
+            r.pop("refs", None)   # derived; re-parsed from `atoms` on load
         return d
 
     def summary(self) -> str:
@@ -572,6 +763,8 @@ class DesignSpec:
                 lines.append(f"  insert {i.sequence or f'{i.length} residues'} after {i.chain}{i.after}")
             else:
                 lines.append(f"  delete {i.chain}{i.residues}")
+        for r in self.restraints:
+            lines.append(f"  restraint {r.describe()}")
         n = self.design_space_size()
         lines.append(f"design space: {n:.3g} sequences" if n > 1e6 else f"design space: {n} sequences")
         lines.append(f"iterations: {self.loop.iterations}")

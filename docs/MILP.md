@@ -82,6 +82,7 @@ of them. Each is linear in `y` (or, for the energy cap, in `y` and `w`).
 | `min_class` / `max_class` | `Σ_{i} Σ_{r: aa(i,r) ∈ S} y[i,r] ≥ K` (or `≤ K`) | PoreDesigner's requirement that ≥ 50% of designed positions take a long residue (W/F/Y/M) |
 | `require` / `forbid` | `Σ_{r: aa(i,r) ∈ S} y[i,r] = 1` (or `= 0`) at position `i` | IPRO's permitted-amino-acid enforcement |
 | `max_energy` | `objective(1) ≤ E_cutoff` | IPRO's stability constraint, `Σ X(E_rb+E_rs) + Σ Z·E_rr + E_sb ≤ E_cutoff` in the 2006 formulation |
+| restraint vetoes | `y[i,r] = 0` for a forbidden rotamer; `y[i,r] + y[j,s] ≤ 1` for a forbidden combination | IPRO's four atom-position restraints, turned into vetoes by `restraints.py` (see docs/DESIGN.md §1c) |
 | integer cuts | `Σ_{i} Σ_{r: aa(i,r) = A(i)} y[i,r] ≤ |P| − 1` for each previously evaluated sequence `A` | IPRO's "no design is ever revisited" cut (`≤ len−1` in the source) |
 
 The integer cut forbids a **sequence**, not a rotamer assignment: every rotamer

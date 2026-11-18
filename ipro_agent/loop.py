@@ -48,6 +48,7 @@ from .energy.base import AtomSet, EnergyBackend
 from .energy import resolve as resolve_energy
 from .goals import Goal, ScoreContext, build_goal, metropolis_accept
 from .milp import Constraint, EnergyTables, RotamerMILP, Rotamer, build_tables
+from .restraints import RestraintError, RestraintPlan, plan_restraints
 from .rotamers import build_template, harvest
 from .state import IterationRecord, RunDir, Status
 from .structure import Structure
@@ -149,6 +150,8 @@ class IPROLoop:
         self._rotamer_cache: dict[str, list[Rotamer]] | None = None
         self._native: dict[str, str] = {}
         self._visited: list[dict[str, str]] = []
+        #: Filled in by run_loop once the rotamer tables exist.
+        self._restraints: RestraintPlan = RestraintPlan()
 
     # -- setup -------------------------------------------------------------
 
@@ -297,6 +300,29 @@ class IPROLoop:
         spec = self.spec
         tables = self.build_tables()
         self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
+
+        # Geometric restraints become vetoes on rotamer choices, which is exact:
+        # the forbidden assignments are precisely those that violate them, so the
+        # MILP optimum is the best design that complies. A restraint that cannot
+        # be expressed is reported, never dropped in silence.
+        self._restraints = plan_restraints(
+            spec.restraints, tables, self._design_st, list(self._partners.values())
+        )
+        rp = self._restraints
+        if spec.restraints:
+            for line in rp.summary:
+                self.run.log(f"restraint {line}")
+            self.notes.extend(rp.summary)
+            self.notes.extend(rp.notes)
+            for v in rp.native_violations:
+                self.notes.append(f"NATIVE VIOLATION: {v}")
+            for u in rp.unsupported:
+                self.notes.append(f"RESTRAINT NOT ENFORCED: {u}")
+            self.run.log(
+                f"restraints: {len(rp.rotamer_vetoes)} rotamer veto(es), "
+                f"{len(rp.pair_vetoes)} pair veto(es), "
+                f"{len(rp.unsupported)} not enforced"
+            )
         if not spec.goal_options.get("reference_energies") and not self.backend.can_relax:
             self.notes.append(
                 "no amino-acid reference energies were supplied and the backend has "
@@ -309,7 +335,7 @@ class IPROLoop:
             )
 
         # -- starting point: the native sequence, repacked --------------------
-        start_choice = self._native_choice(tables)
+        start_choice = self._native_choice(tables, vetoed=rp.rotamer_vetoes)
         start_ctx = self._context_for(self._rotamers_for(tables, start_choice))
         start_score = self.goal.score(start_ctx)
 
@@ -382,6 +408,8 @@ class IPROLoop:
                     constraints=self.constraints + pins,
                     native=self._native,
                     visited=self._visited if spec.loop.integer_cuts else [],
+                    rotamer_vetoes=rp.rotamer_vetoes,
+                    pair_vetoes=rp.pair_vetoes,
                 )
                 try:
                     sol = milp.solve(
@@ -518,27 +546,43 @@ class IPROLoop:
 
     # -- helpers -----------------------------------------------------------
 
-    def _native_choice(self, tables: EnergyTables) -> dict[str, int]:
+    def _native_choice(
+        self, tables: EnergyTables, vetoed: set[tuple[str, int]] | None = None
+    ) -> dict[str, int]:
         """Rotamer indices reproducing the native identity where it is offered.
 
         Where the native residue is not in the user's allowed set, the
         lowest-self-energy rotamer stands in -- and that is noted, because the
         "starting score" is then not the wild type's.
         """
+        vetoed = vetoed or set()
         out: dict[str, int] = {}
         substituted = []
+        blocked = []
         for p in tables.positions:
             nat = self._native.get(p)
+            allowed = [
+                i for i in range(len(tables.rotamers[p])) if (p, i) not in vetoed
+            ] or list(range(len(tables.rotamers[p])))
             idx = next(
-                (i for i, r in enumerate(tables.rotamers[p]) if r.aa == nat), None
+                (i for i in allowed if tables.rotamers[p][i].aa == nat), None
             )
             if idx is None:
-                idx = min(
-                    range(len(tables.rotamers[p])),
-                    key=lambda i: tables.self_energy.get((p, i), 0.0),
-                )
-                substituted.append(p)
+                idx = min(allowed, key=lambda i: tables.self_energy.get((p, i), 0.0))
+                # Distinguish "the user did not allow the native residue" from
+                # "a restraint forbade every native rotamer": they mean
+                # different things to someone reading the starting score.
+                if any(r.aa == nat for r in tables.rotamers[p]):
+                    blocked.append(p)
+                else:
+                    substituted.append(p)
             out[p] = idx
+        if blocked:
+            self.notes.append(
+                "the restraints forbid every native rotamer at "
+                f"{', '.join(blocked)}, so the starting score is not the wild "
+                "type's; the input structure does not satisfy the restraints there"
+            )
         if substituted:
             self.notes.append(
                 "the native residue is not an allowed choice at "

@@ -140,6 +140,50 @@ implements. The rest need the user's knowledge of the system, a family
 alignment, or a prior round's results. Ask; do not guess, and never silently
 design away a catalytic residue.
 
+### 2b. Add restraints when geometry must be preserved
+
+This is the capability that makes enzyme work possible: **"redesign this pocket
+but keep the catalysis intact"** is a restraint, not an objective. The published
+thioesterase redesign held its catalytic distances to ±0.2 Å while changing
+specificity — without that, the optimizer will happily destroy the active site
+to improve a binding score.
+
+```yaml
+restraints:
+  # keep a catalytic contact: the published form
+  - {kind: distance, atoms: ["A10:OG", "LIG1:C1"], target: 3.2, tolerance: 0.2,
+     label: catalytic_Ser_to_carbonyl}
+  # keep two side chains apart
+  - {kind: distance, atoms: ["A115:CZ", "A119:CZ"], minimum: 4.0}
+  # let a side chain move no more than half an Angstrom from the input
+  - {kind: tether, atoms: ["A145:OH"], tolerance: 0.5}
+  # pin an atom
+  - {kind: fix, atoms: ["A145:OH"]}
+  # hold a dihedral (target + tolerance only; a one-sided bound is refused)
+  - {kind: dihedral, atoms: ["A1:N","A1:CA","A1:CB","A1:CG"], target: -60, tolerance: 20}
+```
+
+`validate` tells you how each one will be enforced before anything expensive
+runs. Four things to get right:
+
+- **Restrain a side-chain tip, not Cβ.** Cβ is pinned by the backbone — it moves
+  ~0.01 Å across a position's rotamers, so a Cβ restraint does nothing.
+- **Naming a side-chain atom restricts the residue types.** `A20:CG` cannot be
+  satisfied by ALA or GLY, so those are vetoed. That may be what you want; know
+  that it is happening.
+- **A restraint over three or more design positions cannot be enforced.** It is
+  reported as `RESTRAINT NOT ENFORCED` in the run notes — read them.
+- **If a restraint forbids everything**, the error names how many rotamers
+  dead-end elimination had already pruned. A restraint satisfiable only by a
+  clashing rotamer is a real conflict between the restraint and the structure;
+  report that to the user rather than quietly raising `max_self_energy` until it
+  goes away.
+
+A restraint the *input structure* already violates is reported as
+`NATIVE VIOLATION` and the run continues — no choice of rotamer can fix it, so
+it is the structure's problem, not the design's. Pass `strict: true` on the
+restraint to make that a hard failure instead.
+
 ### 3. Validate before spending time
 
 ```bash
@@ -277,6 +321,8 @@ Before reporting a design, confirm:
 - [ ] `proven_optimal` is true, or the heuristic packing is disclosed
 - [ ] the score *improved* (`best_score` < `start_score`); if not, say the search found nothing
 - [ ] reference energies were set, or the all-small-residue caveat is reported
+- [ ] any geometry that must survive the redesign is stated as a restraint (a catalytic contact, a metal site, a disulfide) — the optimizer will not preserve it on its own
+- [ ] no restraint came back `RESTRAINT NOT ENFORCED` or `NATIVE VIOLATION` unreported
 - [ ] every entry in `notes` is passed on to the user
 
 ## Common problems
@@ -291,6 +337,8 @@ Before reporting a design, confirm:
 | every iteration rejected | the acceptance temperature is low relative to the score scale, or the energy units differ from kcal/mol | check `loop.temperature_k` (IPRO's default 3640 K ⇒ kT ≈ 7.2 kcal/mol) against the score magnitudes in `iterations.jsonl` |
 | interaction energy ≈ 0 | the partner is not in contact with the design molecule | the structures are not in a common frame; superpose them first, or dock |
 | design drifts to small residues | no reference energies, so nothing corrects for unfolded-state propensity (see *Degraded modes*) | set `goal_options.reference_energies` or use PyRosetta |
+| `the restraints forbid every rotamer at X` | the restraint conflicts with the structure, often after clash pruning removed the rotamers that would satisfy it | read the rest of the message: it says how many were pruned. Loosen the tolerance, widen `allowed`, or raise `goal_options.max_self_energy` — but report the conflict, it is a finding |
+| a restraint seems to do nothing | it names Cβ (pinned by the backbone), or its atoms are all fixed | restrain a side-chain tip atom; check `validate`'s `restraint_notes` |
 | MILP huge / slow | design space too large | fewer positions, smaller `allowed` sets, or raise `pair_eps` to prune weak pair terms |
 
 ## Reference index

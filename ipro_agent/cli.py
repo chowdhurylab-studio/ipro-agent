@@ -104,6 +104,25 @@ def cmd_validate(args) -> int:
     except SpecError as exc:
         problems.append(f"goal: {exc}")
 
+    # Restraints: a cheap pre-flight that needs no rotamer library, so a
+    # misspelled atom name is caught in a second rather than after a harvest.
+    if spec.restraints:
+        from .restraints import check_restraints
+
+        partners = []
+        for m in spec.targets + spec.anti_targets:
+            try:
+                partners.append(Structure.load(m.path, m.chains or None))
+            except Exception:
+                pass
+        r_problems, r_notes = check_restraints(
+            spec.restraints, st, partners, [p.label for p in spec.positions]
+        )
+        info["restraints"] = [r.describe() for r in spec.restraints]
+        if r_notes:
+            info["restraint_notes"] = r_notes
+        problems.extend(r_problems)
+
     info["design_space_sequences"] = spec.design_space_size()
     info["positions"] = len(spec.positions)
     info["iterations"] = spec.loop.iterations

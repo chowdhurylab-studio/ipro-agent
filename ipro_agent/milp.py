@@ -214,6 +214,10 @@ class EnergyTables:
     pair_energy: dict[tuple[str, int, str, int], float] = field(default_factory=dict)
     #: Diagnostics, reported so a surprising answer can be traced.
     stats: dict[str, float] = field(default_factory=dict)
+    #: How many rotamers dead-end elimination removed at each position. Kept
+    #: per position because a restraint that forbids every surviving rotamer
+    #: needs to say whether pruning is why.
+    pruned_per_position: dict[str, int] = field(default_factory=dict)
 
     def rot_index(self, pos: str) -> list[int]:
         return list(range(len(self.rotamers[pos])))
@@ -294,6 +298,7 @@ def build_tables(
             else:
                 n_pruned += 1
         tab.rotamers[pos] = kept
+        tab.pruned_per_position[pos] = len(scored) - len(kept)
         # Keyed by object identity, not by (position, aa, state): a library
         # with a duplicate (aa, state) would otherwise collapse two distinct
         # rotamers onto one energy.
@@ -416,10 +421,25 @@ class RotamerMILP:
         constraints: Sequence[Constraint] = (),
         native: dict[str, str] | None = None,
         visited: Sequence[dict[str, str]] = (),
+        rotamer_vetoes: Iterable[tuple[str, int]] = (),
+        pair_vetoes: Iterable[tuple[str, int, str, int]] = (),
     ) -> None:
         self.t = tables
         self.constraints = list(constraints)
         self.native = dict(native or {})
+        #: Rotamer choices forbidden outright, as (position, rotamer index).
+        #: Produced by :mod:`ipro_agent.restraints` from geometric restraints,
+        #: and emitted as y[i,r] = 0. Kept as plain sets rather than a richer
+        #: object so that milp.py need not import the restraint machinery that
+        #: imports it.
+        self.rotamer_vetoes = {(str(p), int(i)) for p, i in rotamer_vetoes}
+        #: Rotamer combinations forbidden together, emitted as
+        #: y[i,r] + y[j,s] <= 1. That form is used rather than w[i,r,j,s] = 0
+        #: because a negligible pair block has no w variables at all, while y
+        #: always exists.
+        self.pair_vetoes = {
+            (str(pi), int(ri), str(pj), int(rj)) for pi, ri, pj, rj in pair_vetoes
+        }
         #: Sequences already evaluated, as position -> amino acid. Each becomes
         #: an integer ("no good") cut so the optimizer cannot return it again:
         #:
@@ -510,6 +530,28 @@ class RotamerMILP:
         # -- user constraints
         for n, con in enumerate(self.constraints):
             L.extend(self._emit_constraint(n, con))
+
+        # -- restraint vetoes
+        if self.rotamer_vetoes:
+            L.append("\\ (10) restraint vetoes: forbidden rotamers")
+            for p in t.positions:
+                vs = [
+                    self._y(p, r) for r in range(len(t.rotamers[p]))
+                    if (p, r) in self.rotamer_vetoes
+                ]
+                if vs:
+                    L.append(
+                        f" veto_{self._pi[p]}: "
+                        + _wrap_terms([f"+1 {v}" for v in vs]) + " = 0"
+                    )
+        if self.pair_vetoes:
+            L.append("\\ (11) restraint vetoes: forbidden rotamer pairs")
+            for n, (pi, ri, pj, rj) in enumerate(sorted(self.pair_vetoes)):
+                if pi not in t.rotamers or pj not in t.rotamers:
+                    continue
+                L.append(
+                    f" vpair{n}: +1 {self._y(pi, ri)} +1 {self._y(pj, rj)} <= 1"
+                )
 
         # -- integer cuts over already-visited sequences
         if self.visited:
@@ -739,6 +781,12 @@ class RotamerMILP:
         for (p, r, _q), vs in groups.items():
             prob += pulp.lpSum(vs) == y[(p, r)]
         self._add_pulp_user_constraints(prob, pulp, y, w)
+        for (p, r) in self.rotamer_vetoes:
+            if (p, r) in y:
+                prob += y[(p, r)] == 0
+        for (pi, ri, pj, rj) in self.pair_vetoes:
+            if (pi, ri) in y and (pj, rj) in y:
+                prob += y[(pi, ri)] + y[(pj, rj)] <= 1
         for assignment in self.visited:
             vs = [
                 y[(p, r)]
@@ -948,8 +996,11 @@ class RotamerMILP:
         t = self.t
         choices = {}
         for p in t.positions:
-            rs = range(len(t.rotamers[p]))
-            choices[p] = min(rs, key=lambda r: t.self_energy.get((p, r), 0.0))
+            allowed = [
+                r for r in range(len(t.rotamers[p]))
+                if (p, r) not in self.rotamer_vetoes
+            ] or list(range(len(t.rotamers[p])))
+            choices[p] = min(allowed, key=lambda r: t.self_energy.get((p, r), 0.0))
 
         # Repair toward feasibility, then improve.
         for _ in range(200):
@@ -1009,6 +1060,12 @@ class RotamerMILP:
     def _feasible(self, choices: dict[str, int]) -> bool:
         t = self.t
         npos = len(t.positions)
+        for p, r in choices.items():
+            if (p, r) in self.rotamer_vetoes:
+                return False
+        for (pi, ri, pj, rj) in self.pair_vetoes:
+            if choices.get(pi) == ri and choices.get(pj) == rj:
+                return False
         ids = {p: t.rotamers[p][r].aa for p, r in choices.items()}
         for con in self.constraints:
             if con.kind == "max_mutations":
@@ -1048,6 +1105,46 @@ class RotamerMILP:
         """Change one position to move toward feasibility. True if it changed."""
         t = self.t
         npos = len(t.positions)
+
+        # Vetoes first: they are hard and cheap to repair.
+        for p, r in list(choices.items()):
+            if (p, r) in self.rotamer_vetoes:
+                alts = [
+                    (t.self_energy.get((p, k), 0.0), k)
+                    for k in range(len(t.rotamers[p]))
+                    if (p, k) not in self.rotamer_vetoes
+                ]
+                if not alts:
+                    return False
+                choices[p] = min(alts)[1]
+                return True
+        for (pi, ri, pj, rj) in sorted(self.pair_vetoes):
+            if choices.get(pi) != ri or choices.get(pj) != rj:
+                continue
+            # Move one of the two positions, but only to a rotamer that is not
+            # itself vetoed *against the other position's current choice*.
+            # Picking merely the cheapest alternative lands on another forbidden
+            # pair whenever many pairs are excluded, and the repair then stalls
+            # on a problem that is in fact feasible.
+            best: tuple[float, str, int] | None = None
+            for p, other, other_r in ((pi, pj, rj), (pj, pi, ri)):
+                for k in range(len(t.rotamers[p])):
+                    if k == choices[p] or (p, k) in self.rotamer_vetoes:
+                        continue
+                    a, b = (p, k), (other, other_r)
+                    forbidden = (
+                        (a[0], a[1], b[0], b[1]) in self.pair_vetoes
+                        or (b[0], b[1], a[0], a[1]) in self.pair_vetoes
+                    )
+                    if forbidden:
+                        continue
+                    cost = t.self_energy.get((p, k), 0.0)
+                    if best is None or cost < best[0]:
+                        best = (cost, p, k)
+            if best is None:
+                return False
+            choices[best[1]] = best[2]
+            return True
         for con in self.constraints:
             if con.kind == "min_class":
                 want = con.residue_set()
