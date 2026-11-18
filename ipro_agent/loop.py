@@ -155,6 +155,21 @@ class IPROLoop:
     def prepare(self) -> None:
         """Load structures, check the design positions exist, harvest rotamers."""
         spec = self.spec
+        if spec.indels:
+            # Silently ignoring a requested insertion or deletion would be a
+            # serious silent failure: the user would get a design over the
+            # wrong sequence. Refuse clearly instead.
+            raise NotImplementedError(
+                f"this spec requests {len(spec.indels)} insertion/deletion(s), which "
+                "are not implemented here. Changing chain length needs loop closure "
+                "after the edit (Protein-InDelMaker does this with PyRosetta's "
+                "GeneralizedKIC over a 6-residue window, followed by Cartesian "
+                "FastRelax), and no loop-closure backend is available. Remove the "
+                "'indels:' block to run a fixed-length design, or use "
+                "Protein-InDelMaker (github.com/maranasgroup/Protein-InDelMaker) to "
+                "build the indel variant first and design on that structure. "
+                "See docs/DESIGN.md."
+            )
         dm = spec.design_molecule
         self._design_st = Structure.load(dm.path, dm.chains or None)
 
