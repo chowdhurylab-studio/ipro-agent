@@ -496,7 +496,7 @@ class IPROLoop:
 
     def _measure_geometry(self, design_atoms: AtomSet) -> dict[str, float]:
         """Bottleneck of the channel through the designed side chains."""
-        from .pore import pore_profile
+        from .pore import pore_profile, vdw_radii
 
         opts = self.spec.goal_options
         try:
@@ -544,11 +544,49 @@ class IPROLoop:
         if not prof.radii:
             return {}
         self._last_pore = prof
+
+        # How far the fitted axis origin sits from the nearest van der Waals
+        # surface. The axis is the normal to the plane of the design positions
+        # through their centroid, so it follows the channel only when those
+        # positions *ring* the lumen; positions along one wall put the origin
+        # inside the wall, and the profile then measures the sliver beside the
+        # wall instead. Measured on the shipped specs: the 25-position one
+        # clears 1.30 A and reads 6.24 A, while the 4-position smoke spec
+        # clears 0.30 A -- less than a water's 1.4 A -- and reads 1.53 A, which
+        # silently PASSES the published sub-4 A filter.
+        #
+        # This is reported, not enforced. A clearance threshold was tried and
+        # reverted: 1.30 A is also below a water's radius, so it rejected the
+        # sound measurement too, and no cheap statistic separates the two (see
+        # docs/DESIGN.md 7d). What the run can honestly do is state the number
+        # and say when it cannot vouch for the radius.
+        clearance = float(np.min(
+            np.sqrt(((design_atoms.coords - origin) ** 2).sum(-1))
+            - vdw_radii(list(design_atoms.names), list(design_atoms.elements))
+        ))
+        if clearance < 1.4 and "pore_clearance" not in self._once:
+            self._once.add("pore_clearance")
+            self.notes.append(
+                f"the pore radius ({prof.min_radius:.2f} A) is measured along an "
+                f"axis FITTED through the centroid of the {len(self.spec.positions)} "
+                f"design position(s), and that axis follows the channel only when "
+                f"those positions surround it. Here the axis origin clears the "
+                f"nearest van der Waals surface by {clearance:.2f} A, below the "
+                f"1.40 A a water molecule needs, which means the geometry alone "
+                f"cannot confirm the axis is in the lumen -- the radius may be a "
+                f"gap beside a wall, and any pore_diameter filter is applied to "
+                f"whichever it is. Known failure: 4 positions along one wall of "
+                f"OmpF read 1.53 A, which passes a 4 A filter, where the "
+                f"25-position set reads 6.24 A. No cheap statistic separates the "
+                f"two (docs/DESIGN.md 7d). Confirm it by giving "
+                f"goal_options.pore_axis as two atoms spanning the channel."
+            )
         return {
             "min_pore_radius": prof.min_radius,
             "min_pore_diameter": prof.min_diameter,
             "max_pore_radius": float(max(prof.radii)),
             "pore_axis_flatness": flatness,
+            "pore_axis_clearance": clearance,
         }
 
     # -- moving the backbone -------------------------------------------------

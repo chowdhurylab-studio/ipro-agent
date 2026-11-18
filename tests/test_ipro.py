@@ -3485,3 +3485,36 @@ def test_pyrosetta_unexercised_paths_are_declared_and_real():
         "PyRosetta is now installed: run these paths and move them out of "
         "UNEXERCISED (docs/DESIGN.md section 7e says how)"
     )
+
+
+def test_regression_a_pore_axis_that_misses_the_lumen_is_reported():
+    """The axis is fitted through the centroid of the design positions, so it
+    follows the channel only when they *ring* the lumen. Positions along one
+    wall put that centroid inside the wall, and the profile then measures the
+    sliver beside the wall. Measured on the shipped specs: the 25-position one
+    clears 1.30 A and reads 6.24 A, while the 4-position smoke spec clears
+    0.30 A -- less than a water's 1.4 A -- and reads 1.53 A, which silently
+    PASSES PoreDesigner's published sub-4 A filter.
+
+    The defect itself is unfixed on purpose (docs/DESIGN.md 7d: a clearance
+    threshold rejects the sound measurement too, and no cheap statistic
+    separates them). What is tested here is that the run *says so* rather than
+    reporting the radius bare, because the house rule is that a design is never
+    reported without its notes."""
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (skipped: needs the ompf example and PyMOL)")
+        return
+    from ipro_agent.loop import IPROLoop
+
+    spec = DesignSpec.load(ompf / "spec_smoke.yaml")
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run", backend=resolve("builtin"))
+    cb = loop.build_combined()
+    atoms = loop._design_atoms(
+        loop._rotamers_for(cb.tables, loop._native_choice(cb.tables)),
+        loop._assemblies[0].name,
+    )
+    geo = loop._measure_geometry(atoms)
+    assert "pore_axis_clearance" in geo, geo
+    assert geo["pore_axis_clearance"] < 1.4, geo["pore_axis_clearance"]
+    assert any("cannot confirm the axis is in the lumen" in n for n in loop.notes), loop.notes

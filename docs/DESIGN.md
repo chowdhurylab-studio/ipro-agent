@@ -722,7 +722,7 @@ independent reviews were run in parallel over everything left: `energy/*.py`,
 measurement per finding. **Thirty-one more defects were confirmed**, all in the
 same family: every one ran clean and returned a plausible wrong answer.
 
-The suite is now **135 tests** (94 before), one per fix.
+The suite is now **136 tests** (94 before), one per fix.
 
 #### The energy function (`energy/base.py`, `energy/builtin.py`)
 
@@ -797,17 +797,31 @@ published "bottleneck below 4 Å" filter — a design accepted as a sub-4 Å por
 a measurement of the wrong thing. The 25-position spec, whose ring does surround
 the lumen, clears 1.30 Å and measures 6.24 Å.
 
-A clearance threshold was implemented and then **reverted**, because re-measuring
-showed it also rejected the 25-position spec's legitimate reading (1.30 Å is
-likewise below a water's radius, yet that measurement is sound). Nor does the
-widest slice discriminate: 3.765 Å for the bad axis against 4.752 Å for the good
-one. Telling the two apart needs the measurement reworked — a connected-passage
-test, or fitting the axis through the lumen rather than through the design
-positions — which is a change to the science, not a defect fix, so it is recorded
-here for a decision rather than guessed at. **Until then, treat any pore radius
-from a spec whose design positions do not surround the channel as meaningless,
-and give `goal_options.pore_axis` explicitly.** The numbers §1h and both example
-specs quote are corrected below.
+Three cheap discriminators were tried and all three fail, which is why this is
+recorded rather than fixed:
+
+| candidate test | bad axis (4 positions) | good axis (25 positions) | separates? |
+|---|---|---|---|
+| axis-origin clearance | 0.30 Å | 1.30 Å | **no** — both below a water's 1.4 Å |
+| widest slice in the window | 3.765 Å | 4.752 Å | **no** — overlapping ranges |
+| bottleneck ÷ clearance | 2.52 | 2.41 | **no** — the ratios are the same |
+
+A clearance threshold was implemented and then **reverted** on the first of
+those: it rejected the 25-position spec's sound reading too. Telling the two
+apart needs the measurement reworked — a connected-passage test along the axis,
+or fitting the axis through the lumen rather than through the design positions —
+which is a change to the science, not a defect fix, so it is left for a decision
+rather than guessed at.
+
+What the run does instead is **report what it cannot vouch for**: the measured
+clearance is returned as `pore_axis_clearance` alongside the radius, and a note
+fires whenever it is below a water's radius, stating that the geometry alone
+cannot confirm the axis is in the lumen and naming the known failure. That note
+fires on *both* shipped specs, which is correct — the default axis fit is a
+heuristic and its quality is genuinely unverified in both. **Treat any pore
+radius from a spec whose design positions do not surround the channel as
+meaningless, and give `goal_options.pore_axis` explicitly.** The numbers §1h and
+both example specs quote are corrected below.
 
 ### 7e. The PyRosetta and Vina paths: one closed, one declared
 
