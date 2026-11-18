@@ -14,7 +14,7 @@ git clone https://github.com/chowdhurylab-studio/ipro-agent && cd ipro-agent && 
 ```
 
 `scripts/bootstrap.sh` creates the conda environment, prints what resolved,
-runs the 159-test suite, runs the shipped example end to end, and finishes by
+runs the whole test suite, runs the shipped example end to end, and finishes by
 printing the exact commands and MCP config **with that machine's own paths
 filled in**. It is safe to re-run and it deletes nothing. If conda is missing it
 stops and says to install Miniforge, because PyMOL is not on PyPI and there is
@@ -67,7 +67,8 @@ right paths; it looks like:
                                "cwd": "/path/to/ipro-agent"}}}
 ```
 
-They then get nine tools (`ipro_doctor`, `ipro_setup`, `ipro_goals`,
+They then get eleven tools (`ipro_doctor`, `ipro_setup`,
+`ipro_fetch_structure`, `ipro_inspect_structure`, `ipro_goals`,
 `ipro_validate`, `ipro_positions`, `ipro_score`, `ipro_milp`, `ipro_run`,
 `ipro_status`), three slash commands (`/ipro-redesign`, `/ipro-check-setup`,
 `/ipro-report`) and the documents as resources — `ipro://skill` serves the whole

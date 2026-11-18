@@ -3272,8 +3272,8 @@ def test_regression_doctor_probes_an_isolated_interpreter():
     (tmp / "ipro_planted_pkg" / "__init__.py").write_text("__version__ = '9.9.9'\n")
     code = (
         "import sys, json\n"
-        f"sys.path.insert(0, {str(REPO / 'scripts')!r})\n"
-        "from doctor import _module_in\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from ipro_agent.doctor import _module_in\n"
         "print(json.dumps([_module_in(sys.executable, 'ipro_planted_module')[0],"
         " _module_in(sys.executable, 'ipro_planted_pkg')[0]]))\n"
     )
@@ -3350,16 +3350,26 @@ class _CountingRelaxBackend:
         return "counting-relax (stand-in)"
 
 
-def test_regression_full_mode_actually_relaxes():
+def test_regression_full_mode_relaxes_after_the_choice_not_before():
     """``EnergyBackend.relax`` had no call site anywhere in the package, and
     neither did ``RestraintPlan.relax_fixed_positions``, which is collected for
     exactly that argument. So a run with a relaxing backend reported mode
     ``full`` -- documented as "perturb + relax + repack" -- while doing no
     relaxation at all, and because ``can_relax`` was true it also suppressed
-    the note saying the reported energies were screening energies. Measured
-    with a counting stand-in backend over 3 iterations: relax 0 calls,
-    score_structure 0 calls, mode 'full', REMARK SCORE labelled REU."""
-    from ipro_agent.loop import IPROLoop
+    the note saying the reported energies were screening energies.
+
+    The fix for that put the call in ``_perturb_once``, which the paper audit
+    then showed was the wrong place: the 2006 paper's step iv and the released
+    source both relax AFTER the rotamer choice and the docking
+    (``Backbone_Perturbation -> Optimal_Rotamers -> Docking -> Relaxation ->
+    Calculate_Energy``), because the residues just chosen "may no longer be
+    optimally interacting with the previous backbone". Relaxed before the
+    MILP, the backbone carried the OLD side chains and never adapted to the
+    mutation. This test pins the order: the atoms that get relaxed are the
+    ones about to be scored, the restraint-held positions reach the backend,
+    and ``_perturb_once`` does not relax."""
+    from ipro_agent.loop import IPROLoop, _atoms_of
+    from ipro_agent.structure import Structure
 
     tmp = Path(tempfile.mkdtemp())
     spec = _spec(loop={"perturb_backbone": True, "iterations": 1})
@@ -3367,26 +3377,63 @@ def test_regression_full_mode_actually_relaxes():
     loop = IPROLoop(spec, tmp / "run", backend=be)
     assert loop.mode == "full", loop.mode
 
-    src = tmp / "cand.pdb"
-    src.write_text(CRN.read_text())
+    atoms = _atoms_of(Structure.load(CRN), set())
     loop._restraints.relax_fixed_positions = ["A16"]
-    out = loop._relax_once(src)
-    assert be.calls == [("cand.pdb", ("A16",))], be.calls
-    assert out != src and out.exists(), out
-    assert loop._relaxed == 1 and loop._relax_failed == 0
+    out = loop._relaxed_design_atoms(atoms, "iter0001_main")
+    assert be.calls == [("iter0001_main_chosen.pdb", ("A16",))], be.calls
+    assert out is not None and len(out) == len(atoms), (len(out), len(atoms))
+    assert loop._post_relaxed == 1 and loop._post_relax_failed == 0
 
-    # A backend that cannot relax leaves the file alone and says so in its mode.
+    # The stand-in backend copies its input, so the relaxed atoms must come
+    # back identical -- i.e. the candidate really is what was written.
+    assert float(np.abs(out.coords - atoms.coords).max()) == 0.0
+    assert list(out.reskeys) == list(atoms.reskeys)
+
+    # The perturbation must NOT relax any more: one relaxation per iteration,
+    # and it happens after the choice.
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    body = src[src.index("def _perturb_once"):src.index("def _relaxed_design_atoms")]
+    code = "\n".join(
+        ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "relax(" not in code and "_relax_once" not in code, (
+        "_perturb_once must not relax; step iv is after the MILP"
+    )
+    assert src.count("self.backend.relax(") == 1, "exactly one relax call site"
+
+    # A backend that cannot relax says so in its mode and changes nothing.
     plain = IPROLoop(_spec(loop={"perturb_backbone": True}), tmp / "run2",
                      backend=resolve("builtin"))
     assert plain.mode == "backbone-mc"
-    assert plain._relax_once(src) is src
+    assert plain._relaxed_design_atoms(atoms, "x") is None
     assert any("no gradient relaxation" in n for n in plain.notes)
+
+
+def test_regression_the_relaxation_baseline_is_relaxed_too():
+    """Relaxing candidates against an unrelaxed reference would credit every
+    candidate with the relaxation's own energy drop, which is a much larger
+    defect than the one it fixes: with a stand-in backend that lowers the
+    energy by a constant, every candidate would beat the start score and be
+    accepted whatever the design did.
+
+    So ``run_loop`` relaxes the starting point through the same path, and
+    ``measure_native`` -- which is what ``ipro-agent score`` reports for a
+    structure as supplied -- does not."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert 'self._contexts_for(\n            self._rotamers_for(tables, start_choice), relax_tag="start"' in src \
+        or 'relax_tag="start"' in src, "the start score must be relaxed like the candidates"
+    nat = src[src.index("def measure_native"):src.index("def run_loop")]
+    assert "self._relax_native" in nat, (
+        "measure_native must not relax unless a run turned it on"
+    )
+    assert "self._relax_native = False" in src and "self._relax_native = True" in src
 
 
 def test_regression_a_failed_relaxation_is_reported_not_hidden():
     """If relaxation is claimed and cannot be done, the run must say so rather
     than report mode 'full'."""
-    from ipro_agent.loop import IPROLoop
+    from ipro_agent.loop import IPROLoop, _atoms_of
+    from ipro_agent.structure import Structure
 
     class _Broken(_CountingRelaxBackend):
         def relax(self, pdb_in, pdb_out, fixed=()):
@@ -3395,11 +3442,10 @@ def test_regression_a_failed_relaxation_is_reported_not_hidden():
     tmp = Path(tempfile.mkdtemp())
     loop = IPROLoop(_spec(loop={"perturb_backbone": True}), tmp / "run",
                     backend=_Broken())
-    src = tmp / "c.pdb"
-    src.write_text(CRN.read_text())
-    assert loop._relax_once(src) is src
-    assert loop._relax_failed == 1
-    assert any("relaxation failed" in n for n in loop.notes), loop.notes
+    atoms = _atoms_of(Structure.load(CRN), set())
+    assert loop._relaxed_design_atoms(atoms, "t") is None
+    assert loop._post_relax_failed == 1
+    assert any("step iv) failed" in n for n in loop.notes), loop.notes
 
 
 def test_regression_the_screening_caveat_follows_the_pair_table():
@@ -3638,33 +3684,51 @@ def test_regression_a_pore_axis_that_misses_the_lumen_is_reported():
     """The axis is fitted through the centroid of the design positions, so it
     follows the channel only when they *ring* the lumen. Positions along one
     wall put that centroid inside the wall, and the profile then measures the
-    sliver beside the wall. Measured on the shipped specs: the 25-position one
-    clears 1.30 A and reads 6.24 A, while the 4-position smoke spec clears
-    0.30 A -- less than a water's 1.4 A -- and reads 1.53 A, which silently
-    PASSES PoreDesigner's published sub-4 A filter.
+    sliver beside the wall -- 1.53 A for the shipped 4-position smoke spec,
+    which silently PASSES PoreDesigner's published sub-4 A filter.
 
-    The defect itself is unfixed on purpose (docs/DESIGN.md 7d: a clearance
-    threshold rejects the sound measurement too, and no cheap statistic
-    separates them). What is tested here is that the run *says so* rather than
-    reporting the radius bare, because the house rule is that a design is never
-    reported without its notes."""
+    This was documented as an UNFIXED defect, on the grounds that a clearance
+    threshold rejected the sound 25-position spec too (it measured 1.30 A).
+    That measurement was the mistake, not the threshold: clearance was being
+    computed from the *candidate's* atoms, and a narrowing design is supposed
+    to fill the lumen, so the number conflates "the axis is buried in a wall"
+    with "the design worked". Measured on the INPUT structure with its native
+    side chains, the two specs separate by an order of magnitude:
+
+        spec_full.yaml  (25 positions, ringing)   2.80 A   bottleneck 8.07 A
+        spec_smoke.yaml ( 4 positions, one wall)  0.30 A   bottleneck 1.53 A
+
+    so a water's 1.40 A is a usable test after all. The run now states flatly
+    that the radius is not a pore radius, instead of hedging."""
     ompf = REPO / "examples" / "ompf_pore"
     if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
         print("    (skipped: needs the ompf example and PyMOL)")
         return
     from ipro_agent.loop import IPROLoop
 
-    spec = DesignSpec.load(ompf / "spec_smoke.yaml")
-    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run", backend=resolve("builtin"))
-    cb = loop.build_combined()
-    atoms = loop._design_atoms(
-        loop._rotamers_for(cb.tables, loop._native_choice(cb.tables)),
-        loop._assemblies[0].name,
-    )
-    geo = loop._measure_geometry(atoms)
-    assert "pore_axis_clearance" in geo, geo
-    assert geo["pore_axis_clearance"] < 1.4, geo["pore_axis_clearance"]
-    assert any("cannot confirm the axis is in the lumen" in n for n in loop.notes), loop.notes
+    def measure(spec_file):
+        spec = DesignSpec.load(ompf / spec_file)
+        loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run",
+                        backend=resolve("builtin"))
+        cb = loop.build_combined()
+        atoms = loop._design_atoms(
+            loop._rotamers_for(cb.tables, loop._native_choice(cb.tables)),
+            loop._assemblies[0].name,
+        )
+        return loop._measure_geometry(atoms), loop.notes
+
+    geo, notes = measure("spec_smoke.yaml")
+    assert "pore_axis_clearance_input" in geo, geo
+    assert geo["pore_axis_clearance_input"] < 1.4, geo
+    assert abs(geo["pore_axis_clearance_input"] - 0.30) < 0.15, geo
+    assert any("NOT A PORE RADIUS" in n for n in notes), notes
+
+    # And the sound spec is NOT flagged -- which is what made the threshold
+    # look useless when it was measured on candidate atoms.
+    geo_full, notes_full = measure("spec_full.yaml")
+    assert geo_full["pore_axis_clearance_input"] > 1.4, geo_full
+    assert abs(geo_full["pore_axis_clearance_input"] - 2.80) < 0.4, geo_full
+    assert not any("NOT A PORE RADIUS" in n for n in notes_full), notes_full
 
 
 def test_regression_doctor_only_claims_an_in_process_energy_backend():
@@ -4603,3 +4667,309 @@ def test_inspect_handles_paths_with_spaces_and_non_ascii():
     )
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout)["positions"][0]["native"] == "VAL"
+
+
+def test_regression_the_docs_name_every_mcp_tool_and_no_stale_counts():
+    """A reader-facing list of the tools went stale the moment two tools were
+    added, and silently: README's table listed 8 of 11 and HANDOFF.md said
+    "nine tools", both omitting `ipro_fetch_structure` and
+    `ipro_inspect_structure`.
+
+    That omission is worse than untidy. An MCP client has no shell, so for a
+    remote agent those two tools are the *only* way to obtain a structure and
+    the only way to learn that "residue 18" is VAL -- the step whose absence
+    already shipped a defect once (DESIGN.md section 7b, a position resolved
+    against the wrong chain). A tool nobody is told about does not exist.
+
+    Hardcoded suite sizes rot the same way: "159-test suite" in HANDOFF.md and
+    "141 tests" in INSTALL.md were both wrong by the time they were read. The
+    historical counts inside DESIGN.md sections 7..7g are *records* of what the
+    suite was at each round and are deliberately left alone."""
+    import ipro_agent.mcp_server as srv
+
+    tools = [t["name"] for t in srv.TOOLS]
+    reader_facing = {
+        "README.md": (REPO / "README.md").read_text(),
+        "docs/HANDOFF.md": (REPO / "docs" / "HANDOFF.md").read_text(),
+    }
+    for name, text in reader_facing.items():
+        missing = [t for t in tools if t not in text]
+        assert not missing, f"{name} never mentions {missing}"
+
+    # And no reader-facing doc may hardcode a suite size, since every fix in
+    # this repo adds a test. DESIGN.md is the historical record, excluded.
+    import re
+
+    for doc in sorted((REPO / "docs").glob("*.md")) + [REPO / "README.md"]:
+        if doc.name == "DESIGN.md":
+            continue
+        for m in re.finditer(r"(\d{2,4})[- ]tests?\b", doc.read_text()):
+            raise AssertionError(
+                f"{doc.name} hardcodes {m.group(0)!r}; it will be wrong after "
+                f"the next fix -- say 'the whole suite' instead")
+
+
+def test_regression_mcp_fetch_and_inspect_work_over_the_protocol():
+    """Both audits now running were launched before `ipro_fetch_structure` and
+    `ipro_inspect_structure` existed, so neither covers them. Everything else
+    in this file drives them through the CLI; this drives them the way a remote
+    agent does -- JSON-RPC over stdin -- because the MCP layer has its own
+    argument plumbing and that is where a mismatch would hide.
+
+    Offline: inspect only, on the shipped structure. The fetch tool is checked
+    for shape (it must be declared, take a pdb_id, and be the only tool that
+    touches the network) without spending a download."""
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "ipro_inspect_structure",
+                    "arguments": {"structure": str(ompf),
+                                  "positions": ["18", "20", "38", "40"]}}},
+    ]
+    payload = "\n".join(json.dumps(r) for r in requests) + "\n"
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.mcp_server"],
+                       input=payload, capture_output=True, text=True,
+                       cwd=REPO, timeout=600)
+    assert p.returncode == 0, p.stderr[-500:]
+
+    replies = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            msg = json.loads(line)
+            replies[msg.get("id")] = msg
+    assert set(replies) == {1, 2}, sorted(replies)
+
+    body = replies[2]["result"]["content"][0]["text"]
+    assert replies[2]["result"].get("isError") is not True, body
+    got = json.loads(body)
+    resolved = {str(pos["asked"]): pos["native"]
+                for pos in got["positions"]}
+    assert resolved == {"18": "VAL", "20": "LEU", "38": "MET", "40": "TYR"}, resolved
+
+    import ipro_agent.mcp_server as srv
+    fetch = [t for t in srv.TOOLS if t["name"] == "ipro_fetch_structure"]
+    assert fetch, "ipro_fetch_structure is not declared"
+    assert "pdb_id" in fetch[0]["inputSchema"]["properties"]
+    assert "pdb_id" in (fetch[0]["inputSchema"].get("required") or [])
+    # One networked tool, and it says so in its own description. Match the
+    # asserting form, not the bare word: ipro_inspect_structure's description
+    # says "It needs no PyMOL and no network", which is the opposite claim.
+    assert "ONLY tool here that uses the network" in fetch[0]["description"]
+    claims = [t["name"] for t in srv.TOOLS
+              if "uses the network" in t["description"]
+              or "download a structure" in t["description"].lower()]
+    assert claims == ["ipro_fetch_structure"], claims
+
+
+def test_regression_the_perturbed_region_is_built_around_a_design_position():
+    """IPRO's step 1 "begins by randomly selecting a DP", then draws the
+    region size (1-5) and the DP's place inside it; the released source does
+    the same, and only design positions inside the perturbed region may
+    mutate (2006 paper, Fig. 5). Here the region was drawn anywhere in the
+    chain and the redesign window was drawn independently of it, so the
+    perturbation and the design were statistically unrelated.
+
+    Measured on the shipped 25-position OmpF spec over 20,000 draws: an
+    unanchored region touches a design position in 12.4% of draws, where
+    IPRO's probability is 1 by construction. 88% of moves therefore changed
+    the energy in a region the MILP had no variables for, and the Metropolis
+    test then ruled on that change. docs/MILP.md called this "comparable
+    locality"; 12.4% is not comparable locality."""
+    import random
+
+    from ipro_agent.perturb import choose_segment
+    from ipro_agent.structure import Structure
+
+    pdb = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not pdb.exists():
+        print("    (skipped: no example structure)")
+        return
+    st = Structure.load(pdb)
+    dps = [18, 20, 38, 40, 42, 62, 64, 82, 83, 109, 110, 113, 114, 115,
+           117, 118, 119, 120, 121, 123, 124, 125, 130, 131, 132]
+    want = set(dps)
+
+    rng = random.Random(0)
+    n = 4000
+    free = sum(
+        bool({r.get_id()[1] for r in choose_segment(st, "A", (1, 5), rng=rng)} & want)
+        for _ in range(n)
+    ) / n
+    assert free < 0.25, f"unanchored overlap {free:.4f}: this is the old behaviour"
+
+    anchored = 0
+    sizes = set()
+    for _ in range(n):
+        seg = choose_segment(st, "A", (1, 5), rng=rng, anchor=rng.choice(dps))
+        nums = {r.get_id()[1] for r in seg}
+        sizes.add(len(seg))
+        anchored += bool(nums & want)
+    assert anchored == n, f"anchored overlap {anchored}/{n} must be all of them"
+    # The region size is still the paper's one-to-five.
+    assert sizes <= {1, 2, 3, 4, 5} and len(sizes) >= 4, sorted(sizes)
+
+    # And the window really is read off the region, not drawn beside it.
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    body = src[src.index("def _choose_window"):src.index("def _choose_window") + 2600]
+    assert "pert.residues" in body or 'getattr(pert, "residues"' in body, (
+        "the redesign window must come from the perturbed region"
+    )
+    assert "self._choose_window(ordered, pert)" in src
+
+
+def test_regression_terminal_torsions_are_not_perturbed():
+    """phi needs the preceding residue's C and psi the next residue's N, so at
+    a chain's own termini one of them is undefined -- and rotating about an
+    undefined torsion is not a conformational change at all, it is a
+    rigid-body rotation of everything downstream.
+
+    Measured on 2OMF chain A with a forced +5 deg phi at residue 1: atoms move
+    up to 3.058 A while the largest change in any internal interatomic
+    distance is 2.1e-14 A, i.e. machine zero. The same perturbation at
+    interior residue 151 changes internal distances by up to 3.483 A. The
+    energy cannot see the first case, but the docking and the fitted pore axis
+    can. The released source skips both terminal torsions."""
+    import random
+
+    import numpy as _np
+
+    from ipro_agent.perturb import perturb_backbone
+    from ipro_agent.structure import Structure
+
+    pdb = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not pdb.exists():
+        print("    (skipped: no example structure)")
+        return
+
+    def shift_and_strain(number):
+        st = Structure.load(pdb)
+        residues = list(st.residues("A"))
+        target = [r for r in residues if r.get_id()[1] == number]
+        before = _np.array([a.coord for a in st.all_atoms()])
+        rec = perturb_backbone(st, "A", sigma_deg=5.0, cap_deg=5.0,
+                               rng=random.Random(1), segment=target)
+        after = _np.array([a.coord for a in st.all_atoms()])
+        moved = float(_np.abs(after - before).max())
+        # Internal strain: how much any pairwise distance changed, sampled.
+        idx = list(range(0, len(before), 17))
+        d0 = _np.linalg.norm(before[idx][:, None] - before[idx][None], axis=-1)
+        d1 = _np.linalg.norm(after[idx][:, None] - after[idx][None], axis=-1)
+        return rec, moved, float(_np.abs(d1 - d0).max())
+
+    # The claim itself, measured directly: rotating about residue 1's N->CA
+    # axis moves atoms without changing the conformation at all. (psi at
+    # residue 1 IS defined -- it needs the next residue's N -- so only phi is
+    # the undefined one, and perturb_backbone still applies psi there.)
+    from ipro_agent.perturb import _rotate_about
+
+    st0 = Structure.load(pdb)
+    res1 = next(r for r in st0.residues("A") if r.get_id()[1] == 1)
+    names1 = {a.get_name().strip().upper(): a for a in res1}
+    origin = _np.array(names1["N"].coord, dtype=float)
+    axis = _np.array(names1["CA"].coord, dtype=float) - origin
+    allc = _np.array([a.coord for a in st0.all_atoms()], dtype=float)
+    rotated = _rotate_about(allc, origin, axis, 5.0)
+    idx = list(range(0, len(allc), 17))
+    d0 = _np.linalg.norm(allc[idx][:, None] - allc[idx][None], axis=-1)
+    d1 = _np.linalg.norm(rotated[idx][:, None] - rotated[idx][None], axis=-1)
+    assert float(_np.abs(rotated - allc).max()) > 1.0, "atoms should move"
+    assert float(_np.abs(d1 - d0).max()) < 1e-6, (
+        "a phi rotation at residue 1 is a rigid-body move: no internal "
+        "distance may change"
+    )
+
+    rec1, moved1, strain1 = shift_and_strain(1)
+    assert rec1.phi_deg == [0.0], (
+        f"phi at the N-terminal residue is undefined and must not be "
+        f"perturbed; got {rec1.phi_deg}"
+    )
+
+    recmid, movedmid, strainmid = shift_and_strain(151)
+    assert recmid.phi_deg and recmid.phi_deg[0] != 0.0, recmid.phi_deg
+    assert strainmid > 0.5, (
+        f"an interior perturbation must change the conformation; "
+        f"strain {strainmid}"
+    )
+
+    # psi at the last residue is the mirror image of the same bug.
+    last = max(r.get_id()[1] for r in Structure.load(pdb).residues("A"))
+    reclast, _m, _s = shift_and_strain(last)
+    assert reclast.psi_deg == [0.0], reclast.psi_deg
+
+
+def test_regression_a_pip_installed_server_can_doctor_setup_and_run():
+    """The install README recommends FIRST could not run a design at all.
+
+    `_doctor()` shelled out to ``REPO_ROOT / "scripts" / "doctor.py"``, and
+    pyproject ships only the three `ipro_agent*` packages -- so in a
+    pip-installed copy REPO_ROOT is site-packages, where there is no
+    `scripts/`. Measured in a throwaway venv: ipro_doctor, ipro_setup and
+    ipro_run all returned isError with "can't open file
+    .../site-packages/scripts/doctor.py", while ipro_goals, ipro_validate,
+    ipro_positions, ipro_score, ipro_milp and ipro_status all worked normally
+    -- so the server looked healthy right up to the point of designing
+    anything. ipro_doctor is the first tool the server's own `instructions`
+    tell a client to call.
+
+    `ipro_setup` had the same shape of bug one level down: it printed
+    ``mamba env create -f <site-packages>/environment.yml`` for a file that is
+    not in the wheel either.
+
+    The doctor now lives in the package (`ipro_agent/doctor.py`, with
+    `scripts/doctor.py` kept as a shim for the documented command), and the
+    missing environment.yml falls back to fetching the real one."""
+    import ast
+
+    src = (REPO / "ipro_agent" / "mcp_server.py").read_text()
+    tree = ast.parse(src)
+
+    # Nothing the server executes may live outside the package.
+    assert '"scripts"' not in src and "'scripts'" not in src, (
+        "the server must not execute anything from scripts/: a wheel has none"
+    )
+    assert '"-m", "ipro_agent.doctor"' in src
+
+    # The doctor runs as a module, from any interpreter.
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.doctor", "--json"],
+                       capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert p.returncode in (0, 1), p.stderr[-400:]
+    rep = json.loads(p.stdout)
+    assert "can_run" in rep and "checks" in rep, sorted(rep)
+
+    # And the shim still answers the command that INSTALL.md documents.
+    shim = subprocess.run([sys.executable, str(REPO / "scripts" / "doctor.py"), "--json"],
+                          capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert shim.returncode in (0, 1), shim.stderr[-300:]
+    assert json.loads(shim.stdout)["checks"].keys() == rep["checks"].keys()
+
+    # environment.yml: present from a clone, and when absent the command says
+    # how to get the real one rather than naming a path that does not exist.
+    from ipro_agent import mcp_server as m
+
+    assert m._env_file() is not None, "a clone has environment.yml"
+    real = m._env_file()
+    g = m.tool_setup.__globals__
+    keep_roots, keep_doctor = g["_doc_roots"], g["_doctor"]
+    try:
+        # An installed copy: no sibling files, and PyMOL not resolved, so the
+        # install branch is the one that runs.
+        g["_doc_roots"] = lambda: [Path(tempfile.mkdtemp())]
+        g["_doctor"] = lambda: {
+            "can_run": True, "can_design": False, "missing_required": [],
+            "resolved": {}, "degraded": ["pymol"],
+        }
+        plan = m.tool_setup({})
+        assert plan["action"] == "install", plan
+        where, cmd = plan.get("environment_file", ""), plan.get("command", "")
+        assert m.RAW_BASE in where and m.RAW_BASE in cmd, plan
+        assert "env create" in cmd and "site-packages" not in cmd, cmd
+    finally:
+        g["_doc_roots"], g["_doctor"] = keep_roots, keep_doctor
+    assert m._env_file() == real

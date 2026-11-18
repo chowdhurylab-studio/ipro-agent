@@ -228,3 +228,50 @@ def write_complex(
     out.write_text("\n".join(lines) + "\n")
     n_atoms = sum(1 for line in lines if line.startswith(("ATOM", "HETATM")))
     return WrittenComplex(path=out, atoms=n_atoms, chain_map=chain_map, notes=notes)
+
+
+def write_atomset_pdb(atoms, path) -> int:
+    """Write an :class:`~ipro_agent.energy.base.AtomSet` as a PDB.
+
+    Needed because the structure that gets relaxed after the MILP is a
+    *candidate*: the design template plus the chosen rotamers, which exists
+    only as an AtomSet. Rebuilding it through PyMOL instead would put the
+    rotamer-harvesting dependency in the scoring path and, worse, would let
+    the written coordinates differ from the ones that were scored.
+
+    Residue keys are ``(chain, number, insertion_code)`` (rotamer atoms carry
+    the key of the position they belong to), so the records come out grouped by
+    residue with the right chain and numbering. Returns the number of atoms
+    written.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    lines: list[str] = []
+    serial = 0
+    for i in range(len(atoms)):
+        key = atoms.reskeys[i]
+        chain, number, icode = "A", 1, " "
+        if isinstance(key, tuple) and len(key) >= 2 and isinstance(key[1], int):
+            chain = str(key[0])[:1] or "A"
+            number = int(key[1])
+            icode = (str(key[2])[:1] if len(key) > 2 and key[2] else " ")
+        serial += 1
+        name = atoms.names[i][:4]
+        # Atom names are columns 13-16, and the convention is that a
+        # one-letter element starts in column 14. A left-justified "CA" reads
+        # as calcium to most parsers, which is the element-typing bug this
+        # repo already fixed once on the reading side.
+        if len(name) < 4 and len(atoms.elements[i].strip()) < 2:
+            name = f" {name:<3}"
+        else:
+            name = f"{name:<4}"
+        x, y, z = atoms.coords[i]
+        lines.append(
+            f"ATOM  {serial:5d} {name}{atoms.resnames[i][:3]:>4}{chain:>2}"
+            f"{number:4d}{icode}   {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
+            f"          {atoms.elements[i].strip()[:2]:>2}"
+        )
+    lines.append("END")
+    path.write_text("\n".join(lines) + "\n")
+    return serial

@@ -121,6 +121,9 @@ resolve and no design can run.
 | Tool | What it does |
 |---|---|
 | `ipro_doctor` | what resolved, and whether a design is possible at all |
+| `ipro_setup` | create the environment, when the agent has a shell and the user says so |
+| `ipro_fetch_structure` | download a PDB entry by id, optionally one chain — the only networked tool |
+| `ipro_inspect_structure` | chains, residue span, sequence, and **what residue a position number actually is** |
 | `ipro_goals` | the five objectives and the paper each comes from |
 | `ipro_validate` | check a spec before spending CPU |
 | `ipro_positions` | propose design positions from the structure |
@@ -129,12 +132,19 @@ resolve and no design can run.
 | `ipro_run` | launch a run **detached**, returns a run id |
 | `ipro_status` | poll it; carries the mode and the notes |
 
+`ipro_fetch_structure` and `ipro_inspect_structure` are there because a remote
+agent has no shell: without them "redesign OmpF, you may change residues 18,
+20, 38 and 40" cannot even be started, and a position number that is never
+resolved against the structure silently designs a different residue than the
+user named. Resolve the positions and say what they are **before** writing a
+spec — `docs/EXAMPLE_PROMPTS.md` prompt 1 is that path end to end.
+
 A spec can be a file path **or** inline YAML, since an agent usually has it in
 context rather than on disk. `ipro_run` refuses to launch when PyMOL has not
 resolved, rather than starting a job that dies at the first rotamer harvest.
 
 **It also serves the documents, so a remote agent is not worse informed than
-one that cloned the repo.** Eight tool descriptions cannot carry the operating
+one that cloned the repo.** Eleven tool descriptions cannot carry the operating
 manual, so the manual is a resource instead:
 
 | Resource | |

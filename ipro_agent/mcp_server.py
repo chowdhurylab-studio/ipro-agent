@@ -188,7 +188,12 @@ def _cli(args: list[str], timeout: float = DEFAULT_TIMEOUT) -> dict:
 
 def _doctor() -> dict:
     p = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "doctor.py"), "--json"],
+        # -m, not a path: a pip-installed copy has no scripts/ directory, and
+        # ipro_doctor / ipro_setup / ipro_run all go through here. With the
+        # path form all three failed in an installed copy with "can't open
+        # file .../site-packages/scripts/doctor.py" while the other eight tools
+        # worked, so the server looked healthy until a design was wanted.
+        [sys.executable, "-m", "ipro_agent.doctor", "--json"],
         capture_output=True, text=True, timeout=600, cwd=str(REPO_ROOT),
     )
     try:
@@ -402,15 +407,24 @@ def tool_setup(args: dict) -> dict:
     rep = _doctor()
     missing_required = list(rep.get("missing_required") or [])
     needs_pymol = not rep.get("can_design")
-    env_file = REPO_ROOT / "environment.yml"
 
     manager = next(
         (m for m in ("mamba", "conda", "micromamba") if _which(m)), None
-    )
-    command = (
-        f"{manager} env create -f {env_file}" if manager else
-        f"conda env create -f {env_file}"
-    )
+    ) or "conda"
+    # A pip-installed copy has no environment.yml -- it is not package data --
+    # so the printed command named a file that does not exist. Fetch it first
+    # in that case, the same way an absent document falls back to raw GitHub.
+    env_file = _env_file()
+    if env_file is not None:
+        command = f"{manager} env create -f {env_file}"
+        env_where = str(env_file)
+    else:
+        tmp = "/tmp/ipro-agent-environment.yml"
+        command = (
+            f"curl -fsSL {RAW_BASE}environment.yml -o {tmp} && "
+            f"{manager} env create -f {tmp}"
+        )
+        env_where = f"{RAW_BASE}environment.yml (not on disk in this install)"
 
     if not missing_required and not needs_pymol:
         return {
@@ -435,7 +449,7 @@ def tool_setup(args: dict) -> dict:
         "pymol_missing": needs_pymol,
         "conda_manager_found": manager,
         "command": command,
-        "environment_file": str(env_file),
+        "environment_file": env_where,
         "creates_environment": "ipro-agent",
         "approximate_download": "~500 MB (PyMOL dominates it)",
         "why_conda": (
@@ -849,6 +863,20 @@ _BY_URI = {r["uri"]: r for r in RESOURCES}
 #: silently removed the operating manual that the server's own instructions tell
 #: the client to read. The client's working directory is tried as well, so a
 #: pip-installed server whose MCP config sets `cwd` to a checkout still works.
+def _env_file() -> "Path | None":
+    """``environment.yml``, if this copy has one on disk.
+
+    A clone has it; a wheel does not (it is not package data, and adding a
+    second copy inside the package would be a file that can drift from the
+    real one). Callers must handle None -- see tool_setup.
+    """
+    for root in _doc_roots():
+        cand = root / "environment.yml"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _doc_roots() -> list[Path]:
     roots = [REPO_ROOT]
     try:

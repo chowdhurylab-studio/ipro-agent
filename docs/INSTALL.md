@@ -145,7 +145,7 @@ shadow PyMOL's. Timeout is 3600 s for the whole harvest.
 > run the suite with that interpreter to exercise them —
 > `PATH="$PATH:/opt/miniconda3/envs/ipro_vina/bin" /opt/miniconda3/envs/ipro_rosetta/bin/python scripts/selftest.py`
 > — and with the plain `python3` to check the fallbacks still work. Both are
-> 141 tests. What remains unexercised is listed in
+> the whole suite. What remains unexercised is listed in
 > `ipro_agent/energy/pyrosetta_backend.UNEXERCISED`.
 
 **Licence first.** PyRosetta is distributed under the *PyRosetta Software

@@ -115,12 +115,24 @@ def choose_segment(
     length_range: tuple[int, int] = (1, 5),
     rng: random.Random | None = None,
     avoid_proline: bool = True,
+    anchor: int | None = None,
 ) -> list:
     """A run of consecutive residues to perturb.
 
     Proline is skipped by default: its phi is locked by the pyrrolidine ring, so
     perturbing it is geometrically meaningless. The 2006 paper says explicitly
     that the chosen segment is proline-free.
+
+    ``anchor`` is a residue number the region must contain, and passing one is
+    what makes the move IPRO's. The Suite paper's step 1 "begins by randomly
+    selecting a DP", then draws the region size and the DP's place inside it;
+    the released source does the same (a uniform design-position choice, then
+    ``randint(0, 4)`` split into residues before and after). Without an anchor
+    the region lands anywhere in the chain, which decouples the perturbation
+    from the redesign: measured on the shipped 25-position OmpF spec, an
+    unanchored region touches a design position in 12.4% of draws, where IPRO's
+    probability is 1 by construction. The energy then moves in a region the
+    MILP has no variables for, and the Metropolis test rules on that.
     """
     rng = rng or random.Random(0)
     residues = list(structure.residues(chain))
@@ -128,6 +140,26 @@ def choose_segment(
         return []
     lo, hi = length_range
     want = rng.randint(max(1, lo), max(1, hi))
+
+    if anchor is not None:
+        run = _run_containing(residues, anchor, avoid_proline)
+        if run:
+            at = next(i for i, r in enumerate(run) if int(r.id[1]) == anchor)
+            # Size and placement as the source draws them: the extra residues
+            # are split before and after the design position.
+            extra = min(want - 1, len(run) - 1)
+            before = rng.randint(0, extra)
+            after = extra - before
+            start = at - before
+            if start < 0:
+                after += -start
+                start = 0
+            end = min(len(run), start + before + after + 1)
+            start = max(0, end - (extra + 1))
+            return run[start:end]
+        # The anchor is a proline or sits alone between chain breaks; fall
+        # through to an unanchored region rather than refusing to move, and say
+        # so through the Perturbation record.
 
     # Consecutive in residue numbering, not merely adjacent in the list: a gap
     # in numbering is a chain break and rotating across it is not a local move.
@@ -153,6 +185,29 @@ def choose_segment(
     return rng.choice(runs)
 
 
+def _run_containing(residues: list, number: int, avoid_proline: bool) -> list:
+    """The maximal numbering-contiguous, proline-free run holding ``number``."""
+    by_num = {int(r.id[1]): r for r in residues}
+    if number not in by_num:
+        return []
+    if avoid_proline and by_num[number].get_resname().strip() == "PRO":
+        return []
+    run = [by_num[number]]
+    n = number - 1
+    while n in by_num and not (
+        avoid_proline and by_num[n].get_resname().strip() == "PRO"
+    ):
+        run.insert(0, by_num[n])
+        n -= 1
+    n = number + 1
+    while n in by_num and not (
+        avoid_proline and by_num[n].get_resname().strip() == "PRO"
+    ):
+        run.append(by_num[n])
+        n += 1
+    return run
+
+
 def perturb_backbone(
     structure,
     chain: str,
@@ -162,6 +217,7 @@ def perturb_backbone(
     length_range: tuple[int, int] = (1, 5),
     rng: random.Random | None = None,
     segment: list | None = None,
+    anchor: int | None = None,
 ) -> Perturbation:
     """Perturb phi/psi of a short segment **in place**.
 
@@ -170,7 +226,7 @@ def perturb_backbone(
     """
     rng = rng or random.Random(0)
     seg = segment if segment is not None else choose_segment(
-        structure, chain, length_range, rng
+        structure, chain, length_range, rng, anchor=anchor
     )
     if not seg:
         return Perturbation(chain=chain)
@@ -189,8 +245,20 @@ def perturb_backbone(
         atoms = {a.get_name().strip().upper(): a for a in res}
         later = [a for r in ordered[i + 1:] for a in r]
 
+        # phi needs the preceding residue's C and psi the next residue's N, so
+        # at the chain's own termini one of them is undefined. Rotating about
+        # an undefined torsion is not a conformational change at all: measured
+        # on 2OMF chain A, a forced +5 deg "phi" at residue 1 moves atoms up to
+        # 3.058 A while changing every internal interatomic distance by at most
+        # 2.1e-14 A -- a rigid-body rotation of the whole molecule, which the
+        # energy cannot see but the docking and the pore axis can. At interior
+        # residue 151 the same perturbation changes internal distances by up to
+        # 3.483 A, which is the intended move. The source skips both terminals.
+        first_res = i == 0
+        last_res = i == len(ordered) - 1
+
         # -- phi: axis N -> CA, moves the rest of this residue and all later ones
-        if "N" in atoms and "CA" in atoms:
+        if "N" in atoms and "CA" in atoms and not first_res:
             angle = truncated_gauss(sigma_deg, cap_deg, rng)
             out.phi_deg.append(angle)
             origin = np.array(atoms["N"].coord, dtype=float)
@@ -203,7 +271,7 @@ def perturb_backbone(
             out.phi_deg.append(0.0)
 
         # -- psi: axis CA -> C, moves O and all later residues
-        if "CA" in atoms and "C" in atoms:
+        if "CA" in atoms and "C" in atoms and not last_res:
             angle = truncated_gauss(sigma_deg, cap_deg, rng)
             out.psi_deg.append(angle)
             origin = np.array(atoms["CA"].coord, dtype=float)

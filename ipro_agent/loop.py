@@ -2,14 +2,18 @@
 
 Order of operations per iteration, following IPRO's own implementation:
 
-1. choose which design positions to re-decide this iteration (1-3 contiguous);
-2. perturb the backbone of a short segment (1-5 residues, phi/psi offsets from
-   N(0, 1.5 deg) truncated to +/-5 deg), then relieve the strain by restrained
-   minimization;
-3. solve the rotamer-selection MILP for the chosen positions and their
-   neighbourhood (:mod:`ipro_agent.milp`);
+1. perturb the backbone of a short segment (1-5 residues, phi/psi offsets from
+   N(0, 1.5 deg) truncated to +/-5 deg) built AROUND a randomly chosen design
+   position, as the Suite's step 1 does;
+2. the design positions inside that perturbed region are the ones re-decided
+   this iteration -- "only DPs within the perturbed region are permitted to
+   mutate"; every other position is pinned to its current identity;
+3. solve the rotamer-selection MILP over those positions
+   (:mod:`ipro_agent.milp`);
 4. every third iteration, rigid-body redock the target molecules;
-5. relax the whole complex and compute its energy;
+5. relax the chosen design and compute its energy from the relaxed
+   coordinates (2006 paper, step iv: the residues just chosen "may no longer
+   be optimally interacting with the previous backbone");
 6. accept or reject by the Metropolis test, and add an integer cut so the
    sequence just evaluated is never revisited.
 
@@ -52,6 +56,7 @@ from .assemblies import CombinedTables, combine, split_vpos, vpos
 from .docking import Pose, _pose_between, moved_atomset
 from .docking import redock as mc_redock
 from .restraints import RestraintError, RestraintPlan, plan_restraints
+from .output import write_atomset_pdb
 from .rotamers import build_template, harvest
 from .state import IterationRecord, RunDir, Status
 from .structure import Structure, is_hydrogen
@@ -212,6 +217,12 @@ class IPROLoop:
         #: indel-edited copy. PyMOL harvests from a path, so this is the single
         #: source of truth for both harvesting and writing structures.
         self._design_pdb = None
+        self._input_pdb = None
+        self._axis_clear_cache = None
+        self._post_relaxed = 0
+        self._post_relax_failed = 0
+        #: Set while a run is in progress; see measure_native.
+        self._relax_native = False
         self._partners: dict[str, Structure] = {}
         self._rotamer_cache: dict[str, list[Rotamer]] | None = None
         self._native: dict[str, str] = {}
@@ -220,8 +231,6 @@ class IPROLoop:
         self._restraints: RestraintPlan = RestraintPlan()
         #: How many iterations were relaxed, and how many tried and failed, so
         #: the reported mode can be checked against what actually happened.
-        self._relaxed = 0
-        self._relax_failed = 0
         #: Native identity keyed by *virtual* position, built once the
         #: assemblies are combined. With one assembly it equals _native.
         self._native_v: dict[str, str] = {}
@@ -303,6 +312,11 @@ class IPROLoop:
                 )
             self.run.log(f"indels: {result.describe()}")
 
+        # The starting structure, kept apart from _design_st because the loop
+        # replaces that one with each perturbed candidate. _axis_clearance
+        # needs the native side chains (see its docstring).
+        self._input_pdb = self._design_pdb
+
         for m in spec.targets + spec.anti_targets:
             self._partners[m.name] = Structure.load(m.path, m.chains or None)
 
@@ -376,7 +390,7 @@ class IPROLoop:
     # -- scoring -----------------------------------------------------------
 
     def _contexts_for(
-        self, chosen: dict[str, Rotamer]
+        self, chosen: dict[str, Rotamer], relax_tag: str | None = None
     ) -> tuple[ScoreContext, dict[str, ScoreContext]]:
         """Measure a candidate in every assembly.
 
@@ -399,6 +413,14 @@ class IPROLoop:
                 if (split_vpos(v)[0] or a.name) == a.name
             ]
             design_all = design_fixed.extend(AtomSet.concat([r.atoms for r in rots]))
+            # Step iv: relax what was just chosen, then measure THAT. Falls
+            # back to the unrelaxed candidate, with a note, when it cannot.
+            if relax_tag is not None:
+                relaxed = self._relaxed_design_atoms(
+                    design_all, f"{relax_tag}_{a.name}"
+                )
+                if relaxed is not None:
+                    design_all = relaxed
             ctx = ScoreContext()
             partners = self.spec.assembly_molecules(a)
             for m in partners:
@@ -433,7 +455,8 @@ class IPROLoop:
                 merged.geometry.setdefault(k, v)
         return merged, per
 
-    def _context_for(self, chosen: dict[str, Rotamer]) -> ScoreContext:
+    def _context_for(self, chosen: dict[str, Rotamer],
+                     relax_tag: str | None = None) -> ScoreContext:
         """Measure a candidate without writing it to disk.
 
         The candidate's atoms are the design molecule's fixed part (backbone
@@ -445,7 +468,7 @@ class IPROLoop:
         ``interaction(design, partner)``, with no need to score three
         structures.
         """
-        return self._contexts_for(chosen)[0]
+        return self._contexts_for(chosen, relax_tag=relax_tag)[0]
 
     # -- measuring the channel ----------------------------------------------
 
@@ -557,44 +580,82 @@ class IPROLoop:
         # through their centroid, so it follows the channel only when those
         # positions *ring* the lumen; positions along one wall put the origin
         # inside the wall, and the profile then measures the sliver beside the
-        # wall instead. Measured on the shipped specs: the 25-position one
-        # clears 1.30 A and reads 6.24 A, while the 4-position smoke spec
-        # clears 0.30 A -- less than a water's 1.4 A -- and reads 1.53 A, which
-        # silently PASSES the published sub-4 A filter.
+        # wall instead.
         #
-        # This is reported, not enforced. A clearance threshold was tried and
-        # reverted: 1.30 A is also below a water's radius, so it rejected the
-        # sound measurement too, and no cheap statistic separates the two (see
-        # docs/DESIGN.md 7d). What the run can honestly do is state the number
-        # and say when it cannot vouch for the radius.
+        # Measure this on the INPUT structure, never on a candidate. The first
+        # version measured the candidate's own atoms, which conflates two
+        # different things: an axis buried in a wall, and a design that has
+        # successfully filled the lumen. A narrowing design is *supposed* to
+        # reduce the clearance, so the per-candidate number cannot discriminate
+        # -- measured that way the sound 25-position spec read 1.30 A against
+        # the unsound 4-position spec's 0.30 A, close enough that a threshold
+        # rejected both and was reverted as useless (docs/DESIGN.md 7d).
+        # Measured on the input structure with its native side chains the two
+        # separate by an order of magnitude: 2.80 A against 0.30 A, so a
+        # water's 1.40 A is a usable test after all.
         clearance = float(np.min(
             np.sqrt(((design_atoms.coords - origin) ** 2).sum(-1))
             - vdw_radii(list(design_atoms.names), list(design_atoms.elements))
         ))
-        if clearance < 1.4 and "pore_clearance" not in self._once:
+        axis_ok = self._axis_clearance(origin)
+        if axis_ok is not None and axis_ok < 1.4 and "pore_clearance" not in self._once:
             self._once.add("pore_clearance")
             self.notes.append(
-                f"the pore radius ({prof.min_radius:.2f} A) is measured along an "
-                f"axis FITTED through the centroid of the {len(self.spec.positions)} "
-                f"design position(s), and that axis follows the channel only when "
-                f"those positions surround it. Here the axis origin clears the "
-                f"nearest van der Waals surface by {clearance:.2f} A, below the "
-                f"1.40 A a water molecule needs, which means the geometry alone "
-                f"cannot confirm the axis is in the lumen -- the radius may be a "
-                f"gap beside a wall, and any pore_diameter filter is applied to "
-                f"whichever it is. Known failure: 4 positions along one wall of "
-                f"OmpF read 1.53 A, which passes a 4 A filter, where the "
-                f"25-position set reads 6.24 A. No cheap statistic separates the "
-                f"two (docs/DESIGN.md 7d). Confirm it by giving "
-                f"goal_options.pore_axis as two atoms spanning the channel."
+                f"THE PORE RADIUS HERE IS NOT A PORE RADIUS. It is measured along "
+                f"an axis fitted through the centroid of the "
+                f"{len(self.spec.positions)} design position(s), and in the input "
+                f"structure that axis origin clears the nearest van der Waals "
+                f"surface by only {axis_ok:.2f} A -- less than the 1.40 A a water "
+                f"molecule needs, so the origin is inside the protein, not in the "
+                f"lumen. The reported {prof.min_radius:.2f} A is the gap beside a "
+                f"wall, and any pore_diameter filter is applied to that gap. This "
+                f"happens when the design positions do not surround the channel: "
+                f"4 positions along one wall of OmpF read 1.53 A, which passes a "
+                f"4 A filter, where the 25-position set reads 8.07 A at a "
+                f"clearance of 2.80 A. Fix it by giving goal_options.pore_axis as "
+                f"two atoms spanning the channel, or by adding positions on the "
+                f"opposite wall."
             )
-        return {
+        out = {
             "min_pore_radius": prof.min_radius,
             "min_pore_diameter": prof.min_diameter,
             "max_pore_radius": float(max(prof.radii)),
             "pore_axis_flatness": flatness,
             "pore_axis_clearance": clearance,
         }
+        if axis_ok is not None:
+            out["pore_axis_clearance_input"] = axis_ok
+        return out
+
+    def _axis_clearance(self, origin) -> "float | None":
+        """Is the fitted axis origin in the lumen, or inside a wall?
+
+        Measured once, on the input structure with its native side chains, for
+        the reason given above: on a candidate this number also moves when the
+        design works, so it cannot tell a bad axis from a good design.
+        """
+        if getattr(self, "_axis_clear_cache", None) is not None:
+            return self._axis_clear_cache
+        from .pore import vdw_radii
+
+        path = getattr(self, "_input_pdb", None) or self._design_pdb
+        if path is None:
+            return None
+        try:
+            dm = self.spec.design_molecule
+            st = Structure.load(path, dm.chains or None)
+            atoms = [a for a in st.all_atoms() if not is_hydrogen(a)]
+            coords = np.array([a.coord for a in atoms])
+            names = [a.get_name() for a in atoms]
+            elements = [(a.element or "").strip() or None for a in atoms]
+            value = float(np.min(
+                np.sqrt(((coords - origin) ** 2).sum(-1))
+                - vdw_radii(names, elements)
+            ))
+        except Exception:
+            return None
+        self._axis_clear_cache = value
+        return value
 
     # -- moving the backbone -------------------------------------------------
 
@@ -637,60 +698,91 @@ class IPROLoop:
         candidate = work / f"iter{iteration:04d}.pdb"
 
         moved = self._design_st.copy()
+        # IPRO builds the perturbed region around a design position (Suite
+        # step 1, "begins by randomly selecting a DP"); without an anchor the
+        # region and the redesign are statistically independent. See
+        # perturb.choose_segment.
+        on_chain = [p.number for p in self.spec.positions if p.chain == chain]
+        anchor = self.rng.choice(on_chain) if on_chain else None
         record = perturb_backbone(
             moved, chain,
             sigma_deg=self.spec.loop.perturbation_sigma_deg,
             cap_deg=self.spec.loop.perturbation_cap_deg,
             length_range=self.spec.loop.perturbation_segment,
             rng=self.rng,
+            anchor=anchor,
         )
         moved.save(candidate)
-        return self._relax_once(candidate), record
+        # No relaxation here. The published order relaxes once per iteration,
+        # AFTER the rotamer choice and the docking (see
+        # _relaxed_design_atoms); relaxing the perturbed backbone while it
+        # still carries the old side chains was this implementation's own
+        # invention, and it meant the backbone never adapted to the mutation.
+        return candidate, record
 
-    def _relax_once(self, pdb):
-        """Gradient relaxation after the perturbation -- what makes mode 'full' full.
+    def _relaxed_design_atoms(self, design_all: AtomSet, tag: str):
+        """Published step iv: relax the structure AFTER the sequence is chosen.
 
-        The published protocol minimizes the structure after perturbing the
-        backbone (CHARMM ABNR in IPRO; FastRelax here). This call did not exist:
-        ``EnergyBackend.relax`` had no call site anywhere in the package, and
-        neither did ``RestraintPlan.relax_fixed_positions``, which is collected
-        for exactly this argument and whose own note promises the positions are
-        "held during relaxation in 'full' mode". So a run with PyRosetta
-        installed reported mode ``full`` -- documented as "perturb + relax +
-        repack" -- while doing no relaxation at all, and because ``can_relax``
-        was true it also suppressed the note saying the energies were screening
-        energies.
+        The 2006 paper puts backbone relaxation at step iv, *after* the
+        side-chain/sequence optimization, and says why: the residues the MILP
+        just chose "may no longer be optimally interacting with the previous
+        backbone". The released source runs the same order
+        (``Backbone_Perturbation -> Optimal_Rotamers -> Docking -> Relaxation
+        -> Calculate_Energy``), and so does docs/DESIGN.md's own table. Only
+        the code did not: ``backend.relax`` had exactly one call site, in
+        ``_perturb_once``, so the backbone was relaxed while it still carried
+        the *old* side chains and then never adapted to the mutation -- the
+        whole point of the published step.
 
-        A backend that cannot relax returns the file untouched; the mode is
-        then ``backbone-mc`` and says so.
+        What is relaxed is the design molecule carrying the chosen rotamers,
+        written straight from the atoms that were about to be scored, so the
+        energies and the coordinates cannot disagree. Partners are **not**
+        present during the relaxation: the backend applies coordinate
+        constraints, which keeps this a bounded local minimization rather than
+        a refold, but it does mean the interface is not re-optimized against
+        the partner. That deviation is recorded in docs/DESIGN.md section 4.
+
+        Returns the relaxed atoms, or None when relaxation is unavailable or
+        fails -- in which case the caller scores the unrelaxed candidate,
+        exactly as before, and the run says so once.
         """
-        if not self.backend.can_relax:
-            return pdb
-        out = pdb.with_name(pdb.stem + "_relaxed.pdb")
-        fixed = list(getattr(self._restraints, "relax_fixed_positions", ()) or ())
+        if not self.backend.can_relax or not len(design_all):
+            return None
+        work = self.run.path / "logs" / "relax"
+        work.mkdir(parents=True, exist_ok=True)
+        src = work / f"{tag}_chosen.pdb"
+        out = work / f"{tag}_relaxed.pdb"
         try:
-            self.backend.relax(pdb, out, fixed=fixed)
+            write_atomset_pdb(design_all, src)
+            fixed = list(getattr(self._restraints, "relax_fixed_positions", ()) or ())
+            self.backend.relax(src, out, fixed=fixed)
+            if not out.exists():
+                raise RuntimeError("relaxation wrote no file")
+            atoms = _atoms_of(Structure.load(out), set())
+            if not len(atoms):
+                raise RuntimeError("the relaxed file holds no atoms")
+            if len(atoms) != len(design_all) and "relax_atoms" not in self._once:
+                self._once.add("relax_atoms")
+                self.notes.append(
+                    f"the relaxed structure has {len(atoms)} heavy atoms where the "
+                    f"candidate had {len(design_all)}; the relaxation backend added "
+                    f"or dropped atoms, and the reported energy is for what came "
+                    f"back from it"
+                )
         except Exception as exc:
-            self._relax_failed += 1
-            if "relax_failed" not in self._once:
-                self._once.add("relax_failed")
+            self._post_relax_failed += 1
+            if "post_relax" not in self._once:
+                self._once.add("post_relax")
                 self.notes.append(
-                    f"backbone relaxation failed ({type(exc).__name__}: {exc}); "
-                    "the iteration ran on the unrelaxed perturbed backbone. The "
-                    "protocol is therefore 'backbone-mc', not 'full'."
+                    f"the relaxation that the protocol runs AFTER choosing the "
+                    f"sequence (2006 paper, step iv) failed "
+                    f"({type(exc).__name__}: {exc}), so candidates were scored on "
+                    f"the unrelaxed backbone. The protocol is therefore "
+                    f"'backbone-mc' in effect, not 'full'."
                 )
-            return pdb
-        if not out.exists():
-            self._relax_failed += 1
-            if "relax_empty" not in self._once:
-                self._once.add("relax_empty")
-                self.notes.append(
-                    f"backbone relaxation wrote no file to {out.name}; the "
-                    "iteration ran on the unrelaxed perturbed backbone"
-                )
-            return pdb
-        self._relaxed += 1
-        return out
+            return None
+        self._post_relaxed += 1
+        return atoms
 
     # -- writing structures -------------------------------------------------
 
@@ -1250,7 +1342,12 @@ class IPROLoop:
         """
         tables = self.build_tables()
         choice = self._native_choice(tables)
-        return self._context_for(self._rotamers_for(tables, choice)), tables
+        # `relax_native` exists because `ipro-agent score` is also used on its
+        # own, to report a structure as supplied; there the relaxation would
+        # change the number the user asked for. Inside a run it is always on,
+        # so the reference and the candidates are measured the same way.
+        tag = "native" if self._relax_native else None
+        return self._context_for(self._rotamers_for(tables, choice), relax_tag=tag), tables
 
     # -- the loop ----------------------------------------------------------
 
@@ -1353,9 +1450,13 @@ class IPROLoop:
             )
 
         # -- starting point: the native sequence, repacked --------------------
+        # Relaxed through the same path as every candidate. Relaxing candidates
+        # against an unrelaxed reference would credit each one with the
+        # relaxation's own energy drop and accept nearly everything.
+        self._relax_native = True
         start_choice = self._native_choice(tables, vetoed=rp.rotamer_vetoes)
         start_ctx, start_per_asm = self._contexts_for(
-            self._rotamers_for(tables, start_choice)
+            self._rotamers_for(tables, start_choice), relax_tag="start"
         )
         start_score = self.goal.score(start_ctx)
 
@@ -1451,7 +1552,7 @@ class IPROLoop:
             # is a local move rather than a fresh global solve.
             if snapshot is not None:
                 current_choice = self._rebase_choice(current_aa, tables, rp)
-            window = self._choose_window(ordered)
+            window = self._choose_window(ordered, pert)
             pins = [
                 Constraint(
                     kind="require",
@@ -1545,8 +1646,8 @@ class IPROLoop:
                     self._refresh_self_energies(cb)
                     dock_note = f"; redocked {len(moved)} partner(s)"
 
-            # (5) score, in every assembly
-            ctx, per_asm = self._contexts_for(chosen)
+            # (5) relax what was chosen, then score it, in every assembly
+            ctx, per_asm = self._contexts_for(chosen, relax_tag=f"iter{it:04d}")
             score = self.goal.score(ctx)
             delta = score - current_score
 
@@ -1710,19 +1811,20 @@ class IPROLoop:
         # with every design, so it has to match what happened. "full" means
         # relaxation ran; if every attempt failed, say "backbone-mc".
         if self.mode == "full":
-            if self._relaxed:
+            if self._post_relaxed:
                 self.notes.append(
-                    f"backbone relaxation ran on {self._relaxed} of {n_done} "
-                    f"iteration(s)" + (f", failing on {self._relax_failed}"
-                                       if self._relax_failed else "")
+                    f"backbone relaxation ran after the sequence choice on "
+                    f"{self._post_relaxed} of {n_done} iteration(s)"
+                    + (f", failing on {self._post_relax_failed}"
+                       if self._post_relax_failed else "")
                 )
             else:
                 self.mode = "backbone-mc"
                 self.notes.append(
                     "mode reported as 'backbone-mc', not 'full': the backend can "
                     "relax but no iteration was relaxed"
-                    + (f" ({self._relax_failed} attempt(s) failed)"
-                       if self._relax_failed else "")
+                    + (f" ({self._post_relax_failed} attempt(s) failed)"
+                       if self._post_relax_failed else "")
                 )
         ensemble.sort(key=lambda d: d["score"])
         ensemble = ensemble[: spec.loop.ensemble_size]
@@ -1855,14 +1957,37 @@ class IPROLoop:
 
         return sorted(candidates, key=key)
 
-    def _choose_window(self, ordered: list[str]) -> list[str]:
-        """A run of 1-3 design positions to re-decide, as IPRO does.
+    def _choose_window(self, ordered: list[str], pert=None) -> list[str]:
+        """Which design positions get re-decided this iteration.
 
-        Contiguity is in the *ordered list of design positions*, not in residue
-        numbering: design positions are usually scattered through the sequence,
-        so insisting on residue-adjacency would almost always give a window of
-        one.
+        With a perturbation, IPRO's answer is not a draw at all: the region is
+        built around a design position and then "only DPs within the perturbed
+        region are permitted to mutate" (Suite, step 1; 2006 paper, Fig. 5).
+        So the window *is* the design positions inside the perturbed region,
+        which is what couples the backbone move to the sequence move.
+
+        Without one -- ``loop.perturb_backbone: false``, or a perturbation that
+        failed -- there is no region to read, and the window falls back to a
+        contiguous run of ``design_per_iteration`` positions. That fallback is
+        this repo's choice, not the papers': neither states a 1-3 rule, and the
+        released source has no mutation-count draw. Contiguity there is in the
+        *ordered list of design positions*, not in residue numbering, since
+        design positions are usually scattered and residue-adjacency would
+        almost always give a window of one.
         """
+        if pert is not None and getattr(pert, "residues", None):
+            moved = set(pert.residues)
+            chain = getattr(pert, "chain", None)
+            inside = [
+                p.label for p in self.spec.positions
+                if p.number in moved and (chain is None or p.chain == chain)
+            ]
+            inside = [p for p in ordered if p in inside]
+            if inside:
+                return inside
+            # An anchored region always holds its design position, so this is
+            # reachable only when the anchor was a proline or the position was
+            # dropped from the tables. Fall back rather than skip the iteration.
         lo, hi = self.spec.loop.design_per_iteration
         k = min(len(ordered), self.rng.randint(lo, hi))
         if k >= len(ordered):
