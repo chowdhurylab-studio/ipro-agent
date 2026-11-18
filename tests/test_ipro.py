@@ -452,6 +452,46 @@ def test_milp_matches_brute_force_on_real_rotamers():
 # ---------------------------------------------------------------------------
 
 
+def test_apply_design_applies_exactly_the_requested_mutations():
+    """The chosen rotamer must reach the coordinates, and nothing else may move.
+
+    PyMOL's wizard reports failure by leaving the residue alone, so the identity
+    has to be read back rather than trusted; and a mutation that silently
+    altered a neighbouring residue would corrupt the design without erroring.
+    """
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.mutate import apply_design
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_mut_"))
+    try:
+        out = tmp / "mutated.pdb"
+        before = Structure.load(CRN)
+        seq_before = before.sequence("A")
+
+        res = apply_design(CRN, out, {"A16": ("TRP", 2), "A18": ("PHE", 1)})
+        assert not res.errors, res.errors
+        assert res.applied == {"A16": ("TRP", 2), "A18": ("PHE", 1)}
+
+        after = Structure.load(out)
+        assert after.find("A", 16).get_resname().strip() == "TRP"
+        assert after.find("A", 18).get_resname().strip() == "PHE"
+        # TRP has 10 heavy side-chain atoms including CB; a wrong count means
+        # the side chain was not rebuilt.
+        sc = [a for a in after.find("A", 16) if a.get_name().strip() not in
+              ("N", "CA", "C", "O", "OXT")]
+        assert len(sc) == 10, len(sc)
+
+        seq_after = after.sequence("A")
+        assert len(seq_after) == len(seq_before) == 46
+        changed = [i for i, (a, b) in enumerate(zip(seq_before, seq_after)) if a != b]
+        assert changed == [15, 17], changed   # 0-based: residues 16 and 18 only
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_loop_never_revisits_a_sequence():
     """The integer-cut guarantee, end to end."""
     if not _have_pymol():
