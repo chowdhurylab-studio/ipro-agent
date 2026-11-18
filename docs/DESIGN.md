@@ -34,6 +34,7 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Terminal insertions and deletions | `indel.py`, applied in `IPROLoop.prepare` | IPRO+/− / Protein-InDelMaker provide the general case; only the terminal case is exact without loop closure |
 | Channel bottleneck measurement, and the hard filter on it | `pore.py`, `goals.ReshapeChannel.filter_reject` | PoreDesigner's acceptance filter: slices every 0.5 A through the constriction, largest inscribed figure per slice, discard a design outside the requested window |
 | Backbone perturbation (1-5 consecutive residues, phi/psi ~ N(0, 1.5 deg) truncated to +/-5 deg) | `perturb.py`, `loop.perturb_backbone` | IPRO Suite step 2 and the released source's `random.gauss(0, 1.5)` rejection-truncated to +/-5 deg; the 2006 paper reports sigma 1.65 deg |
 | Designed coordinates written out (best, and per iteration) | `output.py` | Deliverable in its own right: a design that exists only as a sequence and a score cannot be inspected or taken to the bench |
@@ -388,6 +389,48 @@ optimize.
 2627-atom structure (555 ms over the whole barrel), and only goals that declare
 `wants_geometry` pay it.
 
+### 1i. Insertions and deletions: why only at a terminus
+
+Changing a chain's length in the **middle** leaves two cut ends that must be
+rejoined, and doing that correctly is loop closure. There is no honest
+shortcut: an internal edit without closure produces a chain with a broken
+peptide bond, which still looks like a protein and scores like nonsense. So
+internal indels are **refused**, naming the specific reason and pointing at
+Protein-InDelMaker.
+
+At a **terminus** there is no second cut end, so the edit is exact and is
+implemented:
+
+* a **deletion** removes residues and leaves every remaining atom untouched;
+* an **insertion** builds residues from ideal internal coordinates
+  (N–CA 1.458 A, CA–C 1.525 A, peptide C–N 1.329 A, N–CA–C 111.2 deg,
+  CA–C–N 116.2 deg, C–N–CA 121.7 deg, omega 180 deg) at chosen phi/psi,
+  extended by default.
+
+**The invariant that matters most: an indel never renumbers an existing
+residue.** Design positions are named by residue number, so a renumbering would
+silently point them at different residues and the run would optimize something
+nobody asked for. C-terminal insertions therefore count upward from the last
+residue; N-terminal insertions count **downward** from the first, so a chain
+starting at 1 gains residues 0, −1, … (negative numbers are legal in a PDB and
+the position parser accepts them); deletions simply leave gaps.
+
+**Inserted residues are glycine, and that is the point.** The inserted position
+becomes an ordinary design position, so the MILP chooses its identity and PyMOL
+builds the side chain — the same path as any other position. It also mirrors
+IPRO, which mutates side chains to glycine before perturbing a backbone.
+
+Verified: `place_atom` round-trips its bond, angle and dihedral to machine
+precision over 200 random reference frames; appended and prepended residues have
+ideal trans backbone geometry; existing numbering is preserved in all four
+cases; and end to end, appending two residues and listing them as design
+positions yields a 48-residue chain with designed identities at 47 and 48,
+properly bonded.
+
+One bug worth recording, since it only appeared with more than one residue: the
+chain was re-sorted *after* the insertion loop rather than inside it, so the
+second pass still saw the original first residue and tried to reuse its number.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -456,7 +499,7 @@ specified, and this table is the record of what that changes.
 
 | Capability | Status | Why, and what it would take |
 |---|---|---|
-| **Insertions and deletions** | **Not implemented.** A spec containing `indels:` raises `NotImplementedError` with a pointer to the alternative. | Changing chain length needs loop closure after the edit. Protein-InDelMaker does this with PyRosetta's GeneralizedKIC over a 6-residue window followed by Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. No loop-closure backend is available here. `config.IndelSpec` models the input so the schema is ready. Workaround: build the variant with Protein-InDelMaker, then design on that structure. |
+| **Internal** insertions and deletions | Not implemented; refused with the specific reason. | Changing chain length *in the middle* needs loop closure. Protein-InDelMaker uses PyRosetta's GeneralizedKIC over a 6-residue window then Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. **Terminal** indels need no closure and are implemented — see §1i. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |

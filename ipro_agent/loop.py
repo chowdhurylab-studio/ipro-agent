@@ -186,6 +186,10 @@ class IPROLoop:
 
         # Loaded structures, by role.
         self._design_st: Structure | None = None
+        #: The design molecule's file as currently used -- the input, or the
+        #: indel-edited copy. PyMOL harvests from a path, so this is the single
+        #: source of truth for both harvesting and writing structures.
+        self._design_pdb = None
         self._partners: dict[str, Structure] = {}
         self._rotamer_cache: dict[str, list[Rotamer]] | None = None
         self._native: dict[str, str] = {}
@@ -218,23 +222,53 @@ class IPROLoop:
     def prepare(self) -> None:
         """Load structures, check the design positions exist, harvest rotamers."""
         spec = self.spec
-        if spec.indels:
-            # Silently ignoring a requested insertion or deletion would be a
-            # serious silent failure: the user would get a design over the
-            # wrong sequence. Refuse clearly instead.
-            raise NotImplementedError(
-                f"this spec requests {len(spec.indels)} insertion/deletion(s), which "
-                "are not implemented here. Changing chain length needs loop closure "
-                "after the edit (Protein-InDelMaker does this with PyRosetta's "
-                "GeneralizedKIC over a 6-residue window, followed by Cartesian "
-                "FastRelax), and no loop-closure backend is available. Remove the "
-                "'indels:' block to run a fixed-length design, or use "
-                "Protein-InDelMaker (github.com/maranasgroup/Protein-InDelMaker) to "
-                "build the indel variant first and design on that structure. "
-                "See docs/DESIGN.md."
-            )
         dm = spec.design_molecule
         self._design_st = Structure.load(dm.path, dm.chains or None)
+        self._design_pdb = dm.path
+
+        if spec.indels:
+            from .indel import apply_terminal, classify
+
+            plan = classify(self._design_st, spec.indels)
+            if plan.has_internal:
+                # Refusing is the right answer: an internal edit without loop
+                # closure leaves a broken peptide bond, which still looks like a
+                # protein and scores like nonsense.
+                detail = "\n  ".join(why for _s, why in plan.internal)
+                raise NotImplementedError(
+                    f"{len(plan.internal)} of {len(spec.indels)} requested "
+                    f"insertion/deletion(s) are internal and cannot be done here:\n  "
+                    f"{detail}\n"
+                    "Changing a chain's length in the middle needs loop closure "
+                    "(Protein-InDelMaker uses PyRosetta's GeneralizedKIC over a "
+                    "6-residue window, then Cartesian FastRelax). Terminal indels "
+                    "need no closure and are supported. Either move the edit to a "
+                    "terminus, or build the variant with Protein-InDelMaker "
+                    "(github.com/maranasgroup/Protein-InDelMaker) and design on "
+                    "that structure. See docs/DESIGN.md."
+                )
+            result = apply_terminal(
+                self._design_st, plan.terminal,
+                phi=float(spec.goal_options.get("insert_phi", -139.0)),
+                psi=float(spec.goal_options.get("insert_psi", 135.0)),
+            )
+            # Everything downstream reads the design molecule from a file
+            # (PyMOL harvests rotamers from a path), so the edited structure is
+            # written once and used from here on. The input file is untouched.
+            edited = self.run.path / "logs" / "design_after_indels.pdb"
+            edited.parent.mkdir(parents=True, exist_ok=True)
+            self._design_st.save(edited)
+            self._design_st = Structure.load(edited, dm.chains or None)
+            self._design_pdb = edited
+            self.notes.append(f"indels applied: {result.describe()}")
+            self.notes.extend(result.notes)
+            if result.added:
+                self.notes.append(
+                    "inserted residues are glycine in the structure; list them as "
+                    "design positions to have their identities chosen: "
+                    + ", ".join(result.added)
+                )
+            self.run.log(f"indels: {result.describe()}")
 
         for m in spec.targets + spec.anti_targets:
             self._partners[m.name] = Structure.load(m.path, m.chains or None)
@@ -251,7 +285,7 @@ class IPROLoop:
         if missing:
             raise ValueError(
                 "design position(s) not found in "
-                f"{dm.path.name}:\n  " + "\n  ".join(missing)
+                f"{self._design_pdb.name}:\n  " + "\n  ".join(missing)
             )
         self._native = {p.label: (p.native or "") for p in spec.positions}
 
@@ -279,7 +313,7 @@ class IPROLoop:
         labels = [p.label for p in spec.positions]
         self.run.log(f"harvesting rotamers at {len(labels)} positions")
         rots, native, errors = harvest(
-            dm.path, spec.positions, workdir=self.run.path / "logs"
+            self._design_pdb, spec.positions, workdir=self.run.path / "logs"
         )
         if errors:
             self.notes.append(f"PyMOL could not build some rotamers: {json.dumps(errors)[:400]}")
@@ -510,6 +544,7 @@ class IPROLoop:
             )
         self._rotamer_cache = rots
         self._design_st = Structure.load(pdb_path)
+        self._design_pdb = pdb_path
         return self.build_combined()
 
     def _perturb_once(self, iteration: int):
@@ -567,7 +602,7 @@ class IPROLoop:
         try:
             from .mutate import apply_design
 
-            res = apply_design(self._design_st.path, design_only, picks)
+            res = apply_design(self._design_pdb, design_only, picks)
             if res.errors:
                 self.notes.append(
                     f"some positions could not be written into the structure: "
@@ -790,7 +825,7 @@ class IPROLoop:
         receptor = work / "receptor.pdb"
         try:
             apply_design(
-                self._design_st.path,
+                self._design_pdb,
                 receptor,
                 {
                     (split_vpos(v)[1] or v): (r.aa, r.state)

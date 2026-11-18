@@ -37,6 +37,9 @@ Spend your effort on 1–3 and on reading the result honestly.
   reproduce the *rank* and *sign* of a change far better than its magnitude.
   Published hit rates for this family of methods are roughly 24–43%. Treat every
   design as a hypothesis to test at the bench.
+- **You need an insertion or deletion in the middle of a chain.** Only terminal
+  indels are supported here; an internal one needs loop closure. Build the
+  variant with Protein-InDelMaker first, then design on that structure.
 - **The goal is a property with no structural handle** (expression,
   solubility, immunogenicity). There is no objective here for those.
 
@@ -139,6 +142,34 @@ Distance alone is cheap to compute and is the one criterion this tool
 implements. The rest need the user's knowledge of the system, a family
 alignment, or a prior round's results. Ask; do not guess, and never silently
 design away a catalytic residue.
+
+### 1b. Changing the chain's length
+
+Terminal insertions and deletions work; internal ones are refused, because they
+need loop closure and an edit without it leaves a broken peptide bond.
+
+```yaml
+indels:
+  - {kind: insert, chain: A, after: 46, length: 2}   # 46 is the last residue
+  - {kind: delete, chain: A, residues: [1, 2, 3]}    # from the N-terminus
+positions:
+  - {position: "A47", allowed: [TRP, LEU, ALA]}      # design what you inserted
+  - {position: "A48", allowed: [TRP, LEU, ALA]}
+```
+
+Three things to know:
+
+- **Inserted residues arrive as glycine.** List them as design positions and the
+  MILP picks their identities, exactly as for any other position. If you do not
+  list them, they stay glycine.
+- **Existing residue numbers never change.** A C-terminal insertion counts
+  upward; an N-terminal one counts **downward**, so a chain starting at 1 gains
+  residues `A0`, `A-1`, … Use those labels when you list them as positions.
+- **An internal indel fails with the reason.** Move the edit to a terminus, or
+  build the variant with Protein-InDelMaker and design on that structure.
+
+`goal_options.insert_phi` / `insert_psi` set the conformation of the new
+residues (extended by default).
 
 ### 2a. Use assemblies when one sequence must work in several complexes
 

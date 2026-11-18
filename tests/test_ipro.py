@@ -1825,6 +1825,182 @@ def test_only_channel_goals_pay_for_geometry():
         assert not goal_for(kind).wants_geometry, kind
 
 
+# ---------------------------------------------------------------------------
+# Insertions and deletions
+# ---------------------------------------------------------------------------
+
+
+def _bb(res, name: str) -> np.ndarray:
+    """Coordinate of a named atom in a Biopython residue (indel tests)."""
+    return np.array(
+        [a.coord for a in res if a.get_name().strip().upper() == name][0], dtype=float
+    )
+
+
+def test_place_atom_round_trips_its_internal_coordinates():
+    """Build an atom from a bond, angle and dihedral, then measure all three
+    back. This is the only way to be certain of the sign conventions, and
+    everything about an insertion rests on it."""
+    from ipro_agent.indel import measure_angle, measure_dihedral, place_atom
+
+    rng = np.random.default_rng(3)
+    worst = [0.0, 0.0, 0.0]
+    checked = 0
+    for _ in range(200):
+        a, b, c = (rng.normal(size=3) * 3 for _ in range(3))
+        if np.linalg.norm(np.cross(b - a, c - b)) < 1e-3:
+            continue
+        bond = float(rng.uniform(1.0, 2.0))
+        angle = float(rng.uniform(70.0, 150.0))
+        dih = float(rng.uniform(-179.0, 179.0))
+        d = place_atom(a, b, c, bond, angle, dih)
+        worst[0] = max(worst[0], abs(float(np.linalg.norm(d - c)) - bond))
+        worst[1] = max(worst[1], abs(measure_angle(b, c, d) - angle))
+        got = measure_dihedral(a, b, c, d)
+        worst[2] = max(worst[2], abs((got - dih + 180.0) % 360.0 - 180.0))
+        checked += 1
+    assert checked > 150
+    assert worst[0] < 1e-9 and worst[1] < 1e-7 and worst[2] < 1e-7, worst
+
+
+def test_c_terminal_insertion_builds_ideal_trans_backbone():
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import (
+        B_C_N, B_CA_C, B_N_CA, apply_terminal, classify, measure_dihedral,
+    )
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    before = [int(r.id[1]) for r in st.residues("A")]
+    plan = classify(st, [IndelSpec(kind="insert", chain="A", after=before[-1], length=3)])
+    assert len(plan.terminal) == 1 and plan.terminal[0][1] == "C"
+    assert not plan.has_internal
+
+    res = apply_terminal(st, plan.terminal)
+    assert len(res.added) == 3
+    after = [int(r.id[1]) for r in st.residues("A")]
+    # The invariant that matters: design positions are named by number.
+    assert after[: len(before)] == before, "existing residues were renumbered"
+    assert after == sorted(after)
+
+    rs = list(st.residues("A"))
+    for i in range(len(before) - 1, len(after) - 1):
+        r1, r2 = rs[i], rs[i + 1]
+        assert abs(float(np.linalg.norm(_bb(r1, "C") - _bb(r2, "N"))) - B_C_N) < 1e-6
+        assert abs(float(np.linalg.norm(_bb(r2, "N") - _bb(r2, "CA"))) - B_N_CA) < 1e-6
+        assert abs(float(np.linalg.norm(_bb(r2, "CA") - _bb(r2, "C"))) - B_CA_C) < 1e-6
+        omega = measure_dihedral(
+            _bb(r1, "CA"), _bb(r1, "C"), _bb(r2, "N"), _bb(r2, "CA")
+        )
+        assert abs(abs(omega) - 180.0) < 1e-6, omega
+
+
+def test_regression_n_terminal_insertion_of_more_than_one_residue():
+    """Numbers must count *downward* so nothing existing is renumbered, and the
+    chain must be re-ordered after each residue -- without that the second pass
+    still saw the original first residue and tried to reuse its number."""
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import B_C_N, apply_terminal, classify, measure_dihedral
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    before = [int(r.id[1]) for r in st.residues("A")]
+    plan = classify(st, [IndelSpec(kind="insert", chain="A", after=before[0] - 1, length=2)])
+    assert plan.terminal[0][1] == "N"
+    res = apply_terminal(st, plan.terminal)
+    assert len(res.added) == 2, res.added
+
+    after = [int(r.id[1]) for r in st.residues("A")]
+    assert after[-len(before):] == before, "existing residues were renumbered"
+    assert after == sorted(after), "chain is out of N-to-C order"
+    assert after[0] == before[0] - 2
+
+    rs = list(st.residues("A"))
+    for i in range(2):
+        pep = float(np.linalg.norm(_bb(rs[i], "C") - _bb(rs[i + 1], "N")))
+        omega = measure_dihedral(
+            _bb(rs[i], "CA"), _bb(rs[i], "C"),
+            _bb(rs[i + 1], "N"), _bb(rs[i + 1], "CA"),
+        )
+        assert abs(pep - B_C_N) < 1e-6, pep
+        assert abs(abs(omega) - 180.0) < 1e-6, omega
+
+
+def test_terminal_deletion_keeps_the_remaining_numbering():
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import apply_terminal, classify
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    before = [int(r.id[1]) for r in st.residues("A")]
+    plan = classify(st, [IndelSpec(kind="delete", chain="A", residues=before[-3:])])
+    assert plan.terminal and not plan.has_internal
+    apply_terminal(st, plan.terminal)
+    after = [int(r.id[1]) for r in st.residues("A")]
+    assert after == before[:-3]
+
+
+def test_internal_indels_are_refused_with_a_reason():
+    """An internal edit without loop closure leaves a broken peptide bond,
+    which still looks like a protein. Refusing is the correct answer."""
+    from ipro_agent.config import IndelSpec
+    from ipro_agent.indel import classify
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    cases = [
+        IndelSpec(kind="insert", chain="A", after=20, length=2),
+        IndelSpec(kind="delete", chain="A", residues=[20, 21]),
+        IndelSpec(kind="delete", chain="A", residues=[1, 3]),   # not contiguous
+    ]
+    for spec in cases:
+        plan = classify(st, [spec])
+        assert plan.has_internal and not plan.terminal
+        assert plan.internal[0][1], "a refusal must say why"
+
+
+def test_terminal_insertion_runs_end_to_end_and_the_residues_get_designed():
+    """The inserted residues are glycine in the structure and become ordinary
+    design positions, so the MILP picks their identities."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.loop import run_design
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_indel_"))
+    try:
+        spec = DesignSpec.from_dict({
+            "name": "ins", "goal": "stabilize", "goal_statement": "extend and design",
+            "molecules": [{"name": "m", "path": str(CRN), "role": "design",
+                           "kind": "protein", "chains": ["A"]}],
+            "indels": [{"kind": "insert", "chain": "A", "after": 46, "length": 2}],
+            "positions": [
+                {"position": "A47", "allowed": ["TRP", "LEU", "ALA"]},
+                {"position": "A48", "allowed": ["TRP", "LEU", "ALA"]},
+            ],
+            "goal_options": {"max_self_energy": 1e9},
+            "loop": {"iterations": 3, "random_seed": 2},
+        })
+        res = run_design(spec, tmp)
+        assert res.structures
+        assert any("indels applied" in n for n in res.notes)
+
+        back = Structure.load(tmp / "best" / "design.pdb")
+        nums = [int(r.id[1]) for r in back.residues("A")]
+        assert nums[0] == 1 and nums[-1] == 48 and len(nums) == 48, nums[:3] + nums[-3:]
+        # Both inserted positions carry a designed identity, not glycine.
+        for n in (47, 48):
+            assert back.find("A", n).get_resname().strip() in ("TRP", "LEU", "ALA")
+        # And the new residues really are bonded to the chain.
+        rs = list(back.residues("A"))
+        pep = float(np.linalg.norm(_bb(rs[45], "C") - _bb(rs[46], "N")))
+        assert 1.2 < pep < 1.45, pep
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]
