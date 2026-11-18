@@ -4216,3 +4216,20 @@ def test_mcp_server_needs_nothing_but_the_standard_library():
             if isinstance(n, ast.Import) and n.col_offset == 0 for a in n.names}
     outside = sorted(top - set(_sys.stdlib_module_names) - {"ipro_agent"})
     assert not outside, f"module-level non-stdlib imports: {outside}"
+
+
+def test_mcp_unexercised_paths_are_declared():
+    """Same practice as energy.pyrosetta_backend.UNEXERCISED: what has not been
+    run is declared in one place with a reason, not left to be discovered. The
+    one entry is the branch that actually launches `conda env create`, which a
+    test cannot exercise without building a real multi-hundred-megabyte
+    environment on the machine under test."""
+    import re
+
+    from ipro_agent import mcp_server as m
+
+    assert m.UNEXERCISED, "empty it only when everything really is exercised"
+    for name, why in m.UNEXERCISED.items():
+        attr = re.split(r"[\s(]", name)[0]
+        assert hasattr(m, attr), f"declared-unexercised {name!r} no longer exists"
+        assert len(why.strip()) > 40, f"{name} needs a real reason"

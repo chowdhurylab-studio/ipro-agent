@@ -46,6 +46,22 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: Paths here that have **not** been executed, in the same spirit as
+#: ``energy.pyrosetta_backend.UNEXERCISED``: declared rather than left to be
+#: discovered, and checked by a test so the list cannot rot.
+UNEXERCISED: dict[str, str] = {
+    "tool_setup(confirm=True)": (
+        "The dry-run branch, the manager discovery and the refusal are all "
+        "exercised, including in an empty virtualenv. The branch that actually "
+        "launches `conda env create` is not: running it in the test suite would "
+        "create a real multi-hundred-megabyte environment on the machine under "
+        "test. The command it builds was verified by hand "
+        "(`mamba env create -f environment.yml` from a fresh clone), and the "
+        "detached-launch mechanics are the same `start_new_session=True` "
+        "pattern `tool_run` uses and tests."
+    ),
+}
+
 #: Protocol revisions this server is known to speak. The client's requested
 #: version is echoed back when it is one of these, which is what the spec asks
 #: for; otherwise the newest is offered and the client may refuse.

@@ -1062,4 +1062,11 @@ the documented order rather than leaving an agent to infer it -- doctor, goal,
 spec, validate, score, run, report -- and the redesign prompt explicitly forbids
 weakening a constraint the user stated in order to clear a failure.
 
-The suite is **158 tests**.
+What in the MCP layer is **not** exercised is declared in
+`mcp_server.UNEXERCISED`, the same practice `energy.pyrosetta_backend` uses: the
+one entry is the branch that actually launches `conda env create`, which a test
+cannot run without building a real environment on the machine under test. Its
+dry run, manager discovery and refusal are all tested, including from an empty
+virtualenv.
+
+The suite is **159 tests**.
