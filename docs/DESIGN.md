@@ -1070,3 +1070,26 @@ dry run, manager discovery and refusal are all tested, including from an empty
 virtualenv.
 
 The suite is **159 tests**.
+
+#### Verified on a new machine
+
+The install path had never been run from this repo: nobody had executed
+`conda env create -f environment.yml`. Done on 2026-11-18 from a **fresh clone
+of the published repository**, using only the documented commands and none of
+the development machine's existing environments:
+
+| Check | Result |
+|---|---|
+| every required dependency (`numpy`, `Bio`, `yaml`, `pymol`) | imports |
+| `scripts/doctor.py --require pymol` | exit 0 |
+| `ipro-agent validate` on the shipped example | "spec is usable" |
+| a real design run, and `status --json` | completes; carries `mode` and `notes` |
+| the suite, in the clone | 159 passed, 0 failed |
+| the MCP server over stdio | 9 tools, `ipro://skill` served (29 540 chars), `can_design: True` |
+
+13 of 13 checks. Two observations worth keeping, both about reproducibility
+rather than correctness: `python>=3.10` resolved to **Python 3.14.10**, and the
+MILP resolved to **`COIN_CMD` via PuLP** rather than the `glpk` the development
+machine uses -- the environment file installs `pulp[cbc]`, which PuLP prefers.
+Same formulation, same optimum, different solver; `doctor.py` reports which one,
+which is the reason it reports it at all. The environment is 1.4 GB.
