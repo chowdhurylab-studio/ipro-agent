@@ -4467,3 +4467,51 @@ def test_regression_mcp_stdout_carries_nothing_but_jsonrpc():
         except json.JSONDecodeError:
             raise AssertionError(f"non-JSON on stdout corrupts the stream: {line[:200]!r}")
         assert msg.get("jsonrpc") == "2.0", msg
+
+
+def test_the_example_prompts_page_states_true_numbers():
+    """docs/EXAMPLE_PROMPTS.md tells people what each prompt produces, so its
+    numbers are claims a reader will check. Three rounds of audit on this repo
+    found stale documented measurements (an 8.1 A eyelet, a 5.69 A bottleneck, a
+    0.716 score, 'twelve defects' where there were seven), so the numbers in a
+    new page get pinned on the way in rather than after someone trips on them."""
+    page = (REPO / "docs" / "EXAMPLE_PROMPTS.md")
+    if not page.exists():
+        print("    (skipped: no prompts page)")
+        return
+    doc = page.read_text()
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+
+    # The native residues the page names must be what the structure holds.
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "inspect", str(ompf),
+         "--positions", "18,20,38,40", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=600,
+    )
+    out = json.loads(p.stdout)
+    natives = {a["asked"]: a["native"] for a in out["positions"]}
+    one = {"VAL": "V", "LEU": "L", "MET": "M", "TYR": "Y"}
+    for num, three in natives.items():
+        claim = f"{one[three]}{num}"
+        assert claim in doc, f"the page must name {claim} (residue {num} is {three})"
+
+    chain = next(c for c in out["chains"] if c["chain"] == "A")
+    assert f"{chain['residues']} residues" in doc, chain["residues"]
+    assert f"{chain['first']}..{chain['last']}" in doc
+
+    # Defaults the page quotes.
+    from ipro_agent.config import LoopSettings
+
+    assert f"({LoopSettings().ensemble_size} by default)" in doc
+    cli_src = (REPO / "ipro_agent" / "cli.py").read_text()
+    assert "default=5.0" in cli_src and "default 5 Å" in doc, (
+        "the page quotes the interface cutoff default; keep them together"
+    )
+
+    # And the caveat that must never be dropped from a page of prompts.
+    for required in ("screening scale", "accepted: 0", "hypothesis",
+                     "What not to ask it"):
+        assert required in doc, required
