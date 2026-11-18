@@ -76,6 +76,8 @@ class RunResult:
     #: Mutations as ``D115W`` strings, built by the loop (which knows the
     #: native identities and residue numbers).
     mutation_string: str = ""
+    #: Designed coordinate files written for the best design.
+    structures: list[str] = field(default_factory=list)
     ensemble: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -154,14 +156,32 @@ class IPROLoop:
         self.goal = goal or build_goal(spec)
         self.rng = random.Random(spec.loop.random_seed)
         self.constraints = list(self.goal.default_constraints()) + list(extra_constraints)
-        self.mode = "full" if self.backend.can_relax else "fixed-backbone"
+        # Three honest modes rather than two:
+        #   full            perturb + relax + repack  (needs a relaxing backend)
+        #   backbone-mc     perturb + repack + Metropolis, no gradient relaxation
+        #   fixed-backbone  repack only
+        if not spec.loop.perturb_backbone:
+            self.mode = "fixed-backbone"
+        elif self.backend.can_relax:
+            self.mode = "full"
+        else:
+            self.mode = "backbone-mc"
         # Qualifications the goal raised at construction travel with the run.
         self.notes: list[str] = list(getattr(self.goal, "notes", []))
         if self.mode == "fixed-backbone":
             self.notes.append(
-                f"backbone perturbation and relaxation skipped: energy backend "
-                f"'{self.backend.name}' cannot relax. Search is over sequence and "
-                f"side-chain packing only. This is not the published IPRO protocol."
+                "the backbone never moves (loop.perturb_backbone is false), so the "
+                "search is over sequence and side-chain packing only. That is a "
+                "legitimate and much cheaper protocol, but it is not IPRO's: set "
+                "loop.perturb_backbone: true to perturb the backbone each iteration."
+            )
+        elif self.mode == "backbone-mc":
+            self.notes.append(
+                f"backbone Monte Carlo: the backbone is perturbed each iteration and "
+                f"strained moves are rejected, but there is no gradient relaxation "
+                f"afterwards because energy backend '{self.backend.name}' cannot "
+                f"relax. The published protocol minimizes after perturbing; install "
+                f"PyRosetta for that."
             )
 
         # Loaded structures, by role.
@@ -188,6 +208,8 @@ class IPROLoop:
         self._base_atoms: dict[str, AtomSet] = {}
         #: Which placement backend resolved for this run.
         self._dock_backend: str = "none"
+        #: Keys for notes that should be emitted at most once per run.
+        self._once: set[str] = set()
 
     # -- setup -------------------------------------------------------------
 
@@ -343,6 +365,164 @@ class IPROLoop:
         structures.
         """
         return self._contexts_for(chosen)[0]
+
+    # -- moving the backbone -------------------------------------------------
+
+    def _rebuild_for_backbone(self, pdb_path) -> CombinedTables:
+        """Re-harvest rotamers from a moved backbone and rebuild the tables.
+
+        Everything has to be redone, not just the self energies: a rotamer's
+        coordinates are built on the backbone, so moving the backbone changes
+        the rotamer-rotamer pair energies too. That is the cost of perturbation
+        and the reason it is opt-in.
+        """
+        rots, native, errors = harvest(
+            pdb_path, self.spec.positions, workdir=self.run.path / "logs"
+        )
+        if errors and "perturb_harvest_errors" not in self._once:
+            self._once.add("perturb_harvest_errors")
+            self.notes.append(
+                "after a backbone perturbation PyMOL could not build some "
+                f"rotamers: {json.dumps(errors)[:300]}"
+            )
+        empty = [k for k, v in rots.items() if not v]
+        if empty:
+            raise RuntimeError(
+                f"no rotamers could be built at {empty} on the perturbed backbone"
+            )
+        self._rotamer_cache = rots
+        self._design_st = Structure.load(pdb_path)
+        return self.build_combined()
+
+    def _perturb_once(self, iteration: int):
+        """Perturb a copy of the current backbone and return (file, record)."""
+        from .perturb import perturb_backbone
+
+        assert self._design_st is not None
+        dm = self.spec.design_molecule
+        chain = (dm.chains or self._design_st.chain_ids())[0]
+        work = self.run.path / "logs" / "backbone"
+        work.mkdir(parents=True, exist_ok=True)
+        candidate = work / f"iter{iteration:04d}.pdb"
+
+        moved = self._design_st.copy()
+        record = perturb_backbone(
+            moved, chain,
+            sigma_deg=self.spec.loop.perturbation_sigma_deg,
+            cap_deg=self.spec.loop.perturbation_cap_deg,
+            length_range=self.spec.loop.perturbation_segment,
+            rng=self.rng,
+        )
+        moved.save(candidate)
+        return candidate, record
+
+    # -- writing structures -------------------------------------------------
+
+    def _write_design(
+        self,
+        path,
+        chosen: dict[str, "Rotamer"],
+        assembly: str,
+        header: list[str] | None = None,
+    ):
+        """Write the complex that was scored: mutated design plus its partners.
+
+        The design molecule is rebuilt through PyMOL so the file carries the
+        *chosen rotamer* at each design position, not just the right residue
+        type -- otherwise the coordinates would not be the ones that produced
+        the reported energy.
+        """
+        from pathlib import Path as _Path
+
+        from .output import write_complex
+
+        if self._design_st is None:
+            return None
+        picks = {
+            (split_vpos(v)[1] or v): (r.aa, r.state)
+            for v, r in chosen.items()
+            if (split_vpos(v)[0] or assembly) == assembly
+        }
+        work = self.run.path / "logs" / "structure_build"
+        work.mkdir(parents=True, exist_ok=True)
+        design_only = work / "design_only.pdb"
+        try:
+            from .mutate import apply_design
+
+            res = apply_design(self._design_st.path, design_only, picks)
+            if res.errors:
+                self.notes.append(
+                    f"some positions could not be written into the structure: "
+                    f"{json.dumps(res.errors)[:200]}"
+                )
+        except Exception as exc:
+            if "no_structure_note" not in self._once:
+                self._once.add("no_structure_note")
+                self.notes.append(
+                    "could not write designed coordinates "
+                    f"({type(exc).__name__}: {exc}). The sequence and energies are "
+                    "still reported; structure output needs a working PyMOL "
+                    "(scripts/doctor.py)."
+                )
+            return None
+
+        built = Structure.load(design_only)
+        a = next(x for x in self._assemblies if x.name == assembly)
+        partners = {
+            m.name: self._partners[m.name]
+            for m in self.spec.assembly_molecules(a)
+            if m.name in self._partners
+        }
+        poses = {
+            name: self._poses.get((assembly, name))
+            for name in partners
+            if self._poses.get((assembly, name)) is not None
+        }
+        written = write_complex(
+            _Path(path), built, partners, poses, header=header or []
+        )
+        for note in written.notes:
+            if note not in self.notes:
+                self.notes.append(note)
+        return written
+
+    def _design_header(self, score: float, mutations: dict[str, str], assembly: str) -> list[str]:
+        """REMARK lines so a stray PDB can still be traced back to its run."""
+        muts = self._mutation_string(mutations) or "none"
+        out = [
+            "REMARK   1 WRITTEN BY ipro-agent",
+            f"REMARK   1 RUN        {self.run.path.name}",
+            f"REMARK   1 GOAL       {self.spec.goal}",
+            f"REMARK   1 MODE       {self.mode}",
+            f"REMARK   1 BACKEND    {self.backend.name}",
+            f"REMARK   1 SCORE      {score:.4f} ({self.backend.units})",
+            f"REMARK   1 MUTATIONS  {muts}",
+        ]
+        if len(self._assemblies) > 1:
+            out.append(f"REMARK   1 ASSEMBLY   {assembly}")
+        out.append(
+            "REMARK   1 NOTE       energies from this backend are a screening"
+            if not self.backend.can_relax else
+            "REMARK   1 NOTE       see best/design.json for the score breakdown"
+        )
+        return out
+
+    def _write_best_structures(
+        self, chosen: dict[str, "Rotamer"], score: float, mutations: dict[str, str]
+    ) -> list[str]:
+        """One file per assembly, since the packing differs between them."""
+        written: list[str] = []
+        multi = len(self._assemblies) > 1
+        for a in self._assemblies:
+            name = f"design_{a.name}.pdb" if multi else "design.pdb"
+            got = self._write_design(
+                self.run.path / "best" / name, chosen, a.name,
+                header=self._design_header(score, mutations, a.name),
+            )
+            if got is not None:
+                written.append(got.describe())
+                self.run.log(f"wrote best structure {got.describe()}")
+        return written
 
     # -- placing the partners ----------------------------------------------
 
@@ -743,8 +923,26 @@ class IPROLoop:
         start_score = self.goal.score(start_ctx)
 
         best_score = start_score
-        best_choice = dict(start_choice)
+        # Tracked by identity, not by rotamer index: with backbone perturbation
+        # the rotamer sets are rebuilt each iteration, so an index from an
+        # earlier iteration would point at a different rotamer (or none).
+        best_identities = {
+            (split_vpos(p)[1] or p): tables.rotamers[p][i].aa
+            for p, i in start_choice.items() if p in cb.sequence_positions
+        }
         best_ctx = start_ctx
+        # Written up front so a run that never improves on its starting point
+        # still leaves coordinates behind; replaced whenever a better design is
+        # found. Without this, a run where nothing beats the start produced a
+        # score and a sequence but no structure at all.
+        best_structures: list[str] = self._write_best_structures(
+            self._rotamers_for(tables, start_choice),
+            start_score,
+            {
+                p: aa for p, aa in best_identities.items()
+                if self._native.get(p) and aa != self._native[p]
+            },
+        )
         ensemble: list[dict] = []
 
         self.run.update_state(
@@ -774,9 +972,42 @@ class IPROLoop:
             n_done = it
             greedy = (it / max(spec.loop.iterations, 1)) <= spec.loop.greedy_fraction
 
+            # (2) perturb the backbone, then rebuild the rotamers and the
+            # energy tables on it. A rejected iteration must put the backbone
+            # back, or it random-walks regardless of the energy.
+            snapshot = None
+            pert = None
+            if self.mode != "fixed-backbone":
+                snapshot = (
+                    self._design_st, self._rotamer_cache, cb, tables,
+                    dict(self._native_v), rp, ordered,
+                )
+                try:
+                    candidate, pert = self._perturb_once(it)
+                    cb = self._rebuild_for_backbone(candidate)
+                    tables = cb.tables
+                    rp = self._plan_restraints_for(cb, tables)
+                    ordered = self._ordered_positions(tables, cb.sequence_positions)
+                except Exception as exc:
+                    (
+                        self._design_st, self._rotamer_cache, cb, tables,
+                        self._native_v, rp, ordered,
+                    ) = snapshot
+                    snapshot = None
+                    pert = None
+                    if "perturb_failed" not in self._once:
+                        self._once.add("perturb_failed")
+                        self.notes.append(
+                            f"a backbone perturbation could not be rebuilt "
+                            f"({type(exc).__name__}: {exc}); that iteration ran on "
+                            "the previous backbone"
+                        )
+
             # (1) choose a contiguous window of positions to re-decide; every
             # other position is pinned to its current identity, so an iteration
             # is a local move rather than a fresh global solve.
+            if snapshot is not None:
+                current_choice = self._rebase_choice(current_choice, tables)
             window = self._choose_window(ordered)
             pins = [
                 Constraint(
@@ -903,6 +1134,21 @@ class IPROLoop:
                 p: aa for p, aa in identities.items()
                 if self._native.get(p) and aa != self._native[p]
             }
+            # Structures are written before the record so the record can name
+            # them; appending first would leave the path out of iterations.jsonl.
+            structure_rel = ""
+            if ok and spec.loop.keep_structures:
+                multi = len(self._assemblies) > 1
+                for a in self._assemblies:
+                    stem = f"iter{it:04d}" + (f"_{a.name}" if multi else "")
+                    got = self._write_design(
+                        self.run.path / "structures" / f"{stem}.pdb",
+                        chosen, a.name,
+                        header=self._design_header(score, mutations, a.name),
+                    )
+                    if got is not None and not structure_rel:
+                        structure_rel = str(got.path.relative_to(self.run.path))
+
             rec = IterationRecord(
                 iteration=it,
                 score=score,
@@ -910,21 +1156,41 @@ class IPROLoop:
                 mutations=mutations,
                 components={k: float(v) for k, v in self.goal.components(ctx).items()},
                 sequence=self._sequence_string(identities),
-                reason=f"{reason}; redesigned {','.join(window)}{dock_note}",
+                reason=(
+                    f"{reason}; redesigned {','.join(window)}{dock_note}"
+                    + (f"; perturbed {pert.describe()}" if pert else "")
+                ),
                 seconds=time.time() - t0,
+                structure=structure_rel,
             )
             self.run.append_iteration(rec)
+
+            if not ok and snapshot is not None:
+                # Put the backbone, rotamers and tables back as they were.
+                (
+                    self._design_st, self._rotamer_cache, cb, tables,
+                    self._native_v, rp, ordered,
+                ) = snapshot
+                current_choice = self._rebase_choice(current_choice, tables)
 
             if ok:
                 accepted += 1
                 current_choice, current_score = dict(sol.choices), score
                 current_asm_energy = {k: v.total for k, v in per_asm.items()}
+
             if score < best_score:
-                best_score, best_choice, best_ctx = score, dict(sol.choices), ctx
+                best_score, best_ctx = score, ctx
+                best_identities = dict(identities)
                 self.run.update_state(
                     best_score=best_score,
                     best_mutations=mutations,
                     best_sequence=rec.sequence,
+                )
+                # Written now, while the coordinates that produced this score
+                # still exist: with backbone perturbation they are gone by the
+                # next iteration.
+                best_structures = self._write_best_structures(
+                    chosen, score, mutations
                 )
             ensemble.append({
                 "iteration": it, "score": score, "mutations": mutations,
@@ -945,10 +1211,7 @@ class IPROLoop:
         ensemble = ensemble[: spec.loop.ensemble_size]
         (self.run.path / "ensemble" / "ensemble.json").write_text(json.dumps(ensemble, indent=2))
 
-        best_identities = {
-            split_vpos(p)[1] or p: tables.rotamers[p][r].aa
-            for p, r in best_choice.items() if p in cb.sequence_positions
-        }
+
         best_mutations = {
             p: aa for p, aa in best_identities.items()
             if self._native.get(p) and aa != self._native[p]
@@ -965,9 +1228,14 @@ class IPROLoop:
             iterations=n_done,
             accepted=accepted,
             mutation_string=self._mutation_string(best_mutations),
+            structures=list(best_structures),
             ensemble=ensemble,
             notes=self.notes,
         )
+        structure_files = best_structures
+        if structure_files:
+            result.notes.append("designed coordinates: " + "; ".join(structure_files))
+
         (self.run.path / "best" / "design.json").write_text(json.dumps({
             "goal": self.goal.describe(),
             "goal_statement": self.spec.goal_statement,
@@ -980,6 +1248,7 @@ class IPROLoop:
             "mutation_string": self._mutation_string(best_mutations),
             "sequence": best_seq,
             "components": {k: float(v) for k, v in self.goal.components(best_ctx).items()},
+            "structures": structure_files,
             "notes": self.notes,
         }, indent=2))
 
@@ -1083,6 +1352,70 @@ class IPROLoop:
             return list(ordered)
         start = self.rng.randrange(0, len(ordered) - k + 1)
         return ordered[start : start + k]
+
+    def _rebase_choice(
+        self, choices: dict[str, int], tables: EnergyTables
+    ) -> dict[str, int]:
+        """Re-express an assignment against a rebuilt rotamer set.
+
+        Rotamer indices are not comparable across backbones: a rebuild can prune
+        differently, so index 3 may be a different residue or may not exist. The
+        identity is the part that carries over, so each position is mapped onto
+        its cheapest rotamer of the same identity.
+        """
+        out: dict[str, int] = {}
+        for p in tables.positions:
+            want = None
+            if p in choices and p in tables.rotamers:
+                old_list = tables.rotamers[p]
+                idx = choices[p]
+                if 0 <= idx < len(old_list):
+                    want = old_list[idx].aa
+            if want is None:
+                want = self._native_v.get(p) or None
+            candidates = [
+                i for i, r in enumerate(tables.rotamers[p]) if r.aa == want
+            ] or list(range(len(tables.rotamers[p])))
+            out[p] = min(
+                candidates, key=lambda i: tables.self_energy.get((p, i), 0.0)
+            )
+        return out
+
+    def _plan_restraints_for(self, cb: CombinedTables, tables: EnergyTables):
+        """Re-plan the restraint vetoes against rebuilt tables."""
+        spec = self.spec
+        if not spec.restraints:
+            return RestraintPlan()
+        if cb.n_assemblies > 1:
+            merged = RestraintPlan()
+            for a in self._assemblies:
+                sub = EnergyTables(
+                    positions=[split_vpos(v)[1] for v in cb.by_assembly[a.name]],
+                    rotamers={
+                        split_vpos(v)[1]: tables.rotamers[v]
+                        for v in cb.by_assembly[a.name]
+                    },
+                    self_energy={},
+                    pruned_per_position={
+                        split_vpos(v)[1]: tables.pruned_per_position.get(v, 0)
+                        for v in cb.by_assembly[a.name]
+                    },
+                )
+                one = plan_restraints(
+                    spec.restraints, sub, self._design_st, self._asm_partners[a.name]
+                )
+                merged.rotamer_vetoes |= {
+                    (vpos(a.name, p), i) for p, i in one.rotamer_vetoes
+                }
+                merged.pair_vetoes |= {
+                    (vpos(a.name, pi), ri, vpos(a.name, pj), rj)
+                    for pi, ri, pj, rj in one.pair_vetoes
+                }
+            return merged
+        return plan_restraints(
+            spec.restraints, tables, self._design_st,
+            self._asm_partners.get(self._assemblies[0].name, []),
+        )
 
     def _mutation_string(self, mutations: dict[str, str]) -> str:
         """Mutations as ``D115W`` strings, in position order."""

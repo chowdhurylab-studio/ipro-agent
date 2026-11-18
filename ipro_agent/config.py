@@ -540,6 +540,13 @@ class LoopSettings:
     #: Suite paper describes 1-3 contiguous residues; the whole design set is
     #: not re-chosen every iteration.
     design_per_iteration: tuple[int, int] = (1, 3)
+    #: Perturb the backbone each iteration. Off by default because it costs a
+    #: PyMOL rotamer re-harvest and a full energy-table rebuild per iteration,
+    #: and because a fixed-backbone search is a legitimate (cheaper) protocol.
+    #: Turning it on is what makes the run IPRO rather than a side-chain packer:
+    #: a 5-degree dihedral change moves atoms 0.2-2.6 A further down the chain,
+    #: which can open a pocket no rotamer choice could.
+    perturb_backbone: bool = False
     #: Length of the backbone segment perturbed each iteration. IPRO's source
     #: picks 1-5 consecutive residues; this is a separate choice from which
     #: positions are re-designed.

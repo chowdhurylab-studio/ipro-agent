@@ -342,6 +342,7 @@ def cmd_run(args) -> int:
             "sequence": res.best_sequence,
             "iterations": res.iterations,
             "accepted": res.accepted,
+            "structures": res.structures,
             "notes": res.notes,
         }, indent=2))
     else:

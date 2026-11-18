@@ -1406,6 +1406,244 @@ def test_redock_only_invalidates_self_energies():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Backbone perturbation
+# ---------------------------------------------------------------------------
+
+
+def test_perturbation_leaves_every_bond_length_unchanged():
+    """The decisive check. A rigid rotation about a bond axis cannot change any
+    bond length, so a wrong axis or a wrong set of moving atoms shows up here --
+    and nowhere else, since the result still looks like a protein.
+
+    Note the invariant is *unchanged from the input*, not *equal to ideal*:
+    1CRN is a 1.5 A crystal structure with an N-CA bond of 1.518 A at residue
+    37 before anything is touched.
+    """
+    import random as _random
+
+    from ipro_agent.perturb import (
+        backbone_bond_lengths, bonds_unchanged, perturb_backbone,
+    )
+    from ipro_agent.structure import Structure
+
+    for seed in range(8):
+        st = Structure.load(CRN)
+        before = backbone_bond_lengths(st, "A")
+        assert len(before) > 100, "expected a full chain of bonds to check"
+        perturb_backbone(st, "A", rng=_random.Random(seed))
+        assert not bonds_unchanged(before, backbone_bond_lengths(st, "A"))
+
+
+def test_perturbation_propagates_downstream_only():
+    """Rotating phi/psi at residue i must move i's side chain and everything
+    C-terminal, and nothing N-terminal."""
+    import random as _random
+
+    from ipro_agent.perturb import perturb_backbone
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    residues = list(st.residues("A"))
+    target = residues[20]
+    num = int(target.id[1])
+    before = {int(r.id[1]): np.array(st.coords(r)).mean(axis=0) for r in residues}
+    perturb_backbone(st, "A", segment=[target], rng=_random.Random(9))
+    after = {int(r.id[1]): np.array(st.coords(r)).mean(axis=0) for r in st.residues("A")}
+
+    upstream = [np.linalg.norm(after[k] - before[k]) for k in before if k < num]
+    downstream = [np.linalg.norm(after[k] - before[k]) for k in before if k > num]
+    assert max(upstream) < 1e-9, f"upstream moved: {max(upstream)}"
+    assert np.mean(downstream) > 1e-4, "downstream did not move"
+
+
+def test_perturbation_skips_proline_and_keeps_segments_consecutive():
+    """Proline's phi is locked by its ring, so perturbing it is meaningless;
+    and a segment spanning a numbering gap is not a local move."""
+    import random as _random
+
+    from ipro_agent.perturb import choose_segment
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    prolines = {
+        int(r.id[1]) for r in st.residues("A") if r.get_resname().strip() == "PRO"
+    }
+    assert prolines, "1CRN should contain prolines for this test to mean anything"
+
+    seen_lengths = set()
+    touched: set[int] = set()
+    for seed in range(200):
+        seg = choose_segment(st, "A", (1, 5), _random.Random(seed))
+        assert seg
+        nums = [int(r.id[1]) for r in seg]
+        assert nums == list(range(nums[0], nums[0] + len(nums))), nums
+        seen_lengths.add(len(seg))
+        touched |= set(nums)
+    assert not (touched & prolines), sorted(touched & prolines)
+    assert seen_lengths <= {1, 2, 3, 4, 5} and len(seen_lengths) > 1
+
+
+def test_perturbation_offsets_are_truncated_by_rejection_not_clipping():
+    """Clipping would pile probability mass onto the two bounds, which is a
+    different distribution from the Gaussian the paper specifies."""
+    import random as _random
+
+    from ipro_agent.perturb import truncated_gauss
+
+    rng = _random.Random(5)
+    vals = [truncated_gauss(1.5, 5.0, rng) for _ in range(20000)]
+    assert max(abs(v) for v in vals) <= 5.0
+    assert 1.3 < float(np.std(vals)) < 1.6, float(np.std(vals))
+    at_cap = sum(1 for v in vals if abs(abs(v) - 5.0) < 1e-9)
+    assert at_cap < 20, f"{at_cap} values sat exactly on the cap -- looks clipped"
+
+
+def test_perturbation_is_reproducible_from_a_seed():
+    import random as _random
+
+    from ipro_agent.perturb import perturb_backbone
+    from ipro_agent.structure import Structure
+
+    out = []
+    for _ in range(2):
+        st = Structure.load(CRN)
+        perturb_backbone(st, "A", rng=_random.Random(77))
+        out.append(np.array([a.coord for a in st.all_atoms()]))
+    assert np.abs(out[0] - out[1]).max() < 1e-12
+
+
+def test_mode_reflects_what_will_actually_run():
+    """Three modes, and the run must say which one it is in."""
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.loop import IPROLoop
+
+    def make(perturb: bool):
+        return DesignSpec.from_dict({
+            "goal": "stabilize", "goal_statement": "x",
+            "molecules": [{"name": "m", "path": str(CRN), "role": "design",
+                           "kind": "protein", "chains": ["A"]}],
+            "positions": ["A16"],
+            "loop": {"perturb_backbone": perturb},
+        })
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_mode_"))
+    try:
+        off = IPROLoop(make(False), tmp)
+        assert off.mode == "fixed-backbone"
+        assert any("backbone never moves" in n for n in off.notes)
+        on = IPROLoop(make(True), tmp)
+        # No relaxing backend is installed here, so this is the honest middle mode.
+        assert on.mode == ("full" if on.backend.can_relax else "backbone-mc")
+        if on.mode == "backbone-mc":
+            assert any("no gradient relaxation" in n for n in on.notes)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Structure output
+# ---------------------------------------------------------------------------
+
+
+def test_written_complex_has_the_design_and_its_partner():
+    """A design that exists only as a score is not usable; the file must carry
+    the chosen side chains and the partner at its current placement."""
+    from ipro_agent.output import write_complex
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_out_"))
+    try:
+        design = Structure.load(CRN)
+        # A partner that deliberately reuses chain A, to force a remap.
+        lig = tmp / "lig.pdb"
+        lig.write_text(
+            "HETATM    1  C1  LIG A 900       1.000   2.000   3.000"
+            "  1.00 20.00           C\nEND\n"
+        )
+        partner = Structure.load(lig)
+        out = write_complex(
+            tmp / "complex.pdb", design, {"L": partner},
+            header=["REMARK   1 TEST"],
+        )
+        assert out.atoms == len(design.all_atoms()) + 1
+        # The collision must have been resolved, not merged: the design keeps
+        # chain A and the partner is moved elsewhere.
+        assert out.chain_map[out.DESIGN]["A"] == "A"
+        assert out.chain_map["L"]["A"] != "A", out.chain_map
+        assert ("L", ("A", out.chain_map["L"]["A"])) in [
+            (m, v) for m, v in out.renamed().items()
+        ]
+
+        back = Structure.load(out.path)
+        assert len(back.chain_ids()) == 2, back.chain_ids()
+        assert back.sequence("A") == design.sequence("A")
+        het = [r for ch in back.chain_ids() for r in back.hetero_residues(ch)]
+        assert len(het) == 1 and het[0].get_resname().strip() == "LIG"
+        assert out.path.read_text().startswith("REMARK   1 TEST")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_written_complex_applies_the_partner_pose():
+    """The file must show where a redock put the partner, not where it started."""
+    import numpy as _np
+
+    from ipro_agent.docking import Pose
+    from ipro_agent.output import write_complex
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_pose_"))
+    try:
+        design = Structure.load(CRN)
+        lig = tmp / "lig.pdb"
+        lig.write_text(
+            "HETATM    1  C1  LIG X 900       0.000   0.000   0.000"
+            "  1.00 20.00           C\nEND\n"
+        )
+        partner = Structure.load(lig)
+        pose = Pose(translation=_np.array([5.0, 0.0, 0.0]))
+        out = write_complex(
+            tmp / "c.pdb", design, {"L": partner}, poses={"L": pose}
+        )
+        back = Structure.load(out.path)
+        het = [r for ch in back.chain_ids() for r in back.hetero_residues(ch)][0]
+        moved = _np.array(back.coords(het))[0]
+        assert abs(moved[0] - 5.0) < 1e-3, moved
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_writes_designed_coordinates_that_contain_the_mutation():
+    """End to end: the run must leave a PDB carrying the design it reported."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.loop import run_design
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_e2e_"))
+    try:
+        spec = DesignSpec.from_dict({
+            "name": "e2e", "goal": "stabilize", "goal_statement": "x",
+            "molecules": [{"name": "m", "path": str(CRN), "role": "design",
+                           "kind": "protein", "chains": ["A"]}],
+            "positions": [{"position": "A16", "allowed": ["TRP"]}],
+            "goal_options": {"max_self_energy": 1e9},
+            "loop": {"iterations": 2, "random_seed": 1},
+        })
+        res = run_design(spec, tmp)
+        assert res.structures, "no coordinates were written"
+        pdb = tmp / "best" / "design.pdb"
+        assert pdb.exists(), sorted(p.name for p in (tmp / "best").iterdir())
+        back = Structure.load(pdb)
+        assert back.find("A", 16).get_resname().strip() == "TRP"
+        assert back.sequence("A")[15] == "W"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

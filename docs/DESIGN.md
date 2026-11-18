@@ -34,6 +34,8 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Backbone perturbation (1-5 consecutive residues, phi/psi ~ N(0, 1.5 deg) truncated to +/-5 deg) | `perturb.py`, `loop.perturb_backbone` | IPRO Suite step 2 and the released source's `random.gauss(0, 1.5)` rejection-truncated to +/-5 deg; the 2006 paper reports sigma 1.65 deg |
+| Designed coordinates written out (best, and per iteration) | `output.py` | Deliverable in its own right: a design that exists only as a sequence and a score cannot be inspected or taken to the bench |
 | Re-placing partner molecules each Nth iteration | `docking.py` (local MC), `dock.py` (Vina), chosen by `backends.dock` | IPRO Suite step 3: "a local, rigid-body redocking of the TMs ... uses the same energy functions as the rotamer selection step", 500 moves, sigma 0.2 A / 2.0 deg, annealed 3640 K to 2190 K |
 | Multiple binding assemblies (one sequence, per-assembly packing, conjunctive acceptance) | `assemblies.py`, `config.Assembly` | IPRO Suite: "rotamers are selected sequentially for each BA whereas residue identity remains the same for all BAs", and "all BAs must pass the selection criteria" |
 | Atom-position restraints (fix, tether, distance, dihedral) | `restraints.py`, `Constraint` vetoes in `milp.py` | IPRO Suite: four kinds of restraint "rigorously enforced throughout all functions"; the ±0.2 Å catalytic-distance form is from ACS Catal 2017 |
@@ -276,6 +278,67 @@ Vina pose is only applied when its atoms correspond one-to-one with the input
 ligand's (otherwise the transform cannot be fitted, and the run says so rather
 than moving the ligand somewhere nobody chose).
 
+### 1f. Three modes, and why there are three rather than two
+
+`loop.perturb_backbone` decides whether the backbone moves. Combined with
+whether the energy backend can relax, that gives three modes, and the run
+reports which one it was in (`state.json`, the run summary, and a REMARK in
+every structure it writes):
+
+| mode | backbone | relaxation | needs |
+|---|---|---|---|
+| `fixed-backbone` | never moves | — | nothing |
+| `backbone-mc` | perturbed every iteration, strained moves rejected | **none** | nothing |
+| `full` | perturbed every iteration | restrained minimization | PyRosetta |
+
+An earlier version of this document claimed perturbation was skipped because
+"perturbing a backbone without minimizing afterwards only manufactures
+clashes". That is half true and was the wrong conclusion: a perturbation
+followed by an optimal repack and a Metropolis test *is* a coherent backbone
+Monte Carlo -- strained moves simply get rejected -- and it is far closer to
+IPRO than never moving the backbone at all. It is still not the published
+protocol, which minimizes after perturbing, so it is named separately rather
+than called `full`.
+
+**What perturbation costs.** Moving the backbone invalidates the rotamers
+themselves, since a rotamer's coordinates are built on it -- so both the self
+*and* the pair energies have to be rebuilt, unlike a redock which only
+invalidates the self energies. Each perturbed iteration therefore pays one
+PyMOL rotamer re-harvest plus a full table rebuild: measured at about
+**1.3 s/iteration** on a 46-residue chain with two design positions. That is
+why it is opt-in.
+
+**A rejected perturbation is undone.** Otherwise the backbone would random-walk
+regardless of the energy, which would make the Metropolis test meaningless. The
+loop snapshots the structure, rotamers, tables and restraint plan before
+perturbing and restores them on rejection. Verified end to end: in an 8-iteration
+run, iteration 5 was rejected at 0.72 A CA-RMSD from the input and iteration 6
+started from 0.13 A, i.e. from the last *accepted* state rather than the
+rejected one.
+
+**Rotamer indices are not comparable across backbones.** A rebuild can prune
+differently, so an index from an earlier iteration may name a different residue
+or none at all. The best design is therefore tracked by *identity*, its
+structure is written at the moment it is found, and a carried-over assignment is
+re-expressed against the rebuilt rotamer set by identity
+(`IPROLoop._rebase_choice`).
+
+### 1g. What the run leaves on disk
+
+`best/design.pdb` holds the complex that produced the reported score: the design
+molecule with the **chosen rotamer** at each design position (not merely the
+right residue type, which would not reproduce the energy), plus every partner at
+its current placement. With several assemblies there is one file per assembly,
+since the packing differs. `loop.keep_structures: true` additionally writes
+every accepted iteration to `structures/iter####.pdb`, and each iteration record
+in `iterations.jsonl` names its file.
+
+Each file carries REMARK provenance -- run, goal, mode, backend, score,
+mutations -- so a stray PDB can still be traced back. Chain ids are kept
+distinct: a partner that reuses the design molecule's chain id is remapped and
+the mapping is reported, because merging them would describe a different
+molecule than the one scored.
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -345,7 +408,6 @@ specified, and this table is the record of what that changes.
 | Capability | Status | Why, and what it would take |
 |---|---|---|
 | **Insertions and deletions** | **Not implemented.** A spec containing `indels:` raises `NotImplementedError` with a pointer to the alternative. | Changing chain length needs loop closure after the edit. Protein-InDelMaker does this with PyRosetta's GeneralizedKIC over a 6-residue window followed by Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. No loop-closure backend is available here. `config.IndelSpec` models the input so the schema is ready. Workaround: build the variant with Protein-InDelMaker, then design on that structure. |
-| **Backbone perturbation and relaxation** | Only in `mode: full`, which needs PyRosetta. Otherwise the loop runs `fixed-backbone` and says so. | Perturbing a backbone without minimizing afterwards only manufactures clashes, so the step is skipped rather than faked. |
 | **Pore / channel geometry measurement** | Not implemented. `geometry["min_pore_radius"]` is never populated, so `reshape_channel`'s radius term is inert and PoreDesigner's hard bottleneck filter cannot be applied. The goal reports this. | PoreDesigner measured the bottleneck by fitting ellipses to ~16 slices through the constriction, outside the optimization loop. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |

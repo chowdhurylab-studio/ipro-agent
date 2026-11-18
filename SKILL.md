@@ -218,6 +218,26 @@ A restraint the *input structure* already violates is reported as
 it is the structure's problem, not the design's. Pass `strict: true` on the
 restraint to make that a hard failure instead.
 
+### 2c. Decide whether the backbone moves
+
+Off by default, because it costs about **1.3 s/iteration** (a PyMOL rotamer
+re-harvest plus a full energy-table rebuild — moving the backbone invalidates
+the rotamers themselves, so unlike a redock the pair energies go too).
+
+```yaml
+loop:
+  perturb_backbone: true
+```
+
+Turn it on when the design needs the backbone to give: a 5° dihedral change
+moves atoms 0.2–2.6 Å further down the chain, which can open a pocket that no
+rotamer choice could. Leave it off for a quick screen of which residues are
+worth trying, or when the backbone is known to be right.
+
+A rejected perturbation is undone, so the backbone does not drift; only accepted
+moves survive. Each iteration's record names the segment it perturbed and the
+φ/ψ offsets, so you can see what the search actually tried.
+
 ### 3. Validate before spending time
 
 ```bash
@@ -329,6 +349,7 @@ The run directory has a fixed layout:
 
 | Path | What it holds |
 |---|---|
+| `best/design.pdb` | **the designed coordinates** — the complex that produced the score, with the chosen rotamers and the partners at their current placement. One file per assembly if there are several. |
 | `best/design.json` | the design: identities, mutations as `D115W`, full sequence, score breakdown |
 | `ensemble/ensemble.json` | the best N designs, not just the single best |
 | `state.json` | status, best score, mode |
@@ -348,10 +369,13 @@ The loop reports `mode` in `state.json` and in the run summary.
 
 - **`full`** — all steps, including backbone perturbation and relaxation. Needs
   PyRosetta.
-- **`fixed-backbone`** — the backbone never moves. The search is over sequence
-  and side-chain packing only, driven by the MILP and the integer cuts. This is
-  a real and widely used protocol but it is **not** the published IPRO
-  protocol. Say so when reporting.
+- **`backbone-mc`** — the backbone *is* perturbed each iteration (1–5
+  consecutive residues, φ/ψ by N(0, 1.5°) truncated to ±5°) and strained moves
+  are rejected, but there is no gradient relaxation afterwards. Much closer to
+  IPRO than a fixed backbone; still not the published protocol.
+- **`fixed-backbone`** — the backbone never moves. Sequence and side-chain
+  packing only. A real and much cheaper protocol, but **not** IPRO's. This is
+  the default; set `loop.perturb_backbone: true` to move the backbone.
 
 Two traps specific to the fallback stack:
 
@@ -381,6 +405,7 @@ Before reporting a design, confirm:
 - [ ] if the design must work in more than one complex, assemblies are declared (otherwise every partner is scored in one combined complex, which is a different problem)
 - [ ] any geometry that must survive the redesign is stated as a restraint (a catalytic contact, a metal site, a disulfide) — the optimizer will not preserve it on its own
 - [ ] no restraint came back `RESTRAINT NOT ENFORCED` or `NATIVE VIOLATION` unreported
+- [ ] the user is told where the coordinates are (`best/design.pdb`), not just the sequence
 - [ ] every entry in `notes` is passed on to the user
 
 ## Common problems
