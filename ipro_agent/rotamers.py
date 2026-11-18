@@ -27,13 +27,17 @@ import numpy as np
 from .config import DesignPosition
 from .energy.base import AtomSet
 from .milp import Rotamer
-from .structure import Structure
+from .structure import Structure, is_hydrogen
 
 log = logging.getLogger(__name__)
 
 HARVEST_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "harvest_rotamers.py"
 
-BACKBONE = {"N", "CA", "C", "O", "OXT"}
+#: Backbone atom names. ``OT1``/``OT2``/``OT`` are the CHARMM/AMBER spellings of
+#: the C-terminal carboxylate that ``OXT`` covers in PDB files: without them, a
+#: C-terminal design position in a file using those names had its carbonyl O and
+#: both terminal oxygens treated as side chain and dropped from the template.
+BACKBONE = {"N", "CA", "C", "O", "OXT", "OT1", "OT2", "OT"}
 
 
 class RotamerError(RuntimeError):
@@ -139,18 +143,32 @@ def harvest(
     tmp.mkdir(parents=True, exist_ok=True)
     job_path, out_path = tmp / "rotamer_jobs.json", tmp / "rotamers.json"
     job_path.write_text(json.dumps(job))
+    # The loop passes the same workdir every iteration, so a previous
+    # iteration's rotamers.json is sitting right there. Reading it when this
+    # harvest fails returned the rotamers of the PREVIOUS backbone: measured
+    # with the backbone translated 10 A and PyMOL exiting 1, harvest returned
+    # side chains 10.0 A from where they belonged, reported no errors, and a
+    # hard-clash conformer (+453.111 against the real template) came back as
+    # the best-scoring one at -1.036.
+    out_path.unlink(missing_ok=True)
 
     # -I isolates the interpreter: the harvest script must not pick up modules
     # from the current directory (the input PDB's directory is untrusted).
     cmd = [py, "-I", str(HARVEST_SCRIPT), str(job_path), str(out_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    if not out_path.exists():
+    if proc.returncode != 0 or not out_path.exists():
         raise RotamerError(
-            f"rotamer harvest produced no output (rc={proc.returncode}).\n"
+            f"rotamer harvest failed (rc={proc.returncode}).\n"
             f"command: {' '.join(cmd)}\n"
             f"stderr tail: {(proc.stderr or '')[-800:]}"
         )
     data = json.loads(out_path.read_text())
+    described = str(data.get("pdb", ""))
+    if described and described != job["pdb"]:
+        raise RotamerError(
+            f"rotamer harvest describes {described!r} but was asked for "
+            f"{job['pdb']!r}; refusing to use rotamers built on another structure"
+        )
 
     # A rotamer's atoms must carry the residue key of the position they sit at,
     # NOT a synthetic key. The design position's own backbone (N, CA, C, O) is
@@ -193,6 +211,21 @@ def harvest(
         flat.sort(key=lambda r: (r.aa, r.state))
         rotamers[pos_label] = flat
 
+    # A requested position that came back missing entirely is a silently
+    # smaller design problem. The loop's own check scans only the keys that
+    # are present (`[p for p, v in rots.items() if not v]`), so a position
+    # PyMOL could not locate -- an incomplete crystal structure missing that
+    # residue's CA is enough -- vanished without a word: measured, 2 positions
+    # requested, 1 designed, nothing raised.
+    missing = [p.label for p in positions if p.label not in rotamers]
+    if missing:
+        raise RotamerError(
+            f"rotamer harvest returned nothing for requested position(s) {missing}. "
+            f"It returned {sorted(rotamers)}. Check that those residues exist and "
+            f"are complete in the structure; PyMOL reported: "
+            f"{json.dumps(data.get('errors', {}))[:400]}"
+        )
+
     errors = data.get("errors", {})
     if errors:
         log.warning("PyMOL could not build some rotamers: %s", errors)
@@ -218,40 +251,60 @@ def build_template(
 
     Design positions contribute only their backbone: their side chains are
     exactly what is being chosen, so including them would double count.
+
+    The **first** structure is the design molecule; every later one has its
+    residue keys prefixed with its index. A residue key is what the energy
+    backend's same-residue exclusion compares, and a partner reusing chain id
+    ``A`` -- the default for most single-chain PDB files -- collided with the
+    design molecule's own residues: measured, 22 distinct residues collapsed to
+    11, the partner's residue 115 lost its side chain to the design filter, and
+    a ligand numbered like a design position became invisible to the rotamer it
+    sat on top of (+84.699 kcal/mol scored as -6.282). Rotamer atoms carry the
+    bare ``(chain, number, icode)`` key of their design position, so the design
+    molecule must keep the unprefixed form.
     """
     design = set(design_positions)
     names: list[str] = []
     coords: list[np.ndarray] = []
     resnames: list[str] = []
     reskeys: list[tuple] = []
+    elements: list[str] = []
 
-    for st in structures:
+    def take(res, ref, mol: int, drop_sidechain: bool) -> None:
+        for at in res:
+            if is_hydrogen(at):
+                continue
+            nm = at.get_name().strip()
+            if drop_sidechain and nm not in BACKBONE:
+                continue
+            names.append(nm)
+            coords.append(at.coord)
+            resnames.append(res.get_resname().strip())
+            reskeys.append(ref.key if mol == 0 else (mol, *ref.key))
+            elements.append((at.element or "").strip().upper())
+
+    for mol, st in enumerate(structures):
         for res in st.residues():
             ref = st.ref(res)
-            is_design = ref.label in design
-            for at in res:
-                if at.element == "H":
-                    continue
-                if is_design and at.get_name().strip() not in BACKBONE:
-                    continue
-                names.append(at.get_name().strip())
-                coords.append(at.coord)
-                resnames.append(res.get_resname().strip())
-                reskeys.append(ref.key)
+            take(res, ref, mol, ref.label in design)
         if include_hetero:
             for res in st.hetero_residues():
                 ref = st.ref(res)
-                for at in res:
-                    if at.element == "H":
-                        continue
-                    names.append(at.get_name().strip())
-                    coords.append(at.coord)
-                    resnames.append(res.get_resname().strip())
-                    reskeys.append(ref.key)
+                # A design position can be on a HETATM-flagged residue -- MSE
+                # and every other modified residue is one. Without this test
+                # such a position kept its full native side chain in the fixed
+                # template, so its own rotamers were fine (matching key, so the
+                # exclusion fired) but its neighbours were scored against a
+                # side chain that was supposed to have been removed: measured on
+                # 2omf_A, TRP at A262 moved +78 to +284 kcal/mol depending on
+                # the conformer and the chosen rotamer flipped from state 6 to
+                # state 1.
+                take(res, ref, mol, ref.label in design)
 
     return AtomSet(
         names=names,
         coords=np.array(coords) if coords else np.zeros((0, 3)),
         resnames=resnames,
         reskeys=reskeys,
+        elements=elements if all(elements) else [],
     )

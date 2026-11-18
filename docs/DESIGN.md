@@ -117,7 +117,7 @@ accepts:
 | how to run docking | `backends.dock`, and the separate `dock` command |
 | how to repack rotamers | implicit (the MILP is always used) |
 | how to use the force field | `backends.energy` |
-| how to use implicit solvation | **not exposed** — the built-in model's solvation treatment is fixed |
+| how to use implicit solvation | **not modelled at all** by the built-in energy — it has no desolvation term (see §4). PyRosetta's score function brings one. |
 | the BAs | **not modelled** (single assembly only) |
 | whether to share Metropolis-retained results between processors | **not applicable** (single process) |
 | how to do ensemble structure refinements | partial — `loop.ensemble_size` keeps an ensemble but does not refine it |
@@ -360,8 +360,9 @@ barrel's axis is *not* its largest-variance direction, so guessing from the
 protein fails outright: on OmpF the whole-protein principal axis measures the
 eyelet at **1.4 A**. The default instead fits a plane through the **design
 positions**, which line the constriction, and takes its normal. On 2OMF chain A
-the 25 published positions give singular values (37.9, 31.6, 16.8) and an eyelet
-of **8.1 A**, against the published 11 x 7 A — the right ballpark for a circle
+the 25 published positions give an eyelet of **6.24 A** (re-measured
+2026-11-18; an earlier version of this section recorded 8.1 A, which does not
+reproduce), against the published 11 x 7 A — the right ballpark for a circle
 bounded by a 7 A minor axis, from an independent reimplementation.
 `goal_options.pore_axis: ["A18:CA", "A119:CA"]` overrides it with two atoms
 spanning the channel, and the run warns when the lining residues are too far
@@ -377,13 +378,23 @@ entirely plausible. The centre is now hard-constrained to
 what makes the question "how wide is the lumen" rather than "how far is the
 nearest atom". There is a regression test.
 
-**A geometric objective only bites if the design positions line the
-bottleneck.** Measured on the OmpF example: with the 4-position smoke spec the
-bottleneck is 5.69 A for *every* candidate and the score is identically 0.716,
-because residues outside the design set control the constriction. With all 25
-positions it responds — 5.65 vs 6.41 A between candidates, and the objective
-improved from 1.102 to 0.678. Worth checking before concluding a run failed to
-optimize.
+**A geometric objective only bites if the design positions ring the lumen** —
+and when they do not, the number it reports is not a pore measurement at all.
+Re-measured 2026-11-18 (the figures in earlier versions of this section were not
+reproducible; these are from `ipro-agent score` on the shipped specs):
+
+| spec | design positions | axis clearance | bottleneck | radius score |
+|---|---|---|---|---|
+| `spec_full.yaml` | 25, ringing the constriction | 1.30 A | **6.24 A** | 1.257 |
+| `spec_smoke.yaml` | 4, all on one wall | **0.30 A** | 1.53 A | 1.528 |
+
+"Axis clearance" is how far the fitted axis origin sits from the nearest van der
+Waals surface. A water needs 1.4 A. The smoke spec's four positions put that
+origin **inside the wall**, so its "1.53 A bottleneck" is the sliver beside the
+wall — and it silently *passes* the published sub-4 A filter. §7d records this as
+a confirmed defect left unfixed, with the attempted fix and why it was reverted.
+Give `goal_options.pore_axis` explicitly whenever the design positions do not
+surround the channel.
 
 **Cost.** 127 ms per measurement over an 8 A constriction window on a
 2627-atom structure (555 ms over the whole barrel), and only goals that declare
@@ -466,7 +477,7 @@ stated.
 | `ensemble_size` | 10 | source | |
 | `greedy_fraction` | 0.10 | source | Annealing disabled for the first 10% of iterations. |
 | `hard_reject_kcal` / `_fraction` | 40 / 0.05 | source | |
-| repulsion cap | 10 kcal/mol per atom pair | **this repo's choice** | The original clamps *objective coefficients* at 10000 kcal/mol. Same purpose: keep rotamer clashes from dominating the program. |
+| repulsion cap | 10 kcal/mol per atom pair, **both signs** | **this repo's choice** | The original clamps *objective coefficients* at 10000 kcal/mol. Same purpose: keep rotamer clashes from dominating the program. This was false until 2026-11-18: the bound applied to the Lennard-Jones term alone, while the Coulomb term ran unbounded as 1/r² down to the 0.3 Å clamp, so a buried counter-charge reached −451 kcal/mol for a single pair and was the most favourable thing the function could report (§7d #1). The **whole** pair term is now bounded to ±10. |
 | LJ parameters | Amber parm94/99, element level | Cornell et al., *JACS* **117**:5179 (1995) | An approximation: per-element rather than per-atom-type. |
 | reference energies | **none supplied** | — | A Rosetta-style correction, not an IPRO one: see the correction note in §4. No default is invented. |
 
@@ -485,7 +496,7 @@ distributed with either release. Every substitution below is deliberate.
 | Backbone relaxation | CHARMM ABNR, ≤4000–5000 steps, dihedral restraints | PyRosetta FastRelax | Different minimizer; without PyRosetta there is no relaxation at all (see §4). |
 | Rotamer library | backbone-dependent Dunbrack library, external, **not shipped with either release** | PyMOL's mutagenesis wizard library | Different rotamer sets, hence different optima. PyMOL's is not backbone-dependent in the same sense. |
 | Mutagenesis | in-house, via CHARMM | PyMOL mutagenesis wizard | — |
-| Docking | **in-house Monte-Carlo** (`docking.out`), 500 sub-moves | AutoDock Vina | Not expected to give identical poses. Vina was chosen because it is open and maintained; IPRO never used it. |
+| Docking | **in-house Monte-Carlo** (`docking.out`), 500 sub-moves | AutoDock Vina | Not expected to give identical poses. Vina was chosen because it is open and maintained; IPRO never used it. Vina 1.2.7 + Open Babel 3.2.1 were installed on 2026-11-18 and this path **executed for the first time**; it did not work until the PDB → PDBQT conversion was wired in (§7e). IPRO's own local rigid-body Monte Carlo is also implemented, as `backends.dock: builtin`, and is the closer match to the papers. |
 | MILP solver | CPLEX via GAMS | CPLEX / Gurobi / CBC / HiGHS / GLPK, or an LP file | Same formulation, same optimum. |
 | Language | Python 2 | Python ≥ 3.10 | — |
 
@@ -503,6 +514,7 @@ specified, and this table is the record of what that changes.
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | **Correction to an earlier claim in this document.** Two previous versions said IPRO carries a hardcoded 20-entry amino-acid reference-energy table and that its absence here was the tool's biggest practical limitation. Reading the released source directly, that is wrong on both counts. `SHARING.load_reference_Energies` loads *the best result so far* for the Metropolis comparison — run bookkeeping, not a residue table. The 20-entry tables in `STANDARDS.py` are naming and classification maps. What IPRO actually adds per rotamer is `-ln(p)` from `.prob` files in its rotamer library (`ROTAMERS.py:407`), a rotamer-probability penalty that is **0 for GLY and ALA** and therefore pushes *toward* small residues. So no per-residue-type unfolded-state term exists in IPRO at all. The `reference_energies` hook here is a **Rosetta-style** correction (ref2015 has a `ref` term), which the PyRosetta backend brings for free. The packing bias toward small residues is real, but it bites hardest when the objective is the packing itself (`stabilize`); IPRO optimizes an interaction energy with a target, where it bites far less. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
+| **Desolvation** | **Absent from the built-in energy.** | Correction to an earlier claim in this document, which described the built-in model as having a "solvation treatment" and mapped the paper's 9 Å solvation cutoff onto its 12 Å one. There is no such term: the built-in function is LJ + a bounded pair term + formal-charge Coulomb with a distance-dependent dielectric + a distance-only H-bond well, and nothing else. A buried polar or charged group therefore pays **no penalty for being buried**, which is the largest single omission relative to the CHARMM + Lazaridis–Karplus energy IPRO used, and it compounds the charge bookkeeping noted in §5. PyRosetta's ref2015 includes solvation — but only reaches the design through `exact_pairs=True`, which raises, so in practice the pair tables never have it (§7e). |
 
 ---
 
@@ -523,6 +535,29 @@ Taken from the papers themselves, and worth repeating to anyone reading a score:
 - ACS Catal 2017 explicitly **does not model the transition state**, using
   catalytic-distance restraints to *preserve* rather than boost activity.
   Boosting catalysis is the least trustworthy of the goals here.
+
+Three limits of the **built-in screening energy** specifically, measured during
+the third review round (§7d) and left as they are because each is a modelling
+choice rather than a defect — but each changes how a number should be read:
+
+- **No desolvation term at all** (§4). A buried charge or polar group pays
+  nothing for being buried. With no such penalty, charged residues at buried
+  positions will look better than they are.
+- **Formal charges are bookkeeping, not chemistry.** LYS keeps its whole +1 on
+  NZ while ARG's +1 is split over three nitrogens, so two chemically equivalent
+  salt bridges differ about sevenfold: one carboxylate oxygen against LYS NZ at
+  2.80 Å scores **−4.087**, against ARG NH1 at the same distance **−0.557**, and
+  whole side chains at better geometry still favour LYS (−6.174 vs −2.972). The
+  split is defensible (guanidinium charge really is delocalized) and so is
+  LYS's, but **the MILP will prefer LYS at any salt-bridge position** for
+  reasons that are partly an artefact of this. HIS is left neutral throughout.
+- **The 12 Å cutoff is a hard truncation, with no switching function.** A
+  charged pair crossing it steps by 0.29 kcal/mol (ASP OD1 ··· LYS NZ:
+  −0.288525 at 11.999 Å, 0.000000 at 12.001 Å) — about a fifth of the whole
+  H-bond weight. The cutoff itself is the paper's (Biophys J 2006); the
+  discontinuity matters most to the built-in docking backend, whose 500-move
+  Monte Carlo is scored with this same function and so has steps in its
+  landscape.
 
 ---
 
@@ -568,8 +603,14 @@ free source still unread.
 No upstream IPRO release carries a `LICENSE` file; the Maranas group's pages
 describe the suite as freely available to academic users. **No upstream code is
 reproduced in this repo** — the implementation was written from the published
-formulations, which is the defensible route given that licence ambiguity. This
-repo has no licence chosen yet; add one before sharing it.
+formulations, which is the defensible route given that licence ambiguity.
+
+**This repo is MIT licensed** (`LICENSE`, chosen 2026-11-18). The licence file
+states its own scope explicitly, because three things in this tree are *not*
+covered by it: the papers under `refs/` (third-party copyright, retained for
+provenance checking only), the methods themselves (cite the papers above, not
+this repo), and the optional dependencies (PyMOL, AutoDock Vina, Open Babel,
+PyRosetta, MILP solvers), each separately licensed and separately installed.
 
 ---
 
@@ -589,7 +630,7 @@ and because anyone comparing results from an earlier checkout needs to know.
 | 3 | `min_class` / `require` naming an identity no rotamer has were emitted only as an LP comment | The solver returned a design that violated the stated constraint, proven optimal. Reachable from `reshape_channel`'s automatic W/F/Y/M constraint. Now raises `Infeasible`. |
 | 4 | Any `milp_solver` name other than `pulp`/`binary`/`greedy` fell through to the heuristic | Every documented choice (`cbc`, `glpk`, `cplex`, `gurobi`, `highs`) and every typo silently ran the heuristic. Now the name is honoured or an error is raised. |
 | 5 | The heuristic had no repair branch for `max_class` or `max_energy` | It rejected every move and the loop reported a false "design space exhausted". |
-| 6 | The H-bond well applied to every N/O–N/O pair | Two ARG NH1 at 3.4 Å scored **−0.83 (attractive)** instead of +0.67 — a sign flip on like charges — and a salt bridge was rewarded twice for one contact. The term is now restricted to pairs where neither atom carries a formal charge. |
+| 6 | The H-bond well applied to every N/O–N/O pair | Two ARG NH1 at 3.4 Å scored **−0.83 (attractive)** instead of +0.67 — a sign flip on like charges — and a salt bridge was rewarded twice for one contact. The term is now restricted to pairs where **at least one atom is neutral** (`qq == 0`), which excludes both like-charged and oppositely-charged pairs and so fixes both symptoms. *This row said "neither atom carries a formal charge" until 2026-11-18, which is not what the code does and not what it should do*: a charged carboxylate acceptor against a neutral amide donor is a real hydrogen bond, and excluding it would cost 1.5 kcal/mol per charged–neutral polar contact. The code was right and the description was wrong (§7d). The well is additionally excluded between backbone atoms of sequentially bonded residues, whose separation the peptide geometry fixes (§7d #4). |
 | 7 | `max_energy`'s cap went through `int()` | A −12.5 kcal/mol cap became −12, and −0.5 became 0. |
 | 8 | `proven_optimal` accepted any status containing "optimal" | GLPK's `INTEGER NON-OPTIMAL` read as proven. |
 | 9 | Self energies were keyed by `(position, aa, state)` | A library with a duplicated `(aa, state)` collapsed two rotamers onto one energy. |
@@ -670,3 +711,151 @@ requested, left `A-1` as glycine with only backbone atoms, and raised nothing.
 It now reports `G-1S G0W`, with SER's OG and TRP's full indole built.
 
 Each of the fifteen has a regression test. The suite is **94 tests**.
+
+### 7d. Third review round: the five modules neither earlier review reached
+
+The first two reviews covered the MILP and the LP text (§7), then the loop's
+state handling, the geometry builders and the file writers (§7b). Five further
+independent reviews were run in parallel over everything left: `energy/*.py`,
+`goals.py`, `config.py`, `structure.py`, `rotamers.py`, `__main__.py` and
+`scripts/*.py`. Each was told to *execute* rather than read, and to report a
+measurement per finding. **Thirty-one more defects were confirmed**, all in the
+same family: every one ran clean and returned a plausible wrong answer.
+
+The suite is now **135 tests** (94 before), one per fix.
+
+#### The energy function (`energy/base.py`, `energy/builtin.py`)
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | The per-pair cap applied to the **LJ term only**; the Coulomb term runs as 1/r² down to the 0.3 Å clamp with no bound | So the most *attractive* value the function could return was a hard clash between opposite charges. ASP OD1 ··· LYS NZ: **−3.577** at a 3.50 Å salt bridge, **−31.508** at 1.00 Å, **−451.200** at 0.30 Å. A rotamer burying LYS NZ inside a template oxygen scored **−71.957** against the native alanine's −1.391 and came back from the MILP as the **proven-optimal** design. Like charges ran away identically (+932.399 for one pair at 0.30 Å), past the `max_self_energy` and `hard_reject_kcal` thresholds that are calibrated against this bound. The **whole pair term** is now bounded to ±`max_repulsion`, which is what §2 always claimed. Pairs closer than ~1.8 Å are the only ones affected; a real salt bridge is untouched (−3.577, unchanged). |
+| 2 | Covalent **1-2 and 1-3 pairs across the peptide bond** were scored as non-bonded | The same-residue exclusion cannot see a bond that spans two residues. On `2omf_A`, `internal()` reported **+11132.191 kcal/mol**: +3390.000 from the 339 peptide bonds (every one pinned at the repulsion cap) and +10390.954 from the 1048 1-3 pairs, against a genuine non-bonded sum of −1070.880 — 108% of the LJ sum was covalent geometry. It also steered the search: **5 of 25** default backbone perturbations were hard-rejected on chain connectivity, which a perturbation cannot change. Now −1949.303, i.e. a favourable packing energy for a crystal structure. |
+| 3 | `AtomSet.elements` took the first alphabetic character of the atom name, so **no two-letter element was reachable** | `LJ`'s own `CL`/`BR`/`SE` entries were dead code. A backbone O 2.40 Å from an **iron** scored +5.8272 using *fluorine's* parameters; Cl and Ca were typed as carbon; Na was typed as nitrogen and so handed out −1.5 kcal/mol hydrogen bonds. Metalloproteins and cofactor sites were scored on fabricated parameters. `AtomSet` now carries an `elements` list, every structure-derived set passes the PDB element column, and the name-only fallback resolves ions by residue name (with MSE's SE kept as selenium). |
+| 4 | The H-bond well fired on **sequential backbone** N/O pairs | Their separation is fixed by the peptide geometry, so it cannot be a hydrogen bond. On `2omf_A` this paid −1.5 kcal/mol to each of **339 N(i)···N(i+1)** pairs — one per peptide bond, two amide nitrogens that cannot bond to each other — and 98 O(i)···O(i+1) pairs: **−598.407** in all. A side chain reaching across a peptide bond is a real H-bond and is left alone. |
+| 5 | Only `names` was length-checked | A short `resnames` list silently zeroed the trailing atoms' formal charges: a measured −7.2102 kcal/mol carboxylate/ammonium interaction came out **+5.6009**. All four per-atom lists are now checked. |
+
+#### The objective (`goals.py`)
+
+| # | Defect | Effect |
+|---|---|---|
+| 6 | `goal_options` was never checked against anything | The one hole in the repo's own "a typo must not silently change the design problem" policy — and it carries every objective weight and the published acceptance filter. `pore_diameter_maximum` for `pore_diameter_max` left PoreDesigner's hard filter **inert**: a 20.00 Å bottleneck was not rejected, `notes` was empty, and the design shipped unfiltered. `antiweight: 5` left the weight at 1.0. Keys are now whitelisted per goal, plus the twelve read elsewhere in the run. **This also caught two dead keys in both shipped example specs** (`min_long_fraction`, `short_residues`), which read as though they were doing the work that `long_fraction` was actually doing. |
+| 7 | A zero or negative weight was accepted and **inverted** the term it weighted | With `anti_weight: -1` and IE(target) = −10, binding the anti-target 8 kcal/mol *tighter* scored −28.000 against −12.000 for rejecting it: the loop optimized the opposite of the request, and its objective curve still fell. `radius_weight: -1` drove the lumen away from the requested size, unboundedly. `Assembly.weight` was already refused on exactly these grounds. |
+| 8 | A note raised **while scoring** reached nobody | The loop copied `goal.notes` at construction. Measured: a `reshape_channel` run whose radius term was never active — objective identically 0.0 every iteration — reported a mutation string and a best score with **no caveat at all**, against the house rule that a design is never reported without its notes. The loop now shares the list. |
+| 9 | IPRO+/−'s interaction floor was a unit-weight quadratic **penalty, not a constraint** | §1 records the form as `min E_complex s.t. IE ≥ 0.75·IE_WT`. With the floor at −15.0, a candidate that destroyed the interaction entirely (IE 0.0) scored **−115.000**, better than a compliant candidate at −100.000, and was kept as the run's best design. Now a `filter_reject`, with the penalty retained as a gradient inside the boundary. |
+| 10 | `pore_diameter_min/max` counted as a geometric *objective* | They are a filter; nothing in `score()` reads them. Configuring the paper's published filter therefore **suppressed the degenerate-objective warning**: a 3.2 Å and a 3.8 Å candidate both scored −100.0 with nothing said, while a spec with no options at all got the warning. |
+| 11 | `max_total_energy` was documented by `BindTighter` and read **nowhere** | A spec asking for a −50 kcal/mol stability cap ran to completion on candidates at +500 with no note. `ctx.total` was measured and carried for exactly this. Now enforced. |
+| 12 | `parameter: "km"` silently fell back to **every** target | OptZyme Eq 7 is the IE with the *substrate*. With no `ligand`-kind molecule, an unrelated protein partner at −40 entered a "K_M" score of **−49.0** that `components()` reported as **−9.0** — the number could not even be explained. One target is now used explicitly and noted; several are refused as ambiguous. |
+| 13 | A declared `anti_target` was silently ignored by every goal but `switch_specificity` | `bind_tighter`, `stabilize` and `reshape_channel` scored identically whether the decoy was bound at −10 or rejected at −2, with `notes` empty. Now reported. |
+| 14 | `validate()` did not check `reference_interaction` | The error raised later from `score()` told the user to "measure it with `ipro-agent score`" — and that command builds the same goal and dies with the same error. The documented recovery path could not be followed. |
+| 15 | `suggest_goal` returned the first keyword in **word order** | "change its binding specificity from C12 to C14" → `bind_tighter`, which optimizes plain affinity and ignores the decoy. Now ranked by specificity, and `decoy` — the 2006 paper's own word — was missing from the synonyms. |
+| 16 | `_sum_ie` iterated molecule *objects* against a name-keyed dict | A copy-pasted molecule block counted one measured interaction energy twice: 29.5640 reported as **59.1280**, a selectivity gap 2.1× too large. Duplicate names are now refused in `DesignSpec` *and* the sum is over names, so the two cannot disagree again. |
+
+#### The spec (`config.py`)
+
+| # | Defect | Effect |
+|---|---|---|
+| 17 | A YAML **scalar string** where a sequence was expected was iterated character by character | `allowed: all` gave 2 residues of 20; `allowed: standard` 6 of 18; `positions: "115"` gave **three** positions A1, A1, A5. Worst, `indels: [{kind: delete, residues: "12"}]` reported `removed 2 residue(s): A2, A1` — it deleted residues 1 and 2 when residue 12 was named, defeating §1i's invariant that an indel never touches a residue nobody named, with `ok: true`. A scalar is now wrapped, not iterated. |
+| 18 | The `{position: "A16", ...}` spelling read only `position` and `allowed` and **discarded every other key** | A misspelled `alowed:` silently widened a position from 1 residue to 18; an `insertion_code:` was dropped, so A16B was designed as A16 — §7b #14's failure mode re-entered by another door. The sibling `{chain:, number:}` spelling rejected the same input. |
+| 19 | The same design position could be listed **twice** with contradictory `allowed` sets | The MILP built variables from the last entry, `position()` returned the first, and `design_space_size()` multiplied both (4 sequences reported for one position with 2 choices). The run could not produce the residue the user had pinned, and nothing said so. |
+| 20 | No `None` coercion in `LoopSettings` | `integer_cuts:` written with no value parses as null, which is falsy, so a documented `True` default silently became `False`: integer cuts off, and a 6-iteration run "accepted" **six copies of one design**. A quoted `"false"` was a non-empty string and so read as `True`. Null is now refused except where it documents "no limit". |
+| 21 | A `fix` restraint's explicit `maximum` was overridden by `FIX_TOLERANCE` | `maximum` of 0.05/0.1/0.2/0.5/1/2/4 was enforced at **0.05 Å** in every case — up to 80× tighter than written, which narrows a design rather than refusing it. The error message three lines below offers `maximum` as the way to state the allowance. |
+| 22 | An empty `positions: []` ran to completion | `ok: true, accepted: 3, mutations: {}`, no note — which reads as "the optimizer found no improvement", not "nothing was designed". Now refused (positions may still arrive from an indel, §1i). |
+| 23 | A molecule named twice **inside one assembly** was kept twice | Its own internal energy entered the complex energy once per listing (+1588.339 measured) while the interaction map, keyed by name, showed one copy — so `total_energy` and the per-molecule numbers disagreed. |
+| 24 | `AtomRef.position` and `ResidueRef.label` dropped the separator `DesignPosition.label` uses | Chain `1` residue 115 was `1115` in two places and `1:115` in the third, and `1115` re-parses as **chain A residue 1115**. Measured: a mutation applied 40 Å away to a residue of the same type, nothing raised; and a restraint on such a position reclassified as "held fixed, satisfied by construction" and never enforced. §7b #14 fixed one of the three; all three now share one `position_label()`. |
+
+#### Structures and rotamers (`structure.py`, `rotamers.py`, `scripts/`)
+
+| # | Defect | Effect |
+|---|---|---|
+| 25 | **PyMOL's rotamers carried hydrogens** while every template is heavy-atom-only | The side chain brought its own backbone H and HA, which the template no longer held, so every rotamer gained a near-constant **+18 to +22 kcal/mol**. On a protonated `2omf_A` with the shipped defaults that pushed **94 of 160** rotamers past `max_self_energy` instead of 46 and deleted **TRP, PHE, TYR and PRO** from position A18 outright — so the published V18W answer was not in the design space, while `validate` reported 6561 sequences and no error anywhere. The side-chain hydrogens also re-ranked the conformers. `apply_design.py` had the mirror-image bug: it compared the applied side chain against the rotamer *including* H, so on protonated input it reported "not rotamer state 4: 1 atom(s) differ (H)", suppressed the structure write, and blamed the user's PyMOL build while `doctor.py` reported PyMOL working. |
+| 26 | `Structure.load` discarded every Biopython construction warning | Those warnings are the only signal that the file was not read as written. Two copies of a molecule pasted into one chain loaded as **82 atoms of 164**; a chain holding two different residues numbered 115 silently dropped the whole TRP. Every energy afterwards was computed on half the molecule, and `inspect` reported the reduced counts as the file's contents. Now refused, with the parser's own message. |
+| 27 | `Structure.save` wrote `self._bio`, not the model | The whole file went back out: every model and every chain, including the chains `load(chains=...)` was asked to exclude (the filter only detaches from model 0). A Structure holding 2 atoms of chain A saved 6 ATOM lines across 2 models and chains A and B. These are the files PyMOL and Vina read, so an excluded partner was back in the scoring input while the Structure's own energies never saw it. |
+| 28 | `build_template`'s hetero loop had no `is_design` check | A design position on a HETATM-flagged residue — MSE and every other modified residue is one — kept its **full native side chain** in the fixed template. Its own rotamers were unaffected (matching key, so the exclusion fired), so the damage landed on its neighbours: TRP at a neighbouring position moved **+78 to +284 kcal/mol** depending on the conformer, and the chosen rotamer flipped from state 6 to state 1. |
+| 29 | Residue keys carried **no molecule discriminator** | A residue key is what the backend's same-residue exclusion compares, and a partner reusing chain id `A` — the default for most single-chain PDB files — collided with the design molecule's own residues: 22 distinct residues collapsed to 11, the partner's residue 115 lost its side chain to the design filter, and a ligand numbered like a design position became **invisible** to the rotamer sitting on top of it (+84.699 scored as −6.282). The design molecule keeps the bare key that rotamer atoms must match; every partner is prefixed. |
+| 30 | `harvest` read `rotamers.json` whenever it existed and never checked the return code | The loop passes the same workdir every iteration, so a failed re-harvest returned the **previous backbone's** rotamers: with the backbone translated 10 Å and PyMOL exiting 1, side chains came back 10.0 Å from where they belonged, `errors` was empty, and a hard-clash conformer (+453.111 against the real template) was the best-scoring one at −1.036. A requested position that came back missing was likewise dropped in silence (2 requested, 1 designed, nothing raised) — an incomplete crystal structure missing one CA is enough to trigger it. |
+| 31 | `doctor.py` probed with no `-I`, so the working directory was on `sys.path` | From a directory holding a `pyrosetta.py` and a `vina/` folder, doctor reported **"OK PyRosetta ... OK AutoDock Vina"**, resolved energy to pyrosetta and dock to vina, and printed `degraded = []` — so the run looked not degraded at all and the mode line the house rules require was wrong in both directions. Neither is installed on this machine. The run itself probes with `-I`, so doctor saw modules the run could not. Also fixed alongside: the 20 s probe timeout was shorter than PyRosetta's real import (45 s measured), so a machine that *has* PyRosetta was reported as not having it; `IPRO_VINA` and `IPRO_PYMOL_PYTHON` — the documented pins the run honours — were ignored by doctor; and `milp.available` was true for a solver binary doctor had just called unusable, so `doctor.py --require milp` exited 0 and the greedy fallback (which proves no optimality) was invisible to any caller. |
+
+Minor, fixed alongside: `scripts/selftest.py` caught `Exception`, not `BaseException`, so a single `SystemExit` in a test — or a `pytest.skip`, which its own docstring invites — ended the suite with **exit 0, no summary line and no record of what never ran**, which would have made every "94 tests passing" claim in this repo unfounded; `BACKBONE` omitted `OT1`/`OT2`/`OT`, so a C-terminal design position in a CHARMM/AMBER-named file lost its carbonyl and both terminal oxygens from the template; the heavy-atom filters tested `element == "H"` only, so deuterium from a neutron structure was scored with carbon's parameters; `pore.vdw_radii` had its own copy of the first-alphabetic-character element bug; the MILP's position-pair pre-screen compared mean-centroid separation against radii measured about each rotamer's *own* centroid, which is not an enclosing bound (a real −0.014002 kcal/mol pair 6.0 Å away was dropped and the block recorded 0 pair terms); and a `strain_weight` was applied to eight identities but not to ALA, for which PyMOL emits no bump score, so ALA competed without the cost the others paid.
+
+Three documentation claims were found false and corrected rather than coded around: §2's "repulsion cap 10 kcal/mol **per atom pair**" was true of the LJ term only (now true of the pair), the built-in model was described as having a **solvation treatment** when it has none (§4, §5 and `doctor.py`'s own output said so), and §7 #6 stated the H-bond exclusion as "neither atom carries a formal charge" when the code requires only that *one* be neutral — the code is the better physics (a charged carboxylate acceptor against a neutral amide donor is a real hydrogen bond), so the **documentation** was wrong, not the code.
+
+#### Reported clean by this round
+
+The LJ functional form and combining rules (`E(Rmin) = −eps` exactly), Coulomb's sign and dimensions, the H-bond well's shape, pair symmetry (1.4e-14 on a 611-atom split), exact partitioning (`internal(A∪B) = internal(A)+internal(B)+interaction(A,B)` to 0.000e+00), iteration-order independence (≤4.5e-13 over five shuffles), empty and single-atom sets, every goal's **direction** (a better candidate scores lower, a worse one higher, for all five goals and all three OptZyme parameters), the multi-assembly specificity split, `metropolis_accept`'s edges, all 19 of §2's numeric defaults against the installed values, position parsing and `to_dict`/`from_dict` round-tripping, path resolution relative to the spec file, restraint interval validation, `2omf_A` load→save→load field-for-field identity, altLoc selection by occupancy, insertion codes and negative residue numbers end to end, the harvest↔apply state contract to 0.0005 Å, and `_selection()`'s escaping of negative residue numbers on PyMOL 3.1.0 (§7c stays fixed).
+
+#### One confirmed defect left unfixed, deliberately
+
+**The fitted pore axis can miss the lumen entirely, and the published acceptance
+filter then passes on a number that is not a pore measurement.** The axis is the
+normal to the plane of the design positions, through their centroid — which is
+the pore centre only if those positions *ring* the lumen. The shipped smoke
+spec's four positions all line one wall, so their centroid falls **inside** the
+wall: measured, it clears the nearest van der Waals surface by **0.30 Å** where
+a water needs 1.4 Å, and the profile then reports the sliver beside the wall as
+the channel. That reads **1.53 Å**, which silently **passes** PoreDesigner's
+published "bottleneck below 4 Å" filter — a design accepted as a sub-4 Å pore on
+a measurement of the wrong thing. The 25-position spec, whose ring does surround
+the lumen, clears 1.30 Å and measures 6.24 Å.
+
+A clearance threshold was implemented and then **reverted**, because re-measuring
+showed it also rejected the 25-position spec's legitimate reading (1.30 Å is
+likewise below a water's radius, yet that measurement is sound). Nor does the
+widest slice discriminate: 3.765 Å for the bad axis against 4.752 Å for the good
+one. Telling the two apart needs the measurement reworked — a connected-passage
+test, or fitting the axis through the lumen rather than through the design
+positions — which is a change to the science, not a defect fix, so it is recorded
+here for a decision rather than guessed at. **Until then, treat any pore radius
+from a spec whose design positions do not surround the channel as meaningless,
+and give `goal_options.pore_axis` explicitly.** The numbers §1h and both example
+specs quote are corrected below.
+
+### 7e. The PyRosetta and Vina paths: one closed, one declared
+
+Both were listed as implemented and **neither had ever executed**, because
+neither was installed. They are now in different states, and the difference is
+recorded rather than blurred.
+
+**AutoDock Vina: installed, and the path was broken.** Vina 1.2.7 and Open Babel
+3.2.1 were installed from conda-forge (`/opt/miniconda3/envs/ipro_vina`), and the
+first execution found that **`backends.dock: vina` could not dock at all**. Vina
+reads PDBQT only; a spec names PDB files, which is the format every example,
+every document and the structure loader use; and nothing converted them. Every
+redock failed with `receptor receptor.pdb is not a .pdbqt file`, the loop noted
+the failure and left the placement unchanged — so a run reporting `dock -> vina`
+had never moved a partner. Worse, `backends.dock: auto` resolves to Vina whenever
+Vina is on `PATH`, so **installing Vina made docking stop rather than start**.
+`pdb_to_pdbqt` existed for exactly this job and had no call site. With the
+conversion wired in, the same run docks: score **62.6984 → −10.0636**, three
+poses written, `redocked 1 partner(s)`. Open Babel's conversion is a stopgap and
+`pdb_to_pdbqt`'s own docstring says why (its receptor charges and atom types are
+not Meeko's); what makes that acceptable here is that Vina's affinity never
+enters the objective — the *pose* is taken and re-scored with this tool's
+backend.
+
+**PyRosetta: still unexercised, and now declared.** It needs a licence (free for
+academics, but it must be obtained and accepted by the user), so it was not
+installed. `energy/pyrosetta_backend.UNEXERCISED` names every path that has
+never run and what could be wrong with each, and a test keeps that declaration
+honest: each name must still exist on the class, and the test **fails loudly
+once PyRosetta is importable**, so the list cannot outlive its reason. The
+specific unknowns are recorded there: FastRelax's MoveMap constrains
+*minimization*, while its ramped repack cycles take their rotamer set from a
+PackerTask, so residues named `fixed` may still be repacked; and
+`-ignore_unrecognized_res` silently drops any HETATM Rosetta lacks parameters
+for, which `relax` would then write back as the truncated structure (now guarded
+by a residue count, itself unexercised).
+
+What was *not* unexercised, and was wrong: **`relax()` had no call site anywhere
+in the package**, and neither did `RestraintPlan.relax_fixed_positions`, which
+is collected for exactly that argument and whose own note promises those
+positions are "held during relaxation in `full` mode". So a run with a relaxing
+backend reported mode **`full`** — documented as "perturb + relax + repack" —
+while doing no relaxation at all; and because `can_relax` was true it also
+**suppressed** the note saying the reported energies were screening energies,
+writing screening kcal/mol into the deliverable PDB under a "Rosetta Energy
+Units (REU)" heading. Both are fixed and both are tested with a counting
+stand-in backend, so the wiring is covered without PyRosetta: `relax` is called
+once per perturbed iteration with the fixed-position list, a failure is reported
+and downgrades the mode, and the screening caveat now follows **where the
+pairwise numbers came from** (`screening_pairwise`) rather than whether the
+backend can relax.

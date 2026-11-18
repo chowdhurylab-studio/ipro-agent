@@ -39,14 +39,27 @@ def _run(cmd: list[str], timeout: float = 20.0) -> tuple[int, str]:
         return 127, f"{type(exc).__name__}: {exc}"
 
 
-def _module_in(python: str, module: str) -> tuple[bool, str]:
-    """Is ``module`` importable by the interpreter at ``python``?"""
+def _module_in(python: str, module: str, timeout: float = 120.0) -> tuple[bool, str]:
+    """Is ``module`` importable by the interpreter at ``python``?
+
+    ``-I`` matches how the run itself probes (``rotamers.py``, ``mutate.py``)
+    and how it will import: without it the current directory is on
+    ``sys.path`` and ``PYTHONPATH`` is inherited despite the comment in
+    ``_run``, so a stray ``pyrosetta.py`` or a ``vina/`` directory in the
+    working directory made doctor report both as installed -- with the whole
+    "degraded" block gone, so the run looked not degraded at all, and the mode
+    line the house rules require was wrong in both directions.
+
+    The timeout is generous because PyRosetta's import genuinely takes tens of
+    seconds; at the old 20 s a machine that HAS PyRosetta was reported as not
+    having it, while ``backends.energy: auto`` resolved it in-process anyway.
+    """
     code = (
         "import importlib,sys\n"
         f"m=importlib.import_module({module!r})\n"
         "print(getattr(m,'__version__','') or getattr(m,'version',''))\n"
     )
-    rc, out = _run([python, "-c", code])
+    rc, out = _run([python, "-I", "-c", code], timeout=timeout)
     return rc == 0, out.splitlines()[-1] if (rc == 0 and out) else out
 
 
@@ -78,7 +91,20 @@ def check() -> dict:
 
     # -- PyMOL: mutagenesis ----------------------------------------------
     pymol: dict = {"available": False, "how": None, "detail": ""}
-    ok, ver = _module_in(sys.executable, "pymol")
+    # IPRO_PYMOL_PYTHON is the documented pin and rotamers.find_pymol_python
+    # honours it, so doctor has to as well: otherwise doctor's verdict and the
+    # run's behaviour disagree for exactly the user who set it.
+    pinned = os.environ.get("IPRO_PYMOL_PYTHON")
+    if pinned:
+        ok, ver = _module_in(pinned, "pymol")
+        if ok:
+            pymol.update(
+                available=True, how="env", python=pinned,
+                detail=f"IPRO_PYMOL_PYTHON={pinned} {ver}".strip(),
+            )
+        else:
+            pymol["detail"] = f"IPRO_PYMOL_PYTHON={pinned} cannot import pymol: {ver}"
+    ok, ver = (False, pymol["detail"]) if pymol["available"] else _module_in(sys.executable, "pymol")
     if ok:
         pymol.update(available=True, how="import", python=sys.executable, detail=ver)
     else:
@@ -134,7 +160,15 @@ def check() -> dict:
         ),
         None,
     )
-    if exe:
+    # IPRO_VINA is the documented pin, honoured by dock.find_vina.
+    env_vina = os.environ.get("IPRO_VINA")
+    if env_vina:
+        rc, out = _run([env_vina, "--version"])
+        vina.update(
+            available=rc == 0, how="env", binary=env_vina,
+            detail=(out.splitlines()[0] if out else "") + f"  [IPRO_VINA={env_vina}]",
+        )
+    if exe and not vina["available"]:
         rc, out = _run([exe, "--version"])
         vina.update(available=rc == 0, how="binary", binary=exe, detail=out.splitlines()[0] if out else "")
     if not vina["available"]:
@@ -201,7 +235,12 @@ def check() -> dict:
             )
     if milp["preferred"] is None:
         milp["preferred"] = "greedy (built-in; NOT a proof of optimality)"
-    milp["available"] = pulp_ok or bool(milp.get("binaries"))
+    # "available" must mean "a solver this code can actually drive", not "some
+    # solver binary is on PATH". It reported True for a binary doctor had just
+    # called unusable, so `doctor.py --require milp && run` went ahead with the
+    # greedy heuristic -- which proves no optimality -- and the MILP never
+    # appeared in `degraded`, so no caller could see it either.
+    milp["available"] = not milp["preferred"].startswith("greedy")
     C["milp"] = milp
 
     # -- structure handling ------------------------------------------------
@@ -212,13 +251,14 @@ def check() -> dict:
     # -- resolve what a run would use ------------------------------------
     report["resolved"] = {
         "mutate": "pymol" if pymol["available"] else "builtin (rotamer-library sidechain swap)",
-        "energy": "pyrosetta" if pyros["available"] else "builtin (LJ + Coulomb + implicit-solvent approximation)",
+        "energy": "pyrosetta" if pyros["available"] else "builtin (LJ + capped repulsion + Coulomb + H-bond well; NO desolvation term)",
         "dock": "vina" if vina["available"] else "none (input poses kept; set redock:false)",
         "milp": milp["preferred"],
     }
     report["can_run"] = bool(C["py:numpy"]["available"])
     report["degraded"] = [
-        k for k, v in (("pymol", pymol), ("pyrosetta", pyros), ("vina", vina)) if not v["available"]
+        k for k, v in (("pymol", pymol), ("pyrosetta", pyros), ("vina", vina),
+                       ("milp", milp)) if not v["available"]
     ]
     return report
 

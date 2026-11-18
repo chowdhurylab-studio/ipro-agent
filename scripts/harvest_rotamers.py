@@ -34,8 +34,34 @@ import sys
 from typing import Any
 
 # Backbone atoms are shared by every rotamer at a position; the side chain is
-# what the MILP chooses. CB is listed as side chain (GLY has none).
-BACKBONE = {"N", "CA", "C", "O", "OXT"}
+# what the MILP chooses. CB is listed as side chain (GLY has none). OT1/OT2/OT
+# are the CHARMM/AMBER spellings of the C-terminal carboxylate.
+BACKBONE = {"N", "CA", "C", "O", "OXT", "OT1", "OT2", "OT"}
+
+
+def _is_hydrogen(atom) -> bool:
+    """True for a hydrogen, by element where PyMOL gives one, else by name.
+
+    Rotamers must be heavy-atom-only, because every template the energy model
+    builds is heavy-atom-only (``rotamers.build_template`` drops H). Harvesting
+    hydrogens from a *protonated* input broke that symmetry: the side chain
+    carried its own backbone H and HA, which the template no longer held, so
+    every rotamer at a position gained a near-constant +18 to +22 kcal/mol.
+    Measured on a protonated 2omf_A with the shipped defaults, that offset
+    pushed 94 of 160 rotamers past ``max_self_energy`` instead of 46, and
+    deleted TRP, PHE, TYR and PRO from position A18 outright -- so the
+    published V18W answer was not in the design space, with ``validate``
+    reporting 6561 sequences and no error anywhere. The side-chain hydrogens
+    additionally re-ranked the conformers.
+
+    PyMOL's chempy atoms carry ``symbol``; fall back to the PDB naming rule
+    (a leading digit then H, as in ``1HB``, or a leading H).
+    """
+    sym = (getattr(atom, "symbol", "") or "").strip().upper()
+    if sym:
+        return sym in ("H", "D", "T")
+    name = (getattr(atom, "name", "") or "").strip().upper().lstrip("0123456789")
+    return name[:1] in ("H", "D")
 
 #: The wizard is always handed a *named* selection, never a selection
 #: expression, because ``do_select`` finishes with ``cmd.delete(selection)``.
@@ -135,7 +161,7 @@ def harvest(job_path: str, out_path: str) -> int:
                     atoms = [
                         [a.name, [round(float(c), 4) for c in a.coord]]
                         for a in model.atom
-                        if a.name not in BACKBONE
+                        if a.name not in BACKBONE and not _is_hydrogen(a)
                     ]
                     if not atoms and aa != "GLY":
                         # No side-chain atoms for a non-GLY residue means the

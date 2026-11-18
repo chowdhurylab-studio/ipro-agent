@@ -2423,3 +2423,1065 @@ def test_regression_negative_residue_selection_is_escaped():
     )
     for num in (-1, 0, 1):
         assert seen.get(num) == [num], f"resi for {num} selected {seen.get(num)}"
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the third independent review
+#
+# Five reviews were run over the parts the first two did not reach: the energy
+# backends, goals.py, config.py, structure.py, rotamers.py and scripts/. Every
+# defect recorded here ran cleanly and returned a plausible wrong answer. Each
+# test names the defect and the measurement that exposed it, so a
+# reintroduction fails here rather than in someone's results.
+# See docs/DESIGN.md section 7d.
+# ---------------------------------------------------------------------------
+
+
+def _mols(**over):
+    m = [
+        {"name": "prot", "path": str(CRN), "role": "design"},
+        {"name": "LIG", "path": str(CRN), "role": "target", "kind": "ligand"},
+    ]
+    m[1].update(over)
+    return m
+
+
+def _spec(**over):
+    base = {
+        "goal_statement": "test", "goal": "bind_tighter",
+        "molecules": _mols(), "positions": ["A16"],
+    }
+    base.update(over)
+    return DesignSpec.from_dict(base)
+
+
+def test_regression_a_scalar_string_is_one_item_not_its_characters():
+    """A YAML scalar is an iterable of characters, so every "list of X" field
+    silently took one string apart letter by letter.
+
+    Measured at HEAD: ``allowed: all`` gave ['ALA', 'LEU'] (2 of 20);
+    ``allowed: standard`` gave 6 of 18; ``positions: "115"`` gave three
+    positions A1, A1, A5; and ``residues: "12"`` deleted residues 1 and 2 while
+    reporting "removed 2 residue(s): A2, A1" -- defeating section 1i's
+    invariant that an indel never touches a residue nobody named."""
+    from ipro_agent.config import IndelSpec
+
+    assert expand_allowed("all") == sorted(AA_GROUPS["all"])
+    assert len(expand_allowed("standard")) == 18
+    assert expand_allowed("negative") == ["ASP", "GLU"]
+    assert expand_allowed("W") == ["TRP"]
+
+    sp = DesignSpec.from_dict({
+        "goal_statement": "t", "goal": "bind_tighter",
+        "molecules": _mols(), "positions": "115",
+    })
+    assert [p.label for p in sp.positions] == ["A115"], [p.label for p in sp.positions]
+
+    assert IndelSpec(kind="delete", chain="A", residues="12").residues == [12]
+    assert IndelSpec(kind="delete", chain="A", residues=[12, 13]).residues == [12, 13]
+
+
+def test_regression_position_dict_spelling_reads_every_key():
+    """``{position: A16, ...}`` read only `position` and `allowed` and dropped
+    the rest, while the explicit ``{chain:, number:}`` spelling rejected the
+    same input. A misspelled `alowed:` silently widened the design space from 1
+    residue to 18, and an `insertion_code:` was dropped, so A16B was designed
+    as A16 -- defect 14 of the second review re-entered by another door."""
+    try:
+        DesignSpec.from_dict({
+            "goal_statement": "t", "goal": "bind_tighter", "molecules": _mols(),
+            "positions": [{"position": "A16", "alowed": ["TRP"]}],
+        })
+    except SpecError as exc:
+        assert "alowed" in str(exc)
+    else:
+        raise AssertionError("a misspelled key inside a position must be refused")
+
+    sp = DesignSpec.from_dict({
+        "goal_statement": "t", "goal": "bind_tighter", "molecules": _mols(),
+        "positions": [{"position": "A16", "insertion_code": "B", "allowed": ["TRP"]}],
+    })
+    assert sp.positions[0].key == ("A", 16, "B"), sp.positions[0].key
+    assert sp.positions[0].label == "A16B"
+
+
+def test_regression_duplicate_design_position_is_refused():
+    """The MILP built variables from the last entry, ``position()`` returned the
+    first, and ``design_space_size()`` multiplied both: one position pinned to
+    [TRP, PHE] twice reported 4 sequences, and a contradictory pair meant the
+    run could not produce the residue the user pinned."""
+    try:
+        DesignSpec.from_dict({
+            "goal_statement": "t", "goal": "bind_tighter", "molecules": _mols(),
+            "positions": [{"position": "A16", "allowed": ["TRP"]},
+                          {"position": "A16", "allowed": ["ALA", "SER"]}],
+        })
+    except SpecError as exc:
+        assert "A16" in str(exc)
+    else:
+        raise AssertionError("the same design position twice must be refused")
+
+
+def test_regression_blank_loop_key_does_not_turn_off_a_default():
+    """``integer_cuts:`` with no value parses as null, which is falsy, so a
+    documented True default silently became False. Measured: integer cuts off,
+    and a 6-iteration run "accepted" six copies of one design. A quoted
+    ``"false"`` is a non-empty string and so read as True."""
+    try:
+        LoopSettings(integer_cuts=None)
+    except SpecError as exc:
+        assert "integer_cuts" in str(exc)
+    else:
+        raise AssertionError("a null bool setting must be refused")
+
+    assert LoopSettings(integer_cuts="false").integer_cuts is False
+    assert LoopSettings(integer_cuts="yes").integer_cuts is True
+    # None stays legal where it documents "no limit".
+    assert LoopSettings(stop_after_accepted=None).stop_after_accepted is None
+    assert LoopSettings(max_minutes=None).max_minutes is None
+
+
+def test_regression_fix_restraint_honours_an_explicit_maximum():
+    """``__post_init__`` installed FIX_TOLERANCE whenever `tolerance` was None,
+    including when `maximum` was given, and ``interval()`` then took
+    min(0.05, maximum). Measured: maximum 0.05/0.1/0.2/0.5/1/2/4 all enforced
+    at 0.05 -- up to 80x tighter than written -- which narrows a design rather
+    than refusing it. The error message in the same method offers 'maximum' as
+    the way to state the allowance."""
+    from ipro_agent.config import FIX_TOLERANCE, Restraint
+
+    assert Restraint(kind="fix", atoms=["A16:CB"], maximum=2.0).interval() == (0.0, 2.0)
+    assert Restraint(kind="fix", atoms=["A16:CB"]).interval() == (0.0, FIX_TOLERANCE)
+    # Both given: the tighter of the two, as interval() has always done.
+    assert Restraint(kind="fix", atoms=["A16:CB"], tolerance=0.5,
+                     maximum=2.0).interval() == (0.0, 0.5)
+
+
+def test_regression_duplicate_molecule_name_is_refused():
+    """Everything downstream looks a molecule up by name, but the goals summed
+    over molecule *objects*: a copy-pasted molecule block counted one measured
+    interaction energy twice (29.564 reported as 59.128), inflating a
+    selectivity gap 2.1x with no error."""
+    try:
+        DesignSpec.from_dict({
+            "goal_statement": "t", "goal": "bind_tighter",
+            "molecules": _mols() + [{"name": "LIG", "path": str(CRN),
+                                     "role": "target", "kind": "ligand"}],
+            "positions": ["A16"],
+        })
+    except SpecError as exc:
+        assert "LIG" in str(exc)
+    else:
+        raise AssertionError("two molecules with one name must be refused")
+
+
+def test_regression_duplicate_molecule_in_an_assembly_is_refused():
+    """A molecule listed twice in one assembly was kept twice, so its own
+    internal energy entered the complex energy once per listing (+1588.339
+    measured) while the interaction map, keyed by name, showed one copy."""
+    from ipro_agent.config import Assembly
+
+    try:
+        Assembly(name="holo", molecules=["LIG", "LIG"])
+    except SpecError as exc:
+        assert "LIG" in str(exc)
+    else:
+        raise AssertionError("a repeated participant must be refused")
+
+
+def test_regression_residue_label_round_trips_for_a_numeric_chain():
+    """``ResidueRef.label`` and ``AtomRef.position`` concatenated chain and
+    number without the separator ``DesignPosition.label`` uses, so chain 1
+    residue 115 was "1115" in two places and "1:115" in the third -- and
+    "1115" re-parses as chain A residue 1115. Measured: a mutation applied 40 A
+    away, to a residue of the same type, with nothing raised; and a restraint
+    on such a position silently reclassified as "satisfied by construction"."""
+    from ipro_agent.config import AtomRef, position_label
+    from ipro_agent.structure import ResidueRef
+
+    for chain, num, icode in (("A", 115, ""), ("1", 115, ""), ("A", -1, ""),
+                              ("A", 115, "B"), ("1", 115, "B"), ("a", 0, "")):
+        lab = position_label(chain, num, icode)
+        back = DesignPosition.parse(lab)
+        assert back.key == (chain, num, icode), (lab, back.key)
+        assert ResidueRef(chain, num, icode).label == lab
+        assert AtomRef(chain=chain, number=num, atom="CB",
+                       insertion_code=icode).position == lab
+        assert DesignPosition(chain=chain, number=num, insertion_code=icode).label == lab
+
+
+def test_regression_pair_energy_is_bounded_on_both_sides():
+    """The repulsion cap was documented as "10 kcal/mol per atom pair" but
+    applied to the LJ term alone, while the Coulomb term runs as 1/r^2 down to
+    the 0.3 A clamp with no bound. So the most *attractive* thing the function
+    could produce was a hard clash between opposite charges.
+
+    Measured at HEAD: ASP OD1 against LYS NZ gave -3.577 at a 3.50 A salt
+    bridge but -31.508 at 1.00 A and -451.200 at 0.30 A, and a rotamer burying
+    NZ inside a template oxygen scored -71.957 against the native alanine's
+    -1.391 -- returned by the MILP as the proven-optimal design. Like charges
+    ran away the same way (+932.399 for one pair at 0.30 A), past the
+    max_self_energy and hard_reject thresholds calibrated against this bound."""
+    be = resolve("builtin")
+    cap = be.max_repulsion
+
+    def pair(n1, r1, n2, r2, d):
+        a = AtomSet(names=[n1], coords=[[0.0, 0, 0]], resnames=[r1], reskeys=[("A", 1, "")])
+        b = AtomSet(names=[n2], coords=[[d, 0, 0]], resnames=[r2], reskeys=[("A", 9, "")])
+        return be.interaction(a, b)
+
+    for d in (0.1, 0.3, 0.5, 1.0, 1.5):
+        assert pair("OD1", "ASP", "NZ", "LYS", d) >= -cap - 1e-9, d
+        assert pair("NZ", "LYS", "NZ", "LYS", d) <= cap + 1e-9, d
+    # A real salt bridge is far inside the bound and must be untouched.
+    assert abs(pair("OD1", "ASP", "NZ", "LYS", 3.5) - (-3.577)) < 0.01
+    # So must an ordinary neutral contact.
+    assert abs(pair("CB", "ALA", "CB", "ALA", 4.0) - (-0.103)) < 0.01
+
+
+def test_regression_peptide_bonded_pairs_are_not_scored_as_nonbonded():
+    """The same-residue exclusion cannot see a covalent bond that spans two
+    residues, so a chain's own connectivity was scored as packing.
+
+    Measured at HEAD on examples/ompf_pore/2omf_A.pdb: internal() reported
+    +11132.191 kcal/mol, of which +3390.000 was the 339 peptide bonds (every
+    one pinned at the repulsion cap) and +10390.954 the 1048 1-3 pairs, against
+    a genuine non-bonded sum of -1070.880 -- 108% of the LJ sum was covalent
+    geometry. It also steered the search: 5 of 25 default backbone
+    perturbations were hard-rejected on chain connectivity, which a
+    perturbation cannot change."""
+    from ipro_agent.energy.builtin import PEPTIDE_12_13
+
+    be = resolve("builtin")
+
+    def two(n1, n2, d, num_b=2):
+        a = AtomSet(names=[n1], coords=[[0.0, 0, 0]], resnames=["ALA"],
+                    reskeys=[("A", 1, "")])
+        b = AtomSet(names=[n2], coords=[[d, 0, 0]], resnames=["ALA"],
+                    reskeys=[("A", num_b, "")])
+        return be.interaction(a, b)
+
+    for (ai, aj) in PEPTIDE_12_13:
+        assert two(ai, aj, 1.33) == 0.0, (ai, aj)
+        assert two(aj, ai, 1.33, num_b=0) == 0.0, "the reverse direction too"
+    # A 1-4 pair across the same peptide bond is a real non-bonded pair.
+    assert two("CB", "CB", 4.0) != 0.0
+    # Non-sequential residues keep every pair.
+    assert two("C", "N", 1.33, num_b=9) != 0.0
+
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if ompf.exists():
+        from ipro_agent.loop import _atoms_of
+        from ipro_agent.structure import Structure
+
+        e = be.internal(_atoms_of(Structure.load(ompf)))
+        assert e < 0, f"a crystal structure's packing energy must be favourable, got {e}"
+        assert abs(e - (-1949.303)) < 1.0, e
+
+
+def test_regression_two_letter_elements_are_typed_correctly():
+    """``elements`` took the first alphabetic character of the atom name, so no
+    two-letter element was reachable and ``LJ``'s own CL/BR/SE entries were
+    dead code. Measured at HEAD: a backbone O 2.40 A from an iron scored
+    +5.8272 using *fluorine's* parameters; Cl and Ca were typed as carbon; Na
+    was typed as nitrogen and so handed out -1.5 kcal/mol hydrogen bonds."""
+    from ipro_agent.energy.base import guess_element
+    from ipro_agent.energy.builtin import LJ
+
+    cases = {
+        ("FE", "HEM"): "FE", ("CL", "CL"): "CL", ("CA", "CA"): "CA",
+        ("MG", "MG"): "MG", ("NA", "NA"): "NA", ("ZN", "ZN"): "ZN",
+        ("SE", "MSE"): "SE",            # selenomethionine really is selenium
+        ("CA", "ALA"): "C",             # ... but a residue's CA is carbon
+        ("CB", "ALA"): "C", ("OD1", "ASP"): "O", ("SD", "MET"): "S",
+        ("1HB", "ALA"): "H", ("NZ", "LYS"): "N",
+    }
+    for (name, resn), want in cases.items():
+        assert guess_element(name, resn) == want, (name, resn, guess_element(name, resn))
+
+    # The parameter table's two-letter entries are now reachable.
+    for el in ("CL", "BR", "SE"):
+        assert LJ[el] != LJ["C"]
+        assert guess_element(el, "LIG") == el
+
+    # An explicit element column wins over any guess.
+    s = AtomSet(names=["CA"], coords=[[0.0, 0, 0]], resnames=["ALA"], elements=["CA"])
+    assert s.elements == ["CA"]
+
+
+def test_regression_atomset_refuses_mismatched_per_atom_lists():
+    """Only ``names`` was length-checked. A short ``resnames`` silently zeroed
+    the trailing atoms' formal charges: a measured -7.2102 kcal/mol
+    carboxylate/ammonium interaction came out +5.6009 with nothing raised."""
+    for kw in ({"resnames": ["ASP"]}, {"reskeys": [("A", 1, "")]},
+               {"elements": ["O"]}):
+        try:
+            AtomSet(names=["OD1", "OD2"], coords=[[0.0, 0, 0], [1.0, 0, 0]], **kw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"a short {list(kw)[0]} list must be refused")
+
+
+def test_regression_hbond_well_skips_sequential_backbone_pairs():
+    """The well fired on any N/O pair of neutral atoms, including backbone
+    atoms of sequentially bonded residues whose separation is fixed by the
+    peptide geometry and cannot be a hydrogen bond. Measured on 2omf_A:
+    -598.407 kcal/mol came from sequential residues, including 339
+    N(i)...N(i+1) pairs -- one per peptide bond, two amide nitrogens that
+    cannot bond to each other -- and 98 O(i)...O(i+1) pairs."""
+    be = resolve("builtin")
+
+    def two(n1, n2, num_b, d=3.0):
+        a = AtomSet(names=[n1], coords=[[0.0, 0, 0]], resnames=["ALA"],
+                    reskeys=[("A", 1, "")])
+        b = AtomSet(names=[n2], coords=[[d, 0, 0]], resnames=["ALA"],
+                    reskeys=[("A", num_b, "")])
+        return be.interaction(a, b)
+
+    # Sequential backbone N...N and O...O: no well.
+    seq_nn = two("N", "N", 2)
+    far_nn = two("N", "N", 9)
+    assert seq_nn > far_nn, (seq_nn, far_nn)
+    assert abs((seq_nn - far_nn) - be.hbond_weight) < 1e-6
+    # A side chain reaching across a peptide bond is a real H-bond: kept.
+    assert two("OG", "N", 2) < 0
+
+
+def test_regression_a_pdb_that_loses_atoms_is_refused():
+    """``PDBParser(QUIET=True)`` plus a blanket warnings filter discarded
+    exactly the messages that say the file was not read as written. Measured:
+    two copies of a molecule pasted into one chain loaded as 82 atoms of 164,
+    and a chain holding two different residues numbered 115 silently dropped
+    the whole TRP -- every energy afterwards computed on half the molecule,
+    with the reduced counts reported back as the file's contents."""
+    from ipro_agent.structure import Structure, StructureError
+
+    tmp = Path(tempfile.mkdtemp())
+    dup = tmp / "dup.pdb"
+    dup.write_text(
+        "ATOM      1  N   ASP A 115       0.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      2  CA  ASP A 115       1.500   0.000   0.000  1.00  0.00           C\n"
+        "ATOM      3  N   TRP A 115       5.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      4  CA  TRP A 115       6.500   0.000   0.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    try:
+        Structure.load(dup)
+    except StructureError as exc:
+        assert "discarded" in str(exc)
+    else:
+        raise AssertionError("a file whose residues collide must be refused")
+
+    # An ordinary file still loads, warnings and all.
+    assert len(list(Structure.load(CRN).model.get_atoms())) > 300
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if ompf.exists():
+        assert len(list(Structure.load(ompf).model.get_atoms())) == 2627
+
+
+def test_regression_save_writes_only_the_loaded_model_and_chains():
+    """``save()`` wrote ``self._bio`` -- the whole file back, every model and
+    every chain, including the chains ``load(chains=...)`` was asked to exclude
+    (the filter only detaches from model 0). These are the files PyMOL and Vina
+    read, so an excluded partner was back in the scoring input while the
+    Structure's own energies never saw it."""
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp())
+    two = tmp / "two.pdb"
+    two.write_text(
+        "MODEL        1\n"
+        "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      2  N   GLY B   1      10.000   0.000   0.000  1.00  0.00           N\n"
+        "ENDMDL\n"
+        "MODEL        2\n"
+        "ATOM      3  N   GLY A   1      20.000   0.000   0.000  1.00  0.00           N\n"
+        "ENDMDL\nEND\n"
+    )
+    st = Structure.load(two, chains=["A"])
+    out = st.save(tmp / "saved.pdb")
+    lines = [ln for ln in out.read_text().splitlines() if ln.startswith("ATOM")]
+    assert len(lines) == 1, lines
+    assert {ln[21] for ln in lines} == {"A"}
+    assert not any(ln.startswith("MODEL") for ln in out.read_text().splitlines())
+
+
+def test_regression_design_position_on_a_hetatm_residue_keeps_no_sidechain():
+    """``build_template``'s hetero loop had no ``is_design`` check, so a design
+    position on a HETATM-flagged residue -- MSE and every other modified
+    residue is one -- kept its full native side chain in the fixed template.
+    Its own rotamers were unaffected (matching key, so the exclusion fired), so
+    the damage landed on its neighbours: measured on 2omf_A, TRP at a
+    neighbouring position moved +78 to +284 kcal/mol depending on the conformer
+    and the chosen rotamer flipped from state 6 to state 1."""
+    from ipro_agent.rotamers import build_template
+    from ipro_agent.structure import Structure
+
+    tmp = Path(tempfile.mkdtemp())
+    pdb = tmp / "mse.pdb"
+    pdb.write_text(
+        "ATOM      1  N   ALA A  15       0.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      2  CA  ALA A  15       1.458   0.000   0.000  1.00  0.00           C\n"
+        "HETATM    3  N   MSE A  16       3.000   0.000   0.000  1.00  0.00           N\n"
+        "HETATM    4  CA  MSE A  16       4.458   0.000   0.000  1.00  0.00           C\n"
+        "HETATM    5  CB  MSE A  16       5.000   1.400   0.000  1.00  0.00           C\n"
+        "HETATM    6  SE  MSE A  16       6.500   2.000   0.000  1.00  0.00          SE\n"
+        "END\n"
+    )
+    st = Structure.load(pdb)
+    full = build_template([st], [])
+    assert "SE" in full.names, "the native side chain is in the template when not designed"
+
+    designed = build_template([st], ["A16"])
+    assert "SE" not in designed.names, (
+        "a design position's side chain must never be in the fixed template, "
+        f"HETATM or not; got {designed.names}"
+    )
+    assert "CB" not in designed.names
+    assert "CA" in designed.names, "its backbone must stay"
+
+
+def test_regression_a_partner_reusing_a_chain_id_keeps_its_own_residue_keys():
+    """A residue key is what the backend's same-residue exclusion compares, and
+    a partner reusing chain id A -- the default for most single-chain PDB files
+    -- collided with the design molecule's own residues. Measured: 22 distinct
+    residues collapsed to 11, the partner's residue 115 lost its side chain to
+    the design filter, and a ligand numbered like a design position became
+    invisible to the rotamer sitting on top of it (+84.699 scored as -6.282)."""
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.rotamers import build_template
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    merged = build_template([st, st], [])
+    keys = set(merged.reskeys)
+    one = set(build_template([st], []).reskeys)
+    assert len(keys) == 2 * len(one), (len(keys), len(one))
+    # The design molecule (first) keeps the bare key rotamer atoms must match.
+    assert ("A", 16, "") in keys
+
+    design = _atoms_of(st)
+    partner = _atoms_of(st, molecule="LIG")
+    assert set(design.reskeys).isdisjoint(set(partner.reskeys))
+    # Two copies of the same coordinates now interact instead of cancelling.
+    assert resolve("builtin").interaction(design, partner) != 0.0
+
+
+def _fake_harvest_python(tmp: Path, payload: str) -> Path:
+    """A stand-in for the PyMOL interpreter: writes ``payload`` to the out path.
+
+    ``harvest`` invokes ``[py, "-I", script, job, out]``, so $4 is the output.
+    """
+    exe = tmp / "fake_python.sh"
+    exe.write_text("#!/bin/sh\ncat > \"$4\" <<'JSON'\n" + payload + "\nJSON\n")
+    exe.chmod(0o755)
+    return exe
+
+
+def test_regression_a_stale_rotamer_file_is_never_reused():
+    """``harvest`` read ``rotamers.json`` whenever the file existed and never
+    checked the return code, while the loop passes the same workdir every
+    iteration. A failed re-harvest after a backbone perturbation therefore
+    returned the PREVIOUS backbone's rotamers: measured with the backbone
+    translated 10 A and PyMOL exiting 1, side chains came back 10.0 A from
+    where they belonged, errors was empty, and a hard-clash conformer (+453.111
+    against the real template) was the best-scoring one at -1.036."""
+    from ipro_agent.rotamers import RotamerError, harvest
+
+    tmp = Path(tempfile.mkdtemp())
+    stale = {"pdb": "/somewhere/old.pdb", "rotamers": {"A16": {"ALA": [
+        {"state": 1, "atoms": [["CB", [0.0, 0.0, 0.0]]]}]}}, "native": {"A16": "CYS"}}
+    (tmp / "rotamers.json").write_text(json.dumps(stale))
+    pos = [DesignPosition.parse("A16", ["ALA"])]
+    try:
+        harvest(CRN, pos, python="/usr/bin/false", workdir=tmp)
+    except RotamerError as exc:
+        assert "failed" in str(exc)
+    else:
+        raise AssertionError("a failed harvest must not fall back on a stale file")
+
+    # And a harvest that describes a different structure is refused.
+    fake = _fake_harvest_python(tmp, json.dumps(stale))
+    try:
+        harvest(CRN, pos, python=str(fake), workdir=tmp)
+    except RotamerError as exc:
+        assert "another structure" in str(exc)
+    else:
+        raise AssertionError("rotamers built on another structure must be refused")
+
+
+def test_regression_a_requested_position_that_harvest_drops_raises():
+    """``harvest`` raised for a position it was not asked for but never checked
+    the reverse, and the loop's own check scans only the keys present. A
+    position PyMOL could not locate -- an incomplete crystal structure missing
+    that residue's CA is enough -- vanished without a word: measured, 2
+    positions requested, 1 designed, nothing raised."""
+    from ipro_agent.rotamers import RotamerError, harvest
+
+    tmp = Path(tempfile.mkdtemp())
+    payload = json.dumps({
+        "pdb": str(CRN.resolve()),
+        "rotamers": {"A16": {"ALA": [{"state": 1, "atoms": [["CB", [0.0, 0.0, 0.0]]]}]}},
+        "native": {"A16": "CYS"}, "errors": {},
+    })
+    fake = _fake_harvest_python(tmp, payload)
+    want = [DesignPosition.parse("A16", ["ALA"]), DesignPosition.parse("A17", ["ALA"])]
+    try:
+        harvest(CRN, want, python=str(fake), workdir=tmp)
+    except RotamerError as exc:
+        assert "A17" in str(exc)
+    else:
+        raise AssertionError("a requested position returning nothing must raise")
+
+    # Asking only for what came back still works.
+    rots, native, _ = harvest(CRN, want[:1], python=str(fake), workdir=tmp)
+    assert set(rots) == {"A16"}
+
+
+def test_regression_harvested_rotamers_carry_no_hydrogens():
+    """Rotamers must be heavy-atom-only, because every template the energy
+    model builds is heavy-atom-only. Harvesting hydrogens from a protonated
+    input broke that symmetry: the side chain carried its own backbone H and
+    HA, which the template no longer held, so every rotamer gained a
+    near-constant +18 to +22 kcal/mol. Measured on a protonated 2omf_A with the
+    shipped defaults, that pushed 94 of 160 rotamers past max_self_energy
+    instead of 46 and deleted TRP, PHE, TYR and PRO from one position
+    outright -- so the published Trp answer was not in the design space, with
+    validate reporting 6561 sequences and no error anywhere."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.rotamers import harvest
+
+    pos = [DesignPosition.parse("A16", ["TRP", "SER"])]
+    rots, _, _ = harvest(CRN, pos)
+    for rot in rots["A16"]:
+        bad = [n for n in rot.atoms.names
+               if n.strip().upper().lstrip("0123456789").startswith(("H", "D"))]
+        assert not bad, f"{rot.aa}#{rot.state} carries hydrogens: {bad}"
+        assert all(e not in ("H", "D", "T") for e in rot.atoms.elements), rot.atoms.elements
+
+
+def _ctx(**kw):
+    from ipro_agent.goals import ScoreContext
+
+    return ScoreContext(**kw)
+
+
+def test_regression_unknown_goal_option_is_refused():
+    """``goal_options`` was the one part of the spec never checked against
+    anything, and it carries every objective weight and the published
+    acceptance filter. Measured: ``pore_diameter_maximum`` for
+    ``pore_diameter_max`` left PoreDesigner's hard filter inert -- a 20.00 A
+    bottleneck was not rejected, goal.notes was empty, and the design shipped
+    unfiltered. ``antiweight: 5`` left the weight at 1.0."""
+    from ipro_agent.goals import build_goal
+
+    for bad in ({"pore_diameter_maximum": 4.0}, {"antiweight": 5},
+                {"anti_wieght": 0.5}, {"max_targett_ie": 1}):
+        try:
+            build_goal(_spec(goal="bind_tighter", goal_options=bad))
+        except SpecError as exc:
+            assert list(bad)[0] in str(exc)
+        else:
+            raise AssertionError(f"{bad} must be refused, not ignored")
+
+    # Keys read elsewhere in the run must still be accepted by every goal.
+    for shared in ("max_self_energy", "pair_eps", "reference_energies",
+                   "strain_weight", "insert_phi", "pore_window"):
+        build_goal(_spec(goal="bind_tighter", goal_options={shared: 1.0}))
+    # And each goal's own keys.
+    build_goal(_spec(goal="bind_tighter", goal_options={"max_total_energy": -1.0}))
+    build_goal(_spec(goal="reshape_channel",
+                     goal_options={"direction": "narrow", "target_radius": 2.0,
+                                   "pore_diameter_max": 4.0, "long_fraction": 0.5,
+                                   "long_residues": ["TRP"], "radius_weight": 1.0}))
+
+
+def test_regression_a_nonpositive_goal_weight_is_refused():
+    """A weight scales a contribution to the objective; zero deletes the term
+    and a negative value inverts it. Measured with anti_weight -1 and a base
+    IE(target) of -10: binding the anti-target 8 kcal/mol tighter scored
+    -28.000 against -12.000 for rejecting it, so the loop optimized the
+    opposite of the request and its objective curve still fell.
+    ``Assembly.weight`` is refused on the same grounds."""
+    from ipro_agent.goals import build_goal
+
+    spec_kw = {"goal": "switch_specificity",
+               "molecules": _mols() + [{"name": "DEC", "path": str(CRN),
+                                        "role": "anti_target", "kind": "ligand"}]}
+    for w in (-1, 0, 0.0, -0.5):
+        try:
+            build_goal(_spec(goal_options={"anti_weight": w}, **spec_kw))
+        except SpecError as exc:
+            assert "anti_weight" in str(exc)
+        else:
+            raise AssertionError(f"anti_weight {w} must be refused")
+    g = build_goal(_spec(goal_options={"anti_weight": 3.0}, **spec_kw))
+    assert g.weight == 3.0
+    for w in (-1, 0):
+        try:
+            build_goal(_spec(goal="reshape_channel",
+                             goal_options={"target_radius": 2.0, "radius_weight": w}))
+        except SpecError:
+            pass
+        else:
+            raise AssertionError(f"radius_weight {w} must be refused")
+
+
+def test_regression_the_pore_filter_alone_does_not_hide_a_degenerate_objective():
+    """``pore_diameter_min/max`` are a hard acceptance FILTER, not a term in the
+    objective -- nothing in score() reads them. Counting them as a geometric
+    objective suppressed the degenerate-objective warning for exactly the spec
+    that states the paper's published filter: measured, a 3.2 A and a 3.8 A
+    candidate both scored -100.0 and the user was told nothing, while a spec
+    with no options at all got the warning."""
+    from ipro_agent.goals import build_goal
+
+    filter_only = build_goal(_spec(
+        goal="reshape_channel", molecules=[{"name": "prot", "path": str(CRN),
+                                            "role": "design"}],
+        goal_options={"pore_diameter_min": 2.0, "pore_diameter_max": 4.0}))
+    assert any("degenerate" in n for n in filter_only.notes), filter_only.notes
+    # The filter itself still works.
+    assert filter_only.filter_reject(_ctx(geometry={"min_pore_diameter": 20.0}))
+    assert filter_only.filter_reject(_ctx(geometry={"min_pore_diameter": 3.0})) is None
+    # A real geometric objective silences it.
+    with_target = build_goal(_spec(
+        goal="reshape_channel", molecules=[{"name": "prot", "path": str(CRN),
+                                            "role": "design"}],
+        goal_options={"target_radius": 2.0}))
+    assert not any("degenerate" in n for n in with_target.notes), with_target.notes
+
+
+def test_regression_a_note_raised_while_scoring_reaches_the_run():
+    """The loop copied ``goal.notes`` at construction, but a goal also raises
+    notes while scoring -- a term it had to drop, an option it could not apply.
+    Measured: a reshape_channel run whose radius term was never active (score
+    identically 0.0 every iteration) reported a mutation string and a best
+    score with no caveat at all, against the house rule that a design is never
+    reported without its notes."""
+    from ipro_agent.loop import IPROLoop
+
+    spec = _spec(goal="reshape_channel",
+                 molecules=[{"name": "prot", "path": str(CRN), "role": "design"}],
+                 goal_options={"target_radius": 2.0})
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run", backend=resolve("builtin"))
+    # A note the goal raises later must be visible through the loop's list.
+    loop.goal.score(_ctx(design_only=-1.0, total=-1.0))
+    assert any("target_radius" in n for n in loop.notes), loop.notes
+
+
+def test_regression_the_interaction_floor_is_a_constraint_not_a_penalty():
+    """docs/DESIGN.md records IPRO+/-'s form as ``min E_complex s.t. IE >=
+    0.75 * IE_WT``. As a unit-weight quadratic penalty it was not a constraint
+    at all: measured with the floor at -15.0, a candidate that destroyed the
+    interaction entirely (IE 0.0) scored -115.000, *better* than a compliant
+    candidate at -100.000, and was kept as the run's best design."""
+    from ipro_agent.goals import build_goal
+
+    g = build_goal(_spec(goal="stabilize",
+                         goal_options={"min_interaction_fraction": 0.75,
+                                       "reference_interaction": -20.0}))
+    ok = _ctx(design_only=-100.0, total=-100.0, interaction={"LIG": -20.0})
+    broken = _ctx(design_only=-340.0, total=-340.0, interaction={"LIG": 0.0})
+    assert g.filter_reject(ok) is None
+    reason = g.filter_reject(broken)
+    assert reason and "floor" in reason, reason
+    # The penalty stays as a gradient, but it no longer decides acceptance.
+    assert g.score(broken) > g.score(ok) - 1e9   # shape unchanged, filter rules
+
+
+def test_regression_max_total_energy_is_enforced():
+    """``BindTighter``'s docstring promised that candidates whose whole-complex
+    energy exceeds ``max_total_energy`` are rejected. It was read nowhere in
+    the package: measured, a spec with a -50.0 cap ran to completion on a
+    candidate at +500.0 with no rejection and no note, while ``ctx.total`` was
+    measured and carried for exactly this purpose."""
+    from ipro_agent.goals import build_goal
+
+    g = build_goal(_spec(goal_options={"max_total_energy": -50.0}))
+    assert g.filter_reject(_ctx(total=500.0, interaction={"LIG": -12.0}))
+    assert g.filter_reject(_ctx(total=-60.0, interaction={"LIG": -12.0})) is None
+
+
+def test_regression_km_without_a_ligand_is_not_summed_over_every_target():
+    """OptZyme Eq 7 is the interaction energy with the *substrate*. With no
+    molecule of kind 'ligand', score() silently summed every target: measured,
+    an unrelated protein partner at -40 entered a "K_M" score of -49.0 that
+    components() reported as -9.0, so the number could not even be explained."""
+    from ipro_agent.goals import build_goal
+
+    mols = [
+        {"name": "prot", "path": str(CRN), "role": "design"},
+        {"name": "TSA", "path": str(CRN), "role": "target", "kind": "transition_state"},
+        {"name": "OTHER", "path": str(CRN), "role": "target", "kind": "protein"},
+    ]
+    try:
+        build_goal(_spec(goal="improve_catalysis", molecules=mols,
+                         goal_options={"parameter": "km"}))
+    except SpecError as exc:
+        assert "ligand" in str(exc)
+    else:
+        raise AssertionError("an ambiguous substrate must be refused for 'km'")
+
+    # One target is unambiguous: used, and said so.
+    g = build_goal(_spec(goal="improve_catalysis", molecules=mols[:2],
+                         goal_options={"parameter": "km"}))
+    assert any("km" in n and "substrate" in n for n in g.notes), g.notes
+    assert g.score(_ctx(interaction={"TSA": -9.0})) == -9.0
+
+
+def test_regression_an_ignored_anti_target_is_reported():
+    """A declared anti-target is read by ``switch_specificity`` alone. Measured
+    with C12 as target and C14 as anti_target, bind_tighter / stabilize /
+    reshape_channel scored identically whether C14 was bound at -10 or rejected
+    at -2, with notes empty: a user who labelled the decoy correctly but picked
+    the wrong goal optimized plain affinity and was never told."""
+    from ipro_agent.goals import build_goal
+
+    mols = _mols() + [{"name": "DEC", "path": str(CRN), "role": "anti_target",
+                       "kind": "ligand"}]
+    for goal in ("bind_tighter", "stabilize"):
+        g = build_goal(_spec(goal=goal, molecules=mols))
+        assert any("anti-target" in n for n in g.notes), (goal, g.notes)
+    g = build_goal(_spec(goal="switch_specificity", molecules=mols))
+    assert not any("does not read anti-targets" in n for n in g.notes), g.notes
+
+
+def test_regression_suggest_goal_prefers_the_more_specific_question():
+    """Matching in word order answered the wrong question: "change its binding
+    specificity from C12 to C14" hit "binding" first and suggested
+    bind_tighter, which optimizes plain affinity and ignores the decoy."""
+    from ipro_agent.goals import suggest_goal
+
+    assert suggest_goal("change its binding specificity from C12 to C14") == "switch_specificity"
+    assert suggest_goal("make the interface bind the target and not the decoy") == "switch_specificity"
+    assert suggest_goal("improve binding affinity for the target") == "bind_tighter"
+    assert suggest_goal("narrow the pore") == "reshape_channel"
+    assert suggest_goal("nothing relevant here") is None
+
+
+def test_regression_stabilize_validates_its_reference_up_front():
+    """The error raised from score() told the user to "measure it with
+    'ipro-agent score'" -- and that command builds the same goal and dies with
+    the same error, so the documented recovery path could not be followed.
+    ``validate`` reported "spec is usable", exit 0, beforehand."""
+    from ipro_agent.goals import build_goal
+
+    try:
+        build_goal(_spec(goal="stabilize",
+                         goal_options={"min_interaction_fraction": 0.75}))
+    except SpecError as exc:
+        assert "reference_interaction" in str(exc)
+    else:
+        raise AssertionError("a missing reference_interaction must fail validation")
+
+
+def test_regression_pair_prescreen_radius_encloses_from_the_screen_centre():
+    """The position-pair pre-screen compared the distance between two mean
+    centroids against each set's ``bounding_radius()``, which is measured about
+    each rotamer's *own* centroid and so does not enclose it seen from the mean.
+    The test was therefore not conservative: measured with two one-atom
+    rotamers 40 A apart at one position, a real -0.014002 kcal/mol pair 6.0 A
+    away was dropped and the block recorded 0 pair terms."""
+    far = Rotamer(position="P1", aa="ALA", state=1,
+                  atoms=AtomSet(names=["CB"], coords=[[40.0, 0, 0]],
+                                resnames=["ALA"], reskeys=[("A", 1, "")]))
+    near = Rotamer(position="P1", aa="SER", state=1,
+                   atoms=AtomSet(names=["CB"], coords=[[0.0, 0, 0]],
+                                 resnames=["SER"], reskeys=[("A", 1, "")]))
+    other = Rotamer(position="P2", aa="ALA", state=1,
+                    atoms=AtomSet(names=["CB"], coords=[[6.0, 0, 0]],
+                                  resnames=["ALA"], reskeys=[("A", 2, "")]))
+    tab = build_tables(
+        {"P1": [far, near], "P2": [other]},
+        AtomSet(), resolve("builtin"),
+        native={}, max_self_energy=1e9, pair_eps=0.0,
+    )
+    assert tab.n_pair_terms() > 0, "a reachable pair must not be screened out"
+
+
+def test_regression_a_partial_strain_penalty_is_refused():
+    """PyMOL emits no bump score for ALA (its library has no entry), and the
+    table builder skipped a missing strain silently, so with strain_weight set
+    the penalty applied to eight identities and not to ALA -- which then
+    competed without the cost every other identity paid."""
+    a = Rotamer(position="P1", aa="ALA", state=1, strain=None,
+                atoms=AtomSet(names=["CB"], coords=[[0.0, 0, 0]],
+                              resnames=["ALA"], reskeys=[("A", 1, "")]))
+    w = Rotamer(position="P1", aa="TRP", state=1, strain=2.0,
+                atoms=AtomSet(names=["CB"], coords=[[0.0, 0, 0]],
+                              resnames=["TRP"], reskeys=[("A", 1, "")]))
+    try:
+        build_tables({"P1": [a, w]}, AtomSet(), resolve("builtin"),
+                     native={}, max_self_energy=1e9, strain_weight=1.0)
+    except ValueError as exc:
+        assert "strain" in str(exc)
+    else:
+        raise AssertionError("a strain penalty applied to only some identities must raise")
+    # With no strain_weight the missing value is irrelevant.
+    build_tables({"P1": [a, w]}, AtomSet(), resolve("builtin"),
+                 native={}, max_self_energy=1e9)
+
+
+def test_regression_selftest_runner_reports_a_systemexit():
+    """``except Exception`` let BaseException through, so one ``SystemExit``
+    from a test (or a ``pytest.skip``, which this runner's own docstring
+    invites) propagated out and ended the run with exit 0, no summary line and
+    no record of the tests that never ran. Measured: injecting sys.exit(0) into
+    the alphabetically first test printed nothing at all and exited 0 -- which
+    would make every "94 tests passing" claim in this repo unfounded."""
+    tmp = Path(tempfile.mkdtemp())
+    pkg = tmp / "tests"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "test_ipro.py").write_text(
+        "import sys\n"
+        "def test_aaa_exits():\n    sys.exit(0)\n"
+        "def test_zzz_fine():\n    assert True\n"
+        "def collect():\n"
+        "    g = globals()\n"
+        "    return [(n, g[n]) for n in sorted(g) if n.startswith('test_')]\n"
+    )
+    shutil.copy(REPO / "scripts" / "selftest.py", tmp / "selftest.py")
+    p = subprocess.run([sys.executable, str(tmp / "selftest.py")],
+                       capture_output=True, text=True, cwd=tmp, timeout=120)
+    assert p.returncode == 1, (p.returncode, p.stdout, p.stderr)
+    assert "FAIL test_aaa_exits" in p.stdout, p.stdout
+    assert "1 passed, 1 failed, 2 total" in p.stdout, p.stdout
+
+
+def test_regression_doctor_probes_an_isolated_interpreter():
+    """doctor's module probes ran ``python -c`` with no ``-I``, so the current
+    directory was on sys.path and PYTHONPATH was inherited -- despite the
+    comment in ``_run`` claiming otherwise -- while the run itself probes with
+    ``-I``. Measured from a directory holding a ``pyrosetta.py`` and a
+    ``vina/`` folder, doctor reported "OK PyRosetta ... OK AutoDock Vina",
+    resolved energy to pyrosetta and dock to vina, and printed degraded = [],
+    so the run looked not degraded at all and the reported mode was wrong in
+    both directions. Neither is installed on this machine."""
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "pyrosetta.py").write_text("__version__ = '2024.1'\n")
+    (tmp / "vina").mkdir()
+    (tmp / "vina" / "__init__.py").write_text("__version__ = '1.2.5'\n")
+    code = (
+        "import sys, json\n"
+        f"sys.path.insert(0, {str(REPO / 'scripts')!r})\n"
+        "from doctor import _module_in\n"
+        "print(json.dumps([_module_in(sys.executable, 'pyrosetta')[0],"
+        " _module_in(sys.executable, 'vina')[0]]))\n"
+    )
+    p = subprocess.run([sys.executable, code and "-c", code], capture_output=True,
+                       text=True, cwd=tmp, timeout=300)
+    assert p.returncode == 0, p.stderr
+    seen = json.loads(p.stdout.strip().splitlines()[-1])
+    assert seen == [False, False], (
+        f"a planted module in the working directory must not be reported as "
+        f"installed; got {seen}"
+    )
+
+
+def test_regression_doctor_degraded_covers_the_milp():
+    """``milp["available"]`` was true whenever any solver binary was on PATH,
+    including one doctor had just called unusable, and the MILP never appeared
+    in ``degraded``. Measured: with only an unusable cplex on PATH,
+    ``doctor.py --require milp`` exited 0 and the greedy fallback -- which
+    proves no optimality -- was invisible to any caller reading the exit status
+    or the machine-readable report."""
+    p = subprocess.run([sys.executable, str(REPO / "scripts" / "doctor.py"), "--json"],
+                       capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, p.stderr
+    rep = json.loads(p.stdout)
+    greedy = rep["resolved"]["milp"].startswith("greedy")
+    assert rep["checks"]["milp"]["available"] is not greedy
+    assert ("milp" in rep["degraded"]) is greedy, (rep["resolved"]["milp"], rep["degraded"])
+    # `degraded` is what the house rules require to be reported with every
+    # design, so it must agree with the probes for every backend, whatever
+    # happens to be installed on the machine running this.
+    for key in ("pymol", "pyrosetta", "vina", "milp"):
+        assert (key in rep["degraded"]) is (not rep["checks"][key]["available"]), (
+            key, rep["degraded"], rep["checks"][key]["available"]
+        )
+
+
+class _CountingRelaxBackend:
+    """A stand-in for a relaxing backend, so the wiring can be tested without
+    PyRosetta."""
+
+    name = "counting-relax"
+    can_relax = True
+    units = "stand-in units"
+    screening_pairwise = False
+
+    def __init__(self):
+        from ipro_agent.energy.builtin import BuiltinBackend
+
+        self._screen = BuiltinBackend()
+        self.calls: list[tuple] = []
+
+    def interaction(self, a, b):
+        return self._screen.interaction(a, b)
+
+    def internal(self, a):
+        return self._screen.internal(a)
+
+    def relax(self, pdb_in, pdb_out, fixed=()):
+        self.calls.append((Path(pdb_in).name, tuple(fixed)))
+        Path(pdb_out).write_text(Path(pdb_in).read_text())
+        return 0.0
+
+    def describe(self):
+        return "counting-relax (stand-in)"
+
+
+def test_regression_full_mode_actually_relaxes():
+    """``EnergyBackend.relax`` had no call site anywhere in the package, and
+    neither did ``RestraintPlan.relax_fixed_positions``, which is collected for
+    exactly that argument. So a run with a relaxing backend reported mode
+    ``full`` -- documented as "perturb + relax + repack" -- while doing no
+    relaxation at all, and because ``can_relax`` was true it also suppressed
+    the note saying the reported energies were screening energies. Measured
+    with a counting stand-in backend over 3 iterations: relax 0 calls,
+    score_structure 0 calls, mode 'full', REMARK SCORE labelled REU."""
+    from ipro_agent.loop import IPROLoop
+
+    tmp = Path(tempfile.mkdtemp())
+    spec = _spec(loop={"perturb_backbone": True, "iterations": 1})
+    be = _CountingRelaxBackend()
+    loop = IPROLoop(spec, tmp / "run", backend=be)
+    assert loop.mode == "full", loop.mode
+
+    src = tmp / "cand.pdb"
+    src.write_text(CRN.read_text())
+    loop._restraints.relax_fixed_positions = ["A16"]
+    out = loop._relax_once(src)
+    assert be.calls == [("cand.pdb", ("A16",))], be.calls
+    assert out != src and out.exists(), out
+    assert loop._relaxed == 1 and loop._relax_failed == 0
+
+    # A backend that cannot relax leaves the file alone and says so in its mode.
+    plain = IPROLoop(_spec(loop={"perturb_backbone": True}), tmp / "run2",
+                     backend=resolve("builtin"))
+    assert plain.mode == "backbone-mc"
+    assert plain._relax_once(src) is src
+    assert any("no gradient relaxation" in n for n in plain.notes)
+
+
+def test_regression_a_failed_relaxation_is_reported_not_hidden():
+    """If relaxation is claimed and cannot be done, the run must say so rather
+    than report mode 'full'."""
+    from ipro_agent.loop import IPROLoop
+
+    class _Broken(_CountingRelaxBackend):
+        def relax(self, pdb_in, pdb_out, fixed=()):
+            raise RuntimeError("no params for LIG")
+
+    tmp = Path(tempfile.mkdtemp())
+    loop = IPROLoop(_spec(loop={"perturb_backbone": True}), tmp / "run",
+                    backend=_Broken())
+    src = tmp / "c.pdb"
+    src.write_text(CRN.read_text())
+    assert loop._relax_once(src) is src
+    assert loop._relax_failed == 1
+    assert any("relaxation failed" in n for n in loop.notes), loop.notes
+
+
+def test_regression_the_screening_caveat_follows_the_pair_table():
+    """The "these are screening energies" caveat was keyed on ``can_relax``.
+    The PyRosetta backend can relax and -- by default, as its own module
+    docstring says -- still returns the screening function's numbers for the
+    MILP table and for every reported energy, so the caveat was dropped from
+    exactly the file that needed it and the written PDB carried screening
+    kcal/mol under a "Rosetta Energy Units (REU)" heading."""
+    be = resolve("builtin")
+    assert be.screening_pairwise is True
+    assert "screening" in be.units
+
+    # The attribute exists on the contract, so any backend answers the question.
+    from ipro_agent.energy.base import EnergyBackend
+
+    assert EnergyBackend.screening_pairwise is True
+    src = (REPO / "ipro_agent" / "energy" / "pyrosetta_backend.py").read_text()
+    assert "self.screening_pairwise = not self.exact_pairs" in src, (
+        "the PyRosetta backend must declare where its pairwise numbers come from"
+    )
+    loop_src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "self.backend.screening_pairwise else" in loop_src
+
+
+def test_regression_a_spec_with_nothing_to_design_is_refused():
+    """An empty ``positions:`` list ran to completion and reported "ok: true,
+    accepted: 3, mutations: {}" with no note, which reads as "the optimizer
+    found no improvement" rather than "nothing was designed"."""
+    from ipro_agent.loop import IPROLoop
+
+    spec = _spec(positions=[])
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run", backend=resolve("builtin"))
+    try:
+        loop.run_loop()
+    except SpecError as exc:
+        assert "nothing to design" in str(exc)
+    else:
+        raise AssertionError("a spec that designs nothing must be refused")
+
+
+def _have_vina() -> bool:
+    from ipro_agent.dock import find_vina
+
+    return find_vina() is not None
+
+
+def test_regression_the_vina_path_converts_pdb_to_pdbqt():
+    """Vina reads PDBQT only, and a spec names PDB files -- the format every
+    example, every doc and the structure loader use. Nothing converted them, so
+    ``backends.dock: vina`` could not dock at all.
+
+    Measured with Vina 1.2.7 installed: every redock failed with "receptor
+    receptor.pdb is not a .pdbqt file", the loop noted the failure and left the
+    placement unchanged, so a run reporting ``dock -> vina`` had never moved a
+    partner. ``auto`` resolves to vina whenever Vina is on PATH, so installing
+    Vina made docking stop rather than start. After the fix the same run docks:
+    score 62.6984 -> -10.0636 with "redocked 1 partner(s)"."""
+    if not _have_vina():
+        print("    (skipped: no AutoDock Vina)")
+        return
+    if not shutil.which("obabel"):
+        print("    (skipped: no obabel for the PDB -> PDBQT conversion)")
+        return
+    from ipro_agent.dock import pdb_to_pdbqt
+
+    tmp = Path(tempfile.mkdtemp())
+    q = pdb_to_pdbqt(CRN, tmp / "rec.pdbqt", receptor=True)
+    assert q.exists() and q.stat().st_size > 0
+    assert q.read_text().lstrip().startswith(("ROOT", "ATOM", "REMARK", "MODEL")), \
+        q.read_text()[:80]
+    # The loop converts whatever the spec named, rather than requiring PDBQT.
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "pdb_to_pdbqt" in src, "the loop must convert before calling Vina"
+
+
+def test_pyrosetta_unexercised_paths_are_declared_and_real():
+    """PyRosetta is licensed and is not installed here, so the paths that need
+    it have never executed. They are declared in one place rather than left to
+    be discovered, and this test keeps that declaration honest: every name must
+    still exist on the backend, so the list cannot rot as the code changes.
+    See docs/DESIGN.md section 7e."""
+    from ipro_agent.energy import pyrosetta_backend as prb
+
+    assert prb.UNEXERCISED, "the declaration must not be empty while PyRosetta is absent"
+    for name, why in prb.UNEXERCISED.items():
+        target = prb.PyRosettaBackend
+        attr = name.split(".")[-1]
+        assert hasattr(target, attr), f"declared-unexercised {name!r} no longer exists"
+        assert why.strip(), f"{name} needs a reason"
+
+    try:
+        import pyrosetta  # noqa: F401
+    except ImportError:
+        return
+    raise AssertionError(
+        "PyRosetta is now installed: run these paths and move them out of "
+        "UNEXERCISED (docs/DESIGN.md section 7e says how)"
+    )

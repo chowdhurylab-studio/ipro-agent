@@ -54,8 +54,27 @@ import sys
 from typing import Any
 
 # Supplied by the structure, not by the rotamer: excluded when checking that
-# the applied side chain is the one that was asked for.
-BACKBONE = {"N", "CA", "C", "O", "OXT"}
+# the applied side chain is the one that was asked for. OT1/OT2/OT are the
+# CHARMM/AMBER spellings of the C-terminal carboxylate.
+BACKBONE = {"N", "CA", "C", "O", "OXT", "OT1", "OT2", "OT"}
+
+
+def _is_hydrogen(atom) -> bool:
+    """True for a hydrogen, by element where PyMOL gives one, else by name.
+
+    The state check below compares the applied side chain against the rotamer
+    the MILP scored, and the rotamers are heavy-atom-only (see
+    ``scripts/harvest_rotamers.py``). Including hydrogens here made the check
+    fail on an atom that is not part of the rotamer at all: on a protonated
+    input it reported "applied side chain is not rotamer state 4: 1 atom(s)
+    differ (H)", the whole structure write was suppressed, and the run blamed
+    the user's PyMOL build while doctor.py reported PyMOL working.
+    """
+    sym = (getattr(atom, "symbol", "") or "").strip().upper()
+    if sym:
+        return sym in ("H", "D", "T")
+    name = (getattr(atom, "name", "") or "").strip().upper().lstrip("0123456789")
+    return name[:1] in ("H", "D")
 
 #: The wizard is always handed a named selection, never a selection expression,
 #: because ``do_select`` finishes with ``cmd.delete(selection)``: given the
@@ -168,7 +187,7 @@ def apply_design(job_path: str, out_path: str) -> int:
             want = {
                 a.name: tuple(a.coord)
                 for a in cmd.get_model("mutation", state=state).atom
-                if a.name not in BACKBONE
+                if a.name not in BACKBONE and not _is_hydrogen(a)
             }
 
             cmd.frame(state)
@@ -192,7 +211,11 @@ def apply_design(job_path: str, out_path: str) -> int:
 
             # And the right identity is not enough: a different rotamer of the
             # right residue would be a structure the MILP never scored.
-            have = {a.name: tuple(a.coord) for a in cmd.get_model(sel).atom}
+            have = {
+                a.name: tuple(a.coord)
+                for a in cmd.get_model(sel).atom
+                if not _is_hydrogen(a)
+            }
             off = [
                 n for n, c in want.items()
                 if n not in have

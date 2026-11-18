@@ -88,12 +88,20 @@ class PoreProfile:
         )
 
 
-def vdw_radii(names: list[str]) -> np.ndarray:
+def vdw_radii(names: list[str], elements: list[str] | None = None) -> np.ndarray:
+    """Per-atom vdW radius. Pass ``elements`` (the file's element column) when
+    the caller has it: deriving the element from the atom name alone cannot
+    reach a two-letter symbol, so an FE or CL lining the lumen was measured
+    with fluorine's or carbon's radius. ``VDW``'s own CL/BR/SE entries were
+    unreachable for the same reason -- the identical defect that
+    ``energy.base.guess_element`` documents."""
+    from .energy.base import guess_element
+
     out = np.empty(len(names))
     for i, nm in enumerate(names):
-        s = str(nm).strip().lstrip("0123456789")
-        el = s[0].upper() if s else "C"
-        out[i] = VDW.get(el, _VDW_DEFAULT)
+        el = (elements[i] if elements and i < len(elements) and elements[i]
+              else guess_element(nm))
+        out[i] = VDW.get(str(el).strip().upper(), _VDW_DEFAULT)
     return out
 
 
@@ -165,6 +173,7 @@ def pore_profile(
     spacing: float = 0.5,
     window: tuple[float, float] | None = None,
     max_centre_offset: float = 4.0,
+    elements: list[str] | None = None,
 ) -> PoreProfile:
     """Radius of the largest inscribed circle, slice by slice along the axis.
 
@@ -189,7 +198,7 @@ def pore_profile(
     c = np.asarray(coords, dtype=float)
     if c.size == 0:
         return PoreProfile()
-    r = vdw_radii(names)
+    r = vdw_radii(names, elements)
 
     guessed = axis_direction is None
     direction = (

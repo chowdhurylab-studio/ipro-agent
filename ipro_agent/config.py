@@ -72,6 +72,44 @@ AA_GROUPS: dict[str, list[str]] = {
 }
 
 
+def as_sequence(value: Any) -> list:
+    """Wrap a scalar in a list instead of iterating it.
+
+    A YAML scalar string is itself an iterable of characters, so every place
+    that accepted "a list of X" also silently accepted one string and took it
+    apart letter by letter. ``allowed: standard`` became the two residues whose
+    codes happen to spell out of "s","t","a","n"... ; ``positions: "115"``
+    became three positions A1, A1, A5; and ``residues: "12"`` deleted residues
+    1 and 2 -- defeating section 1i's invariant that an indel never touches a
+    residue nobody named. All of it ran clean. A scalar is what the user wrote,
+    so it is wrapped, not iterated.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        return [value]
+    return list(value)
+
+
+def position_label(chain: str, number: int, insertion_code: str = "") -> str:
+    """The text form of a residue position, which must round-trip.
+
+    ``parse(position_label(c, n, i)) == (c, n, i)`` for every spelling. A
+    letter chain can simply concatenate (``A115``), but a numeric chain id has
+    to keep its separator: ``1:115`` written as ``1115`` reads back as chain A
+    residue 1115 and the mutation lands on a different residue -- silently,
+    because residue 1115 may well exist. The PDB permits any printable
+    character as a chain id, so the test is "is it a letter", not "is it a
+    digit".
+
+    One function rather than three copies: :class:`DesignPosition` had the
+    separator, while :class:`ResidueRef` (structure.py) and :class:`AtomRef`
+    did not, so the three disagreed for exactly the inputs that matter.
+    """
+    sep = "" if str(chain).isalpha() else ":"
+    return f"{chain}{sep}{number}{insertion_code}".strip()
+
+
 def expand_allowed(tokens: Iterable[str]) -> list[str]:
     """Expand a mixed list of group names, 1-letter and 3-letter codes.
 
@@ -79,13 +117,15 @@ def expand_allowed(tokens: Iterable[str]) -> list[str]:
     ['ALA', 'GLY', 'ILE']
     >>> expand_allowed(["ALA", "A"])
     ['ALA']
+    >>> expand_allowed("standard") == expand_allowed(["standard"])
+    True
 
     Raises :class:`SpecError` on an unrecognized token, rather than silently
     dropping it -- a dropped residue would quietly shrink the design space and
     change the answer.
     """
     out: list[str] = []
-    for tok in tokens:
+    for tok in as_sequence(tokens):
         t = str(tok).strip()
         if not t:
             continue
@@ -108,6 +148,24 @@ def expand_allowed(tokens: Iterable[str]) -> list[str]:
 
 class SpecError(ValueError):
     """The design specification is unusable as written."""
+
+
+_TRUE = {"true", "yes", "on", "1"}
+_FALSE = {"false", "no", "off", "0"}
+
+
+def _as_bool(what: str, value: Any) -> bool:
+    """Strict bool coercion: a quoted ``"false"`` must not read as True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise SpecError(f"{what} must be true or false; got {value!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +205,7 @@ class Molecule:
         self.path = Path(self.path).expanduser()
         self.kind = MolKind(self.kind)
         self.role = Role(self.role)
+        self.chains = [str(c) for c in as_sequence(self.chains)]
         if not self.name:
             raise SpecError("molecule needs a name")
 
@@ -201,15 +260,9 @@ class DesignPosition:
     def label(self) -> str:
         """Text form, which must round-trip: ``parse(p.label).key == p.key``.
 
-        A letter chain can simply concatenate (``A115``), but a numeric chain
-        id has to keep its separator. ``1:115`` written as ``1115`` reads back
-        as chain A residue 1115, and the mutation lands on the wrong residue
-        -- silently, because 1115 may well exist. The PDB permits any
-        printable character as a chain id, so the test is "is it a letter",
-        not "is it a digit".
+        See :func:`position_label`.
         """
-        sep = "" if self.chain.isalpha() else ":"
-        return f"{self.chain}{sep}{self.number}{self.insertion_code}".strip()
+        return position_label(self.chain, self.number, self.insertion_code)
 
     @property
     def key(self) -> tuple[str, int, str]:
@@ -264,6 +317,15 @@ class IndelSpec:
 
     def __post_init__(self) -> None:
         self.kind = IndelKind(self.kind)
+        # Normalized here, not at the point of use: ``residues: "12"`` is one
+        # residue the user named, and iterating the string deleted residues 1
+        # and 2 instead while reporting success.
+        try:
+            self.residues = [int(x) for x in as_sequence(self.residues)]
+        except (TypeError, ValueError) as exc:
+            raise SpecError(
+                f"indel 'residues' must be residue numbers; got {self.residues!r}"
+            ) from exc
         if self.kind is IndelKind.INSERT:
             if self.after is None:
                 raise SpecError("insertion needs 'after' (residue to insert behind)")
@@ -315,6 +377,18 @@ class Assembly:
         if not str(self.name).strip():
             raise SpecError("every assembly needs a name")
         self.name = str(self.name).strip()
+        self.molecules = [str(m) for m in as_sequence(self.molecules)]
+        dup = sorted({n for n in self.molecules if self.molecules.count(n) > 1})
+        if dup:
+            # A molecule listed twice was kept twice, so its own internal
+            # energy entered the complex energy once per listing (+1588.34
+            # kcal/mol measured on the smoke case) while the interaction map,
+            # keyed by name, showed one copy. The two then disagreed.
+            raise SpecError(
+                f"assembly {self.name!r} lists molecule(s) {dup} more than once; "
+                "each participant may appear once (its energy would otherwise be "
+                "counted once per listing)"
+            )
         if self.weight <= 0:
             raise SpecError(
                 f"assembly {self.name!r} has weight {self.weight}; weights scale a "
@@ -345,7 +419,12 @@ class AtomRef:
 
     @property
     def position(self) -> str:
-        return f"{self.chain}{self.number}{self.insertion_code}".strip()
+        """The residue part, in the same round-tripping form a design position
+        uses -- ``restraints._resolve`` compares the two as text, so when this
+        dropped the separator a restraint on a numeric-chain design position
+        was reclassified as "held fixed, satisfied by construction" and was
+        never enforced."""
+        return position_label(self.chain, self.number, self.insertion_code)
 
     @property
     def key(self) -> tuple[str, int, str]:
@@ -432,6 +511,7 @@ class Restraint:
 
     def __post_init__(self) -> None:
         self.kind = RestraintKind(str(self.kind).lower())
+        self.atoms = [str(a) for a in as_sequence(self.atoms)]
         self.refs = [AtomRef.parse(a) for a in self.atoms]
         want = self._ARITY[self.kind]
         if len(self.refs) != want:
@@ -439,7 +519,13 @@ class Restraint:
                 f"a {self.kind.value} restraint needs exactly {want} atom(s); "
                 f"got {len(self.refs)} ({self.atoms})"
             )
-        if self.kind is RestraintKind.FIX and self.tolerance is None:
+        if self.kind is RestraintKind.FIX and self.tolerance is None and self.maximum is None:
+            # Only when the user said nothing at all. `interval()` takes
+            # min(tolerance, maximum), so installing the default alongside an
+            # explicit `maximum: 2.0` enforced 0.05 A instead -- a restraint 40x
+            # tighter than the one written, which narrows a design rather than
+            # refusing it. The error message three lines below offers 'maximum'
+            # as the way to state the allowance, so it has to be honoured.
             self.tolerance = FIX_TOLERANCE
         if self.kind in (RestraintKind.TETHER, RestraintKind.FIX):
             if self.target is not None:
@@ -478,6 +564,11 @@ class Restraint:
     def interval(self) -> tuple[float, float]:
         """The closed interval the measured quantity must fall in."""
         lo, hi = -math.inf, math.inf
+        if self.is_displacement:
+            # A displacement is a distance from the input position, so it can
+            # never be negative, whether the allowance was given as 'tolerance'
+            # or as 'maximum'.
+            lo = 0.0
         if self.target is not None and self.tolerance is not None:
             lo, hi = self.target - self.tolerance, self.target + self.tolerance
         elif self.tolerance is not None:   # tether / fix: displacement from input
@@ -619,7 +710,30 @@ class LoopSettings:
         """Acceptance kT in kcal/mol (the energy scale of the backend)."""
         return R_KCAL * self.temperature_k
 
+    #: The only settings for which "no value" is a meaning rather than a
+    #: mistake: both document None as "no limit".
+    _NULLABLE = frozenset({"stop_after_accepted", "max_minutes"})
+
     def __post_init__(self) -> None:
+        from dataclasses import fields as _dc_fields
+
+        for f in _dc_fields(self):
+            val = getattr(self, f.name)
+            if val is None and f.name not in self._NULLABLE:
+                # `integer_cuts:` written with no value parses as null, which is
+                # falsy, so a documented True default silently became False:
+                # measured, that turned off IPRO's integer cuts and a 6-iteration
+                # run "accepted" six copies of one design. A blank key is a
+                # mistake, not a value.
+                raise SpecError(
+                    f"loop.{f.name} has no value. A YAML key written with nothing "
+                    f"after the colon parses as null, which would silently replace "
+                    f"the default ({f.default!r}). Give it a value or remove the key."
+                )
+            if isinstance(f.default, bool) and not isinstance(val, bool):
+                # A quoted "false" is a non-empty string, i.e. truthy.
+                setattr(self, f.name, _as_bool(f"loop.{f.name}", val))
+
         # YAML gives lists where the dataclass wants tuples.
         for attr in ("design_per_iteration", "perturbation_segment"):
             val = getattr(self, attr)
@@ -712,6 +826,37 @@ class DesignSpec:
     goal_options: dict[str, Any] = field(default_factory=dict)
     name: str = "design"
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        dup_mol = sorted({
+            m.name for m in self.molecules
+            if sum(1 for o in self.molecules if o.name == m.name) > 1
+        })
+        if dup_mol:
+            # Every lookup downstream is by name -- `spec.molecule(name)`, the
+            # interaction map, the assembly membership list -- but the goals
+            # summed over molecule *objects*. A duplicated name therefore
+            # counted one measured interaction energy twice (29.564 reported as
+            # 59.128), inflating the selectivity gap 2.1x with no error.
+            raise SpecError(
+                f"molecule name(s) {dup_mol} are used more than once. Molecules "
+                "are referred to by name everywhere (assemblies, goals, "
+                "reports), so a repeated name is ambiguous."
+            )
+        seen: dict[tuple, DesignPosition] = {}
+        for p in self.positions:
+            if p.key in seen:
+                # The MILP built variables from the last entry, `position()`
+                # returned the first, and `design_space_size()` multiplied
+                # both: a position pinned to TRP twice reported 4 sequences for
+                # one position with 2 choices, and a contradictory pair meant
+                # the run could not produce the residue the user asked for.
+                raise SpecError(
+                    f"design position {p.label} is listed more than once "
+                    f"(allowed sets {seen[p.key].allowed} and {p.allowed}). "
+                    "List each position once, with the union of what it may be."
+                )
+            seen[p.key] = p
 
     # -- derived views ----------------------------------------------------
 
@@ -815,24 +960,41 @@ class DesignSpec:
         mols = [Molecule(**m) for m in d.pop("molecules", [])]
 
         positions: list[DesignPosition] = []
-        for item in d.pop("positions", []):
-            if isinstance(item, str):
+        for item in as_sequence(d.pop("positions", [])):
+            if isinstance(item, (str, int)):
                 positions.append(DesignPosition.parse(item))
             elif isinstance(item, dict):
                 # Two accepted spellings: {"position": "A115", "allowed": [...]}
                 # or the explicit {"chain": "A", "number": 115, ...}.
                 if "position" in item:
-                    positions.append(
-                        DesignPosition.parse(item["position"], item.get("allowed"))
-                    )
+                    # Read every key, not just these two. Reading only
+                    # `position` and `allowed` silently dropped a misspelled
+                    # `alowed:` (18 residues instead of 1) and an
+                    # `insertion_code:` (designing residue 16 instead of 16B),
+                    # while the explicit spelling rejected the same input.
+                    rest = {k: v for k, v in item.items() if k != "position"}
+                    allowed = rest.pop("allowed", None)
+                    p = DesignPosition.parse(item["position"], allowed)
+                    unknown = set(rest) - {"insertion_code", "native"}
+                    if unknown:
+                        raise SpecError(
+                            f"position {item['position']!r} has unknown key(s) "
+                            f"{sorted(unknown)}; a typo must not silently change "
+                            "the design space"
+                        )
+                    if rest.get("insertion_code"):
+                        p.insertion_code = str(rest["insertion_code"]).upper()
+                    if rest.get("native"):
+                        p.native = rest["native"]
+                    positions.append(p)
                 else:
                     positions.append(DesignPosition(**item))
             else:
                 raise SpecError(f"cannot read position entry {item!r}")
 
-        indels = [IndelSpec(**i) for i in d.pop("indels", [])]
-        restraints = [Restraint(**r) for r in d.pop("restraints", [])]
-        assemblies = [Assembly(**a) for a in d.pop("assemblies", [])]
+        indels = [IndelSpec(**i) for i in as_sequence(d.pop("indels", []))]
+        restraints = [Restraint(**r) for r in as_sequence(d.pop("restraints", []))]
+        assemblies = [Assembly(**a) for a in as_sequence(d.pop("assemblies", []))]
         loop = LoopSettings(**d.pop("loop", {}))
         backends = Backends(**d.pop("backends", {}))
 

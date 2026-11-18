@@ -114,6 +114,16 @@ shadow PyMOL's. Timeout is 3600 s for the whole harvest.
 
 ## 3. PyRosetta
 
+> **Not installed, and every path that needs it is unexercised.** This is
+> recorded in code, not just here: `ipro_agent/energy/pyrosetta_backend.UNEXERCISED`
+> names each path and what could be wrong with it, and a test fails loudly the
+> moment PyRosetta becomes importable, so the declaration cannot outlive its
+> reason. docs/DESIGN.md §7e has the specifics. It was not installed here
+> because the licence is the user's to obtain and accept (free for academics)
+> and the download is ~1.5 GB. If you install it, re-run
+> `python3 scripts/selftest.py`: the declaration test will fail by design and
+> tell you to exercise those paths and move the entries out.
+
 **Licence first.** PyRosetta is distributed under the *PyRosetta Software
 Non-Commercial License Agreement*
 (<https://github.com/RosettaCommons/rosetta/blob/main/LICENSE.PyRosetta.md>).
@@ -172,6 +182,22 @@ but I did not run them here **[unverified]**.
 ---
 
 ## 4. AutoDock Vina
+
+> **Installed and exercised on this machine, 2026-11-18.** Vina **1.2.7** and
+> Open Babel **3.2.1** are in the conda env `ipro_vina`:
+>
+> ```bash
+> mamba create -y -n ipro_vina -c conda-forge vina=1.2.7 openbabel
+> export PATH="$PATH:/opt/miniconda3/envs/ipro_vina/bin"   # or: export IPRO_VINA=/opt/miniconda3/envs/ipro_vina/bin/vina
+> ```
+>
+> 42 MB download, 32 packages. `doctor.py` then reports
+> `OK AutoDock Vina (docking) [binary] AutoDock Vina v1.2.7`, `OK ligand prep:
+> obabel`, and `dock -> vina`. This was the first time the Vina path had ever
+> run, and it did **not** work until the PDB → PDBQT conversion was wired into
+> the loop — see docs/DESIGN.md §7e. **You no longer need to pre-convert
+> anything**: the loop converts whatever the spec names, with Open Babel, and
+> the `--dry-run` flag on `ipro-agent dock` prints the exact Vina command.
 
 Current release: **v1.2.7**, published 2025-02-26
 (<https://github.com/ccsb-scripps/AutoDock-Vina/releases>). Assets are prebuilt,
@@ -445,7 +471,7 @@ backends
 
 what a run will use
   mutate   -> pymol
-  energy   -> builtin (LJ + Coulomb + implicit-solvent approximation)
+  energy   -> builtin (LJ + capped repulsion + Coulomb + H-bond well; NO desolvation term)
   dock     -> none (input poses kept; set redock:false)
   milp     -> glpk (via LP file)
 
@@ -492,7 +518,8 @@ design.
 ## 9. What I could not verify
 
 - Whether the licensed Schrödinger PyMOL build ships the mutagenesis wizard in the same importable form. The open-source build does (verified on this machine); the paid build was not available to test.
-- Whether the PyRosetta download endpoints still require credentials in any circumstance, and whether the published install commands succeed end-to-end — no PyRosetta was installed here. The file listing on the quarterly index was read directly and is reliable.
+- Whether the PyRosetta download endpoints still require credentials in any circumstance, and whether the published install commands succeed end-to-end — no PyRosetta was installed here (the licence is the user's to accept). The file listing on the quarterly index was read directly and is reliable. The *code paths* that need it are declared unexercised in `energy/pyrosetta_backend.UNEXERCISED`; `relax()`'s wiring into the loop is tested with a stand-in backend, so only Rosetta's own behaviour is unverified.
 - Current IBM CPLEX academic download path, and the exact term of a free Gurobi academic licence (Gurobi's own pages state 6 months in one place and 1 year in another).
 - ADFR suite / AutoDockTools (`prepare_ligand4.py`, `prepare_receptor4.py`) on Apple Silicon: `doctor.py` probes these names, but no ADFR install was tested.
-- Vina's Python bindings on macOS: only the absence of a macOS wheel on PyPI and the conda recipe's Boost pin were verified, not the exact compiler error you will hit.
+- Vina's Python bindings on macOS: only the absence of a macOS wheel on PyPI and the conda recipe's Boost pin were verified, not the exact compiler error you will hit. (The conda-forge package *was* installed and its CLI exercised — see the note at the top of §4 — but this tool drives the `vina` executable, not the bindings.)
+- Meeko: the loop's automatic conversion uses Open Babel, which is the documented stopgap. Meeko was not installed, so the "prefer Meeko when the docking result matters" advice below is still untested here.

@@ -1,0 +1,50 @@
+MIT License
+
+Copyright (c) 2026 Supantha Dey
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Scope of this licence, and what it does not cover
+-------------------------------------------------
+
+This licence covers *this implementation only*: the code, tests and
+documentation written in this repository.
+
+* **No upstream IPRO code is reproduced here.** This is a clean-room
+  reimplementation written from the published formulations; see
+  docs/DESIGN.md section 6 ("Licensing") for why that route was taken, given
+  that no upstream IPRO release carries a licence file.
+
+* **The methods are not ours and are not licensed by this file.** Cite the
+  original papers for the method and this repository only for the
+  implementation: docs/DESIGN.md section 6 ("Citations") lists them.
+
+* **The papers and reference material under `refs/` are not covered.** Those
+  files are third-party copyrighted works retained for provenance checking and
+  carry their publishers' own terms. They are not redistributed under the MIT
+  licence above.
+
+* **The example structure** `examples/ompf_pore/2omf_A.pdb` is derived from PDB
+  entry 2OMF; see `examples/ompf_pore/PROVENANCE.md`.
+
+* **The optional dependencies** (PyMOL, AutoDock Vina, Open Babel, PyRosetta,
+  and any MILP solver) are separately licensed and separately installed.
+  PyRosetta in particular requires its own licence; see docs/INSTALL.md.

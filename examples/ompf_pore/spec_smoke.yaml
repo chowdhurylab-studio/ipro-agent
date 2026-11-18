@@ -259,12 +259,20 @@ goal_options:
 
   # Aim for a ~4 A bottleneck (radius 2 A), the paper's sub-4 A campaign.
   #
-  # MEASURED CAVEAT for this 4-position smoke spec: the bottleneck here is set
-  # by residues OTHER than these four, so the geometric term is constant across
-  # every candidate (5.69 A every iteration, score identically 0.716) and only
-  # the composition constraint does any work. With all 25 positions it does
-  # respond -- 5.65 vs 6.41 A between candidates. A geometric objective only
-  # bites when the design positions actually line the bottleneck.
+  # MEASURED CAVEAT, and it is stronger than it looks. These four positions all
+  # line ONE WALL of the barrel, so the axis fitted through their centroid runs
+  # inside the wall rather than down the channel: re-measured 2026-11-18, that
+  # centroid clears the nearest van der Waals surface by 0.30 A, where a water
+  # needs 1.4 A. The "bottleneck" this spec reports -- 1.53 A, radius score
+  # 1.528, constant across every candidate -- is therefore NOT a pore
+  # measurement at all, and it silently PASSES the `pore_diameter_max: 4.0`
+  # filter below. Do not read it as a sub-4 A pore, and do not compare it to
+  # the paper. (Earlier comments here quoted 5.69 A / 0.716, which does not
+  # reproduce.) With all 25 positions, which do surround the lumen, the
+  # measurement is sound: 6.24 A, clearance 1.30 A. docs/DESIGN.md 7d records
+  # this as a confirmed defect left unfixed and explains why. The remedy for a
+  # spec like this one is `goal_options.pore_axis`, two atoms spanning the
+  # channel.
   target_radius: 2.0
 
   # LIVE since the pore-geometry measurement landed: `pore_diameter_min` /
@@ -272,10 +280,11 @@ goal_options:
   # whose bottleneck falls outside the window is discarded before its energy is
   # considered. `target_radius` additionally puts the radius in the objective.
   #
-  # The axis is fitted as the normal to the plane of the design positions, which
-  # line the constriction; on this structure that measures the wild-type eyelet
-  # at 8.1 A against the published 11 x 7 A (an inscribed circle is bounded by
-  # the narrow direction, so ~7 A is the comparison). See docs/DESIGN.md 1h.
+  # The axis is fitted as the normal to the plane of the design positions. With
+  # the full 25 positions that measures the wild-type eyelet at 6.24 A against
+  # the published 11 x 7 A (an inscribed circle is bounded by the narrow
+  # direction, so ~7 A is the comparison). With these four it does not work at
+  # all -- see the caveat above. docs/DESIGN.md 1h.
 
   # PoreDesigner's acceptance filter, SI section 3 step 3, "Check 1":
   # accept a redesign only if the pore bottleneck D_min is below 4 A. A design
@@ -306,9 +315,14 @@ goal_options:
   # as long too. Those two statements disagree. The constraint as written is
   # implemented here; if you want the stricter prose version, drop MET from
   # `long_residues` and expect a different answer.
-  min_long_fraction: 0.5
+  # `long_fraction` is set at the top of this block -- it is the live key, and
+  # the only one that fires the constraint. (Two keys that were written here,
+  # `min_long_fraction` and `short_residues`, were read nowhere in the package:
+  # the first looked like the knob doing the work while `long_fraction` above
+  # was in fact doing it, and the second named a set nothing consulted. Unknown
+  # goal_options keys are now refused rather than ignored, which is what
+  # surfaced them.)
   long_residues: [TRP, PHE, TYR, MET]
-  short_residues: [ILE, LEU, VAL, PRO, ALA]
 
 notes: >
   Smoke test only -- 4 of 25 positions, 8 of hundreds of iterations, and no

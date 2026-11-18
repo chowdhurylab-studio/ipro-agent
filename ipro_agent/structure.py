@@ -33,11 +33,27 @@ except ModuleNotFoundError:  # pragma: no cover
     BioStructure = object  # type: ignore
     BioResidue = object  # type: ignore
 
-from .config import THREE_TO_ONE
+from .config import THREE_TO_ONE, position_label
 
 #: Residue names that are not amino acids but are commonly present and should
 #: be treated as ligand/solvent rather than chain residues.
 WATERS = {"HOH", "WAT", "DOD", "TIP3"}
+
+#: Biopython warning text that means atoms or residues were **discarded**, not
+#: merely reformatted. These are the ones that must not be swallowed. A
+#: "discontinuous chain" warning is deliberately NOT here: ATOM records
+#: followed by HETATM records of the same chain are ordinary and lose nothing.
+_LOSSY_WARNINGS = ("redefined", "defined twice", "duplicate")
+
+#: Hydrogen isotopes. The heavy-atom filters tested ``element == "H"`` only, so
+#: deuterium from a neutron structure counted as a heavy atom and was scored
+#: with carbon's Lennard-Jones parameters.
+HYDROGEN_ELEMENTS = {"H", "D", "T"}
+
+
+def is_hydrogen(atom) -> bool:
+    """True for H/D/T, by the file's element column."""
+    return (getattr(atom, "element", "") or "").strip().upper() in HYDROGEN_ELEMENTS
 
 
 @dataclass(frozen=True)
@@ -51,7 +67,18 @@ class ResidueRef:
 
     @property
     def label(self) -> str:
-        return f"{self.chain}{self.number}{self.insertion_code}".strip()
+        """Same round-tripping text form a design position uses.
+
+        These two labels are compared as strings all over the package (the
+        template's design filter, the loop's identity map, the restraint
+        planner), so when this one concatenated chain and number without a
+        separator it disagreed with ``DesignPosition.label`` for every
+        non-letter chain id: chain ``1`` residue 115 was ``1115`` here and
+        ``1:115`` there, and ``1115`` re-parses as chain A residue 1115. The
+        measured result was a mutation applied 40 A away, to a residue of the
+        same type, with nothing raised. See :func:`ipro_agent.config.position_label`.
+        """
+        return position_label(self.chain, self.number, self.insertion_code)
 
     @property
     def key(self) -> tuple[str, int, str]:
@@ -98,14 +125,39 @@ class Structure:
         p = Path(path).expanduser()
         if not p.exists():
             raise StructureError(f"no such structure file: {p}")
+        # QUIET=False, deliberately: QUIET suppresses the construction warnings
+        # inside the parser, so there is nothing left to inspect. They are
+        # captured here instead, which keeps the console as quiet as before
+        # while letting the ones that mean data loss be acted on.
         parser = (
-            MMCIFParser(QUIET=True)
+            MMCIFParser(QUIET=False)
             if p.suffix.lower() in (".cif", ".mmcif")
-            else PDBParser(QUIET=True)
+            else PDBParser(QUIET=False)
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             bio = parser.get_structure(p.stem, str(p))
+        # Biopython's construction warnings are the only signal that the file
+        # was not read as written: a residue id used twice, an atom name used
+        # twice in one residue, blank altLocs on a duplicated residue. With
+        # QUIET=True *and* the warnings discarded, two copies of a molecule
+        # pasted into one chain loaded as 82 atoms of 164, and a chain holding
+        # two different residues numbered 115 silently dropped the whole TRP --
+        # every energy afterwards computed on half the molecule, with the
+        # reduced counts reported back as the file's contents.
+        lossy = [
+            str(w.message) for w in caught
+            if any(t in str(w.message).lower() for t in _LOSSY_WARNINGS)
+        ]
+        if lossy:
+            raise StructureError(
+                f"{p.name}: the PDB parser discarded atoms or residues while "
+                f"reading this file, so what was loaded is not what the file "
+                f"contains:\n  " + "\n  ".join(sorted(set(lossy))[:6]) +
+                "\nFix the file (duplicate residue numbers, repeated atom names, "
+                "or two molecules merged into one chain) rather than running on "
+                "part of it."
+            )
         st = cls(bio, path=p, model=model)
         if chains:
             have = {c.id for c in st.model}
@@ -192,7 +244,7 @@ class Structure:
 
     def coords(self, res: BioResidue, heavy_only: bool = True) -> np.ndarray:
         return np.array(
-            [a.coord for a in res if not (heavy_only and a.element == "H")],
+            [a.coord for a in res if not (heavy_only and is_hydrogen(a))],
             dtype=float,
         )
 
@@ -203,7 +255,7 @@ class Structure:
                 if res.get_resname().strip() in WATERS:
                     continue
                 for a in res:
-                    if heavy_only and a.element == "H":
+                    if heavy_only and is_hydrogen(a):
                         continue
                     out.append(a)
         return out
@@ -255,10 +307,20 @@ class Structure:
     # -- writing ----------------------------------------------------------
 
     def save(self, path: str | Path) -> Path:
+        """Write the model this Structure holds -- and only that model.
+
+        Writing ``self._bio`` wrote the whole file back: every model and every
+        chain, including the chains ``load(chains=...)`` was asked to exclude
+        (the filter only detaches from model 0). Measured, a Structure holding
+        2 atoms of chain A saved 6 ATOM lines across 2 models and chains
+        A and B. These are the files PyMOL and Vina then read, so the partner
+        the user excluded was back in the scoring input while this object's own
+        energies never saw it.
+        """
         p = Path(path).expanduser()
         p.parent.mkdir(parents=True, exist_ok=True)
         io = PDBIO()
-        io.set_structure(self._bio)
+        io.set_structure(self.model if self.model is not None else self._bio)
         io.save(str(p))
         return p
 

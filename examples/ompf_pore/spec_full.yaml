@@ -242,9 +242,13 @@ goal_options:
   long_fraction: 0.5
 
   # Aim for a ~4 A bottleneck (radius 2 A). With all 25 positions the geometric
-  # term does respond to the design: a 4-iteration run moved the objective from
-  # 1.102 to 0.678 and the bottleneck between 6.41 and 5.65 A. Budget about
-  # 85 s/iteration at this size (25 positions x 9 residues).
+  # term does respond to the design, because these positions ring the lumen.
+  # Re-measured 2026-11-18 with `ipro-agent score` on this spec: starting
+  # bottleneck 6.24 A (radius 3.121), radius score 1.257. (Earlier comments
+  # here quoted 1.102 -> 0.678 and 6.41 -> 5.65 A for a 4-iteration run; those
+  # figures are not reproducible and the starting point alone differs, so treat
+  # them as withdrawn -- see docs/DESIGN.md 7d.) Budget about 85 s/iteration at
+  # this size (25 positions x 9 residues).
   target_radius: 2.0
 
   # LIVE since the pore-geometry measurement landed: `pore_diameter_min` /
@@ -254,8 +258,9 @@ goal_options:
   #
   # The axis is fitted as the normal to the plane of the design positions, which
   # line the constriction; on this structure that measures the wild-type eyelet
-  # at 8.1 A against the published 11 x 7 A (an inscribed circle is bounded by
+  # at 6.24 A against the published 11 x 7 A (an inscribed circle is bounded by
   # the narrow direction, so ~7 A is the comparison). See docs/DESIGN.md 1h.
+  # That fit is only meaningful because these 25 positions SURROUND the lumen.
   # Acceptance filter, SI section 3 step 3 "Check 1": keep a redesign only if
   # the pore bottleneck is below 4 A. Applied BEFORE the interaction energy is
   # computed, so most proposals die here -- this is what sets the run length.
@@ -279,9 +284,14 @@ goal_options:
   # extremes -- too low and the run stalls generating small-side-chain designs
   # that fail the size filter; too high and the bulky residues clash and give
   # pores LARGER than intended, "akin to OCD-TFTrp".
-  min_long_fraction: 0.5
+  # `long_fraction` is set at the top of this block -- it is the live key, and
+  # the only one that fires the constraint. (Two keys that were written here,
+  # `min_long_fraction` and `short_residues`, were read nowhere in the package:
+  # the first looked like the knob doing the work while `long_fraction` above
+  # was in fact doing it, and the second named a set nothing consulted. Unknown
+  # goal_options keys are now refused rather than ignored, which is what
+  # surfaced them.)
   long_residues: [TRP, PHE, TYR, MET]
-  short_residues: [ILE, LEU, VAL, PRO, ALA]
 
 notes: >
   Cluster-scale. The published result is a population of 40 sub-4 A designs

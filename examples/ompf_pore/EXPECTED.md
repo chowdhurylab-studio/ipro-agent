@@ -306,13 +306,27 @@ dominate the iteration log. If almost nothing is rejected, the pore measurement 
 running. Compare to the design-time constraint, not to the post-MD 3.0–3.6 Å diameters
 (§3, caveat 1).
 
+> **Check the axis before you believe any bottleneck.** The axis is fitted through
+> the design positions' centroid, so it only follows the channel when those
+> positions *ring* the lumen. Measured 2026-11-18: the 25-position `spec_full.yaml`
+> is sound (axis clearance 1.30 Å, bottleneck **6.24 Å**), but the 4-position
+> `spec_smoke.yaml` — whose positions all line one wall — puts that centroid
+> **inside the wall** (clearance 0.30 Å, where a water needs 1.4 Å) and reports a
+> **1.53 Å** "bottleneck" that is not a pore measurement at all. That number
+> silently *passes* the 4 Å filter, so "almost nothing is rejected" can mean the
+> measurement is wrong rather than absent, and a smoke run must never be read as
+> having achieved a sub-4 Å pore. `docs/DESIGN.md` §7d records this as a confirmed
+> defect left unfixed; the remedy for such a spec is `goal_options.pore_axis`.
+
 **6. Negative controls — things that must never appear.** No charged or polar residue,
 no Gly and no Cys at any design position: the alphabet forbids them (MILP constraint 7).
 If one appears, the allowed-residue set is not reaching the solver. Likewise, no residue
 should change outside the declared design positions.
 
 **7. Structure-free checks that need no run at all.** The wild-type pore from
-`2omf_A.pdb` should come out 11 × 7 Å, area 60.47 Å². Table 1's four hydrophobicity rows
+`2omf_A.pdb` is published as 11 × 7 Å, area 60.47 Å²; this tool's inscribed-circle
+measurement of it, with the 25 design positions defining the axis, is **6.24 Å**
+(bounded by the narrow direction, so ~7 Å is the right comparison). Table 1's four hydrophobicity rows
 should be recoverable from the four published sequences. The design counts should add up:
 40 = 2 + 31 + 7 and 17 = 10 + 3 + 4. These test the measurement and bookkeeping layers
 on published data, independently of the stochastic search, which makes them the most

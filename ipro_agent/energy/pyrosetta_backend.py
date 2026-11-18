@@ -40,10 +40,55 @@ from .builtin import BuiltinBackend
 
 log = logging.getLogger(__name__)
 
+#: **Paths in this module that have never executed**, and why each matters.
+#:
+#: PyRosetta needs a licence (free for academics, but it has to be obtained and
+#: accepted by the user) and is not installed in this repo's environment, so
+#: everything below is written against the documented API and checked by
+#: reading only. This is a declaration, not a disclaimer: a name here is a
+#: place where a defect of the kind docs/DESIGN.md sections 7, 7b and 7d record
+#: -- runs clean, returns a plausible wrong answer -- could still be hiding.
+#: ``tests/test_ipro.py`` keeps the list honest (every name must still exist,
+#: and the test fails loudly once PyRosetta IS importable, so the list cannot
+#: quietly outlive its reason).
+#:
+#: To close one: install PyRosetta, run the relevant case, and move the entry
+#: out with the measurement that exercised it. See docs/DESIGN.md section 7e.
+UNEXERCISED: dict[str, str] = {
+    "PyRosettaBackend.__init__": (
+        "pyrosetta.init() is guarded by a module attribute, so a second backend "
+        "built with different init_flags silently keeps the first set. Never run, "
+        "so never observed."
+    ),
+    "PyRosettaBackend.relax": (
+        "FastRelax with a MoveMap. A MoveMap constrains MINIMIZATION; FastRelax's "
+        "ramped repack cycles take their rotamer set from a PackerTask, so the "
+        "residues named in `fixed` may still be repacked -- the opposite of what "
+        "the restraint promises. Unverified. The residue-count guard against "
+        "-ignore_unrecognized_res silently dropping a cofactor is likewise unrun."
+    ),
+    "PyRosettaBackend.score_structure": (
+        "pose_from_pdb + score function. Whether -ignore_unrecognized_res drops a "
+        "ligand Rosetta has no params for, so the score is of a complex missing "
+        "its cofactor, has not been observed."
+    ),
+    "PyRosettaBackend.interface_energy": (
+        "InterfaceAnalyzerMover. No call site in the package either, so this is "
+        "both unexercised and unused: dG_separated never reaches an objective."
+    ),
+    "PyRosettaBackend._exact_pair": (
+        "Raises by design (a pose per rotamer pair is prohibitive). The raise "
+        "itself is covered; the Rosetta-scored table it describes does not exist."
+    ),
+}
+
 
 class PyRosettaBackend(EnergyBackend):
     name = "pyrosetta"
     can_relax = True
+    #: Replaced per instance in ``__init__``: by default the pairwise numbers
+    #: this backend returns are the screening function's, not Rosetta's, so
+    #: labelling them REU was wrong (see :attr:`EnergyBackend.screening_pairwise`).
     units = "Rosetta Energy Units (REU)"
 
     def __init__(
@@ -70,6 +115,13 @@ class PyRosettaBackend(EnergyBackend):
             k: v for k, v in kwargs.items()
             if k in ("max_repulsion", "hbond_weight", "coulomb")
         })
+        self.screening_pairwise = not self.exact_pairs
+        self.units = (
+            "Rosetta Energy Units (REU)" if self.exact_pairs else
+            "kcal/mol (screening scale: the MILP tables and the reported "
+            "interaction energies come from the built-in terms, not from "
+            f"{scorefxn}; relaxation and whole-structure scores are Rosetta's)"
+        )
 
     # -- pairwise tables ---------------------------------------------------
 
@@ -114,6 +166,23 @@ class PyRosettaBackend(EnergyBackend):
         from pyrosetta.rosetta.core.kinematics import MoveMap
 
         pose = self._pose(Path(pdb_in))
+        # `-ignore_unrecognized_res` is in the default init flags, so Rosetta
+        # silently drops any HETATM it has no parameters for -- and this method
+        # then *writes* the truncated structure to pdb_out, which the next
+        # iteration harvests from. Refuse instead: a cofactor vanishing from the
+        # design's own file is not a degradation the run can report around.
+        # (Unexercised: PyRosetta is not installed here. See docs/DESIGN.md 7e.)
+        n_in = self._count_residues(Path(pdb_in))
+        n_pose = int(pose.total_residue())
+        if n_in and n_pose < n_in:
+            raise RuntimeError(
+                f"Rosetta read {n_pose} of {n_in} residues from {Path(pdb_in).name} "
+                f"-- {n_in - n_pose} were dropped, most likely residues it has no "
+                "parameters for (the default init flags include "
+                "-ignore_unrecognized_res). Relaxing would write the truncated "
+                "structure back. Supply params for the ligand/cofactor, or run "
+                "with the built-in backend."
+            )
         fr = FastRelax(self._sfxn, self.relax_cycles)
 
         if fixed:
@@ -131,6 +200,17 @@ class PyRosettaBackend(EnergyBackend):
         out.parent.mkdir(parents=True, exist_ok=True)
         pose.dump_pdb(str(out))
         return float(self._sfxn(pose))
+
+    @staticmethod
+    def _count_residues(pdb: Path) -> int:
+        """Residues in a PDB file, counted without Rosetta."""
+        try:
+            from ..structure import Structure
+
+            st = Structure.load(pdb)
+            return len(list(st.residues())) + len(list(st.hetero_residues()))
+        except Exception:      # a count we cannot take is not a reason to fail
+            return 0
 
     def _resolve_labels(self, pose, labels: Sequence[str]) -> list[int]:
         """Map ``"A115"`` style labels to Rosetta's 1-based pose indices."""

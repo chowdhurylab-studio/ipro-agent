@@ -36,6 +36,67 @@ import numpy as np
 _UNKEYED = "__unkeyed__"
 _KEY_COUNTER = itertools.count()
 
+#: Element symbols of two letters that occur in protein structure files. A
+#: standard amino acid never has a side-chain atom named like one of these, so
+#: within a non-amino-acid residue the whole name is the element.
+_TWO_LETTER = {
+    "CL", "BR", "SE", "FE", "ZN", "MG", "MN", "CU", "NI", "CO", "CA", "NA",
+    "CD", "HG", "PT", "AU", "AG", "MO", "SR", "BA", "CS", "RB", "LI", "AL",
+    "SI", "AS", "SB", "PB", "TL", "GD", "SM", "EU", "YB", "TB", "HO", "W",
+}
+
+#: The 20 standard amino acids, where an atom name like ``CA`` or ``SD`` is a
+#: protein atom rather than an element symbol. Written out rather than imported
+#: from config to keep the energy layer free of spec types.
+_STANDARD_RESIDUES = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    # Protonation variants and the common alternatives, still protein.
+    "HID", "HIE", "HIP", "HSD", "HSE", "HSP", "CYX", "CYM", "ASH", "GLH",
+    "LYN", "MSE",
+}
+
+
+#: ``(residue, atom)`` pairs inside residues that are otherwise protein, where
+#: the atom name really is a two-letter element symbol. Selenomethionine is the
+#: common case: MSE has to count as protein so that its ``CA`` stays the alpha
+#: carbon rather than calcium, but its ``SE`` is genuinely selenium.
+_RESIDUE_ATOM_ELEMENTS = {
+    ("MSE", "SE"): "SE", ("SEC", "SE"): "SE", ("CSE", "SE"): "SE",
+}
+
+
+def guess_element(name: str, resname: str = "") -> str:
+    """Element symbol for a PDB atom name, as well as a name alone allows.
+
+    PDB atom names put the element first for protein atoms (CB, NZ, OD1, SD),
+    so taking the first alphabetic character is right *there* -- but it was
+    applied to everything, which made every two-letter element unreachable:
+    ``FE`` typed as fluorine, ``CL`` and ``CA`` as carbon, ``ZN`` and ``MG`` as
+    the default. Measured, a backbone oxygen 2.40 A from an iron came out at
+    +5.83 kcal/mol using fluorine's parameters, and a sodium ion was typed as
+    nitrogen and so handed out -1.5 kcal/mol hydrogen bonds. ``LJ``'s own
+    ``CL``/``BR``/``SE`` entries were dead code.
+
+    The ambiguity is real: ``CA`` is the alpha carbon of a residue and calcium
+    in an ion, and a name alone cannot tell them apart. The residue name can:
+    inside a standard amino acid the name is a protein atom, and a monatomic
+    ion is named after itself (``HETATM ... CA    CA``). Prefer the file's own
+    element column (``AtomSet.elements``) wherever the caller has it.
+    """
+    s = str(name).strip().upper().lstrip("0123456789")
+    if not s:
+        return "C"
+    rn = str(resname).strip().upper()
+    if (rn, s) in _RESIDUE_ATOM_ELEMENTS:
+        return _RESIDUE_ATOM_ELEMENTS[(rn, s)]
+    if rn not in _STANDARD_RESIDUES:
+        if s == rn and s in _TWO_LETTER:          # monatomic ion: CA/CA, ZN/ZN
+            return s
+        if s in _TWO_LETTER:                      # FE, CL, SE of a cofactor
+            return s
+    return s[0]
+
 
 @dataclass
 class AtomSet:
@@ -52,14 +113,32 @@ class AtomSet:
     resnames: list[str] = field(default_factory=list)
     #: Residue key per atom, so a backend can skip intra-residue pairs.
     reskeys: list[tuple] = field(default_factory=list)
+    #: Element symbol per atom. Supply it whenever the source knows it (the
+    #: PDB element column, which Biopython parses): guessing from the atom
+    #: name cannot be made reliable, because ``CA`` is the alpha carbon in a
+    #: residue and calcium in an ion. Left empty, it is guessed by
+    #: :func:`guess_element` and the guess is only as good as the name.
+    elements: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.coords = np.asarray(self.coords, dtype=float).reshape(-1, 3)
         n = len(self.coords)
         if len(self.names) != n:
             raise ValueError(f"{len(self.names)} names for {n} coords")
+        # Checked, not truncated. A short resnames list silently zeroed the
+        # trailing atoms' formal charges, which turned a measured -7.21
+        # kcal/mol carboxylate/ammonium interaction into +5.60 with nothing
+        # raised.
+        for label, seq in (("resnames", self.resnames), ("reskeys", self.reskeys),
+                           ("elements", self.elements)):
+            if seq and len(seq) != n:
+                raise ValueError(f"{len(seq)} {label} for {n} coords")
         if not self.resnames:
             self.resnames = [""] * n
+        if not self.elements:
+            self.elements = [
+                guess_element(nm, rn) for nm, rn in zip(self.names, self.resnames)
+            ]
         if not self.reskeys:
             # Each atom gets a distinct placeholder key rather than a shared
             # empty tuple. With a shared key the backend's same-residue
@@ -74,20 +153,6 @@ class AtomSet:
     def __len__(self) -> int:
         return len(self.coords)
 
-    @property
-    def elements(self) -> list[str]:
-        """Element guessed from the PDB atom name.
-
-        PDB atom names put the element first for protein atoms (CB, NZ, OD1,
-        SD), so the first alphabetic character is the element. Two-letter
-        elements do not occur among standard protein side-chain atoms.
-        """
-        out = []
-        for nm in self.names:
-            s = nm.strip().lstrip("0123456789")
-            out.append(s[0].upper() if s else "C")
-        return out
-
     def extend(self, other: "AtomSet") -> "AtomSet":
         if len(other) == 0:
             return self
@@ -98,6 +163,7 @@ class AtomSet:
             coords=np.vstack([self.coords, other.coords]),
             resnames=self.resnames + other.resnames,
             reskeys=self.reskeys + other.reskeys,
+            elements=self.elements + other.elements,
         )
 
     @classmethod
@@ -110,6 +176,7 @@ class AtomSet:
             coords=np.vstack([p.coords for p in parts]),
             resnames=[r for p in parts for r in p.resnames],
             reskeys=[k for p in parts for k in p.reskeys],
+            elements=[e for p in parts for e in p.elements],
         )
 
     def bounding_radius(self) -> float:
@@ -131,6 +198,15 @@ class EnergyBackend(ABC):
     can_relax: bool = False
     #: Units of the returned energies, for honest reporting.
     units: str = "kcal/mol"
+    #: True when :meth:`interaction` and :meth:`internal` -- the numbers the
+    #: MILP optimizes and the loop reports -- come from the built-in screening
+    #: function rather than this backend's own force field. It is a separate
+    #: question from :attr:`can_relax`, and conflating the two mislabelled a
+    #: run's output: the PyRosetta backend can relax, so the "these are
+    #: screening energies" caveat was suppressed, while by default its pair
+    #: tables *are* the screening terms and the written PDB carried them under
+    #: a "Rosetta Energy Units" heading.
+    screening_pairwise: bool = True
 
     @abstractmethod
     def interaction(self, a: AtomSet, b: AtomSet) -> float:

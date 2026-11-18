@@ -204,6 +204,22 @@ class Constraint:
 # ---------------------------------------------------------------------------
 
 
+def _enclosing_radius(rots: Sequence["Rotamer"], centre: np.ndarray) -> float:
+    """Radius of a sphere about ``centre`` enclosing every atom of ``rots``.
+
+    Used by the position-pair pre-screen, which must never skip a block that
+    holds a reachable pair. ``AtomSet.bounding_radius()`` is measured about the
+    set's own centroid and so does not bound the set seen from anywhere else.
+    """
+    far = 0.0
+    for r in rots:
+        if len(r.atoms) == 0:
+            continue
+        d = np.sqrt(((r.atoms.coords - centre) ** 2).sum(-1)).max()
+        far = max(far, float(d))
+    return far
+
+
 @dataclass
 class EnergyTables:
     """Self and pair energies over a pruned rotamer set."""
@@ -288,7 +304,21 @@ def build_tables(
         for rot in rotamers[pos]:
             n_in += 1
             e = backend.interaction(rot.atoms, template)
-            if strain_weight and rot.strain is not None:
+            if strain_weight:
+                if rot.strain is None:
+                    # Skipping it silently applied the strain penalty to some
+                    # identities and not others: PyMOL emits no bump score for
+                    # ALA (its library has no entry), so with strain_weight set,
+                    # ALA alone competed without the penalty every other
+                    # identity paid.
+                    raise ValueError(
+                        f"goal_options.strain_weight is set but rotamer "
+                        f"{rot.aa}#{rot.state} at {pos} carries no strain value, "
+                        f"so the penalty would apply to some identities and not "
+                        f"others. PyMOL reports no bump score for every identity "
+                        f"(ALA in particular); either leave strain_weight unset "
+                        f"or drop that identity."
+                    )
                 e += strain_weight * rot.strain
             e += reference_energies.get(rot.aa, 0.0)
             scored.append((e, rot))
@@ -327,11 +357,19 @@ def build_tables(
                 continue
             n_pairs_possible += len(Ri) * len(Rj)
 
-            # Can any rotamer at pi reach any rotamer at pj?
+            # Can any rotamer at pi reach any rotamer at pj? The radius has to
+            # be measured about the SAME point the separation is measured from.
+            # `bounding_radius()` is measured about each rotamer's own centroid,
+            # which does not enclose it when seen from the mean centroid, so the
+            # test was not conservative: measured with two one-atom rotamers 40 A
+            # apart at one position, a real -0.014002 kcal/mol pair 6.0 A away
+            # was dropped and the block recorded 0 pair terms. An enclosing
+            # radius about the mean centroid cannot skip a block that has a
+            # reachable pair in it.
             ci = np.mean([r.atoms.centroid() for r in Ri if len(r.atoms)] or [np.zeros(3)], axis=0)
             cj = np.mean([r.atoms.centroid() for r in Rj if len(r.atoms)] or [np.zeros(3)], axis=0)
-            radi = max((r.atoms.bounding_radius() for r in Ri), default=0.0)
-            radj = max((r.atoms.bounding_radius() for r in Rj), default=0.0)
+            radi = _enclosing_radius(Ri, ci)
+            radj = _enclosing_radius(Rj, cj)
             if np.linalg.norm(ci - cj) > radi + radj + energy_cutoff:
                 n_pos_pairs_skipped += 1
                 continue

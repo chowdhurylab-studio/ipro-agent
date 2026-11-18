@@ -43,7 +43,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .config import DesignSpec, THREE_TO_ONE
+from .config import DesignSpec, SpecError, THREE_TO_ONE
 from .energy.base import AtomSet, EnergyBackend
 from .energy import resolve as resolve_energy
 from .goals import Goal, ScoreContext, build_goal, metropolis_accept
@@ -54,7 +54,7 @@ from .docking import redock as mc_redock
 from .restraints import RestraintError, RestraintPlan, plan_restraints
 from .rotamers import build_template, harvest
 from .state import IterationRecord, RunDir, Status
-from .structure import Structure
+from .structure import Structure, is_hydrogen
 
 log = logging.getLogger(__name__)
 
@@ -99,13 +99,25 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 
-def _atoms_of(st: Structure, skip_sidechains_at: set[str] = frozenset()) -> AtomSet:
-    names, coords, resn, keys = [], [], [], []
+def _atoms_of(
+    st: Structure,
+    skip_sidechains_at: set[str] = frozenset(),
+    molecule: str = "",
+) -> AtomSet:
+    """One structure's heavy atoms as an :class:`AtomSet`.
+
+    ``molecule`` prefixes the residue keys. It must be empty for the design
+    molecule (whose keys rotamer atoms have to match) and set for every
+    partner: the energy backend skips pairs sharing a residue key, so a partner
+    reusing chain id ``A`` with overlapping residue numbers had its real
+    contacts with the design silently dropped as "same residue".
+    """
+    names, coords, resn, keys, els = [], [], [], [], []
     for res in list(st.residues()) + list(st.hetero_residues()):
         ref = st.ref(res)
         drop_sc = ref.label in skip_sidechains_at
         for at in res:
-            if at.element == "H":
+            if is_hydrogen(at):
                 continue
             nm = at.get_name().strip()
             if drop_sc and nm not in BACKBONE:
@@ -113,12 +125,14 @@ def _atoms_of(st: Structure, skip_sidechains_at: set[str] = frozenset()) -> Atom
             names.append(nm)
             coords.append(at.coord)
             resn.append(res.get_resname().strip())
-            keys.append(ref.key)
+            keys.append(ref.key if not molecule else (molecule, *ref.key))
+            els.append((at.element or "").strip().upper())
     return AtomSet(
         names=names,
         coords=np.array(coords) if coords else np.zeros((0, 3)),
         resnames=resn,
         reskeys=keys,
+        elements=els if all(els) else [],
     )
 
 
@@ -166,8 +180,16 @@ class IPROLoop:
             self.mode = "full"
         else:
             self.mode = "backbone-mc"
-        # Qualifications the goal raised at construction travel with the run.
-        self.notes: list[str] = list(getattr(self.goal, "notes", []))
+        # Qualifications the goal raised travel with the run. The loop SHARES
+        # the goal's list rather than copying it: a goal also raises notes while
+        # scoring (a term it had to drop, an option it could not apply), and a
+        # copy taken here left those out of state.json entirely. Measured, a
+        # reshape_channel run whose radius term was never active -- objective
+        # identically 0.0 every iteration -- reported a mutation string and a
+        # best score with no caveat at all, against the house rule that a
+        # design is never reported without its notes.
+        goal_notes = getattr(self.goal, "notes", None)
+        self.notes: list[str] = goal_notes if isinstance(goal_notes, list) else []
         if self.mode == "fixed-backbone":
             self.notes.append(
                 "the backbone never moves (loop.perturb_backbone is false), so the "
@@ -196,6 +218,10 @@ class IPROLoop:
         self._visited: list[dict[str, str]] = []
         #: Filled in by run_loop once the rotamer tables exist.
         self._restraints: RestraintPlan = RestraintPlan()
+        #: How many iterations were relaxed, and how many tried and failed, so
+        #: the reported mode can be checked against what actually happened.
+        self._relaxed = 0
+        self._relax_failed = 0
         #: Native identity keyed by *virtual* position, built once the
         #: assemblies are combined. With one assembly it equals _native.
         self._native_v: dict[str, str] = {}
@@ -513,6 +539,7 @@ class IPROLoop:
             spacing=float(opts.get("pore_spacing", 0.5)),
             window=window,
             max_centre_offset=float(opts.get("pore_max_centre_offset", 6.0)),
+            elements=list(design_atoms.elements),
         )
         if not prof.radii:
             return {}
@@ -573,7 +600,52 @@ class IPROLoop:
             rng=self.rng,
         )
         moved.save(candidate)
-        return candidate, record
+        return self._relax_once(candidate), record
+
+    def _relax_once(self, pdb):
+        """Gradient relaxation after the perturbation -- what makes mode 'full' full.
+
+        The published protocol minimizes the structure after perturbing the
+        backbone (CHARMM ABNR in IPRO; FastRelax here). This call did not exist:
+        ``EnergyBackend.relax`` had no call site anywhere in the package, and
+        neither did ``RestraintPlan.relax_fixed_positions``, which is collected
+        for exactly this argument and whose own note promises the positions are
+        "held during relaxation in 'full' mode". So a run with PyRosetta
+        installed reported mode ``full`` -- documented as "perturb + relax +
+        repack" -- while doing no relaxation at all, and because ``can_relax``
+        was true it also suppressed the note saying the energies were screening
+        energies.
+
+        A backend that cannot relax returns the file untouched; the mode is
+        then ``backbone-mc`` and says so.
+        """
+        if not self.backend.can_relax:
+            return pdb
+        out = pdb.with_name(pdb.stem + "_relaxed.pdb")
+        fixed = list(getattr(self._restraints, "relax_fixed_positions", ()) or ())
+        try:
+            self.backend.relax(pdb, out, fixed=fixed)
+        except Exception as exc:
+            self._relax_failed += 1
+            if "relax_failed" not in self._once:
+                self._once.add("relax_failed")
+                self.notes.append(
+                    f"backbone relaxation failed ({type(exc).__name__}: {exc}); "
+                    "the iteration ran on the unrelaxed perturbed backbone. The "
+                    "protocol is therefore 'backbone-mc', not 'full'."
+                )
+            return pdb
+        if not out.exists():
+            self._relax_failed += 1
+            if "relax_empty" not in self._once:
+                self._once.add("relax_empty")
+                self.notes.append(
+                    f"backbone relaxation wrote no file to {out.name}; the "
+                    "iteration ran on the unrelaxed perturbed backbone"
+                )
+            return pdb
+        self._relaxed += 1
+        return out
 
     # -- writing structures -------------------------------------------------
 
@@ -671,8 +743,12 @@ class IPROLoop:
         if len(self._assemblies) > 1:
             out.append(f"REMARK   1 ASSEMBLY   {assembly}")
         out.append(
+            # Keyed on where the pairwise numbers came from, not on whether the
+            # backend can relax: the PyRosetta backend can relax and still
+            # returns screening energies for the table and the report, so this
+            # caveat was being dropped from exactly the file that needed it.
             "REMARK   1 NOTE       energies from this backend are a screening"
-            if not self.backend.can_relax else
+            if self.backend.screening_pairwise else
             "REMARK   1 NOTE       see best/design.json for the score breakdown"
         )
         return out
@@ -751,7 +827,7 @@ class IPROLoop:
     def _partner_atoms(self, assembly: str, name: str) -> AtomSet:
         """A partner's atoms in this assembly, with its current pose applied."""
         if name not in self._base_atoms:
-            self._base_atoms[name] = _atoms_of(self._partners[name])
+            self._base_atoms[name] = _atoms_of(self._partners[name], molecule=name)
         base = self._base_atoms[name]
         pose = self._poses.get((assembly, name))
         return base if pose is None else moved_atomset(base, pose)
@@ -830,7 +906,7 @@ class IPROLoop:
         depend on which docking program happened to be installed, and scores
         would not be comparable between runs.
         """
-        from .dock import DockBox, dock
+        from .dock import DockBox, dock, pdb_to_pdbqt
         from .mutate import apply_design
 
         spec = self.spec
@@ -873,11 +949,43 @@ class IPROLoop:
         side = float(spec.loop.vina_box_size)
         box = DockBox(center=centre, size=(side, side, side))
 
+        # Vina reads PDBQT only, and a spec names PDB files -- which is the
+        # format every example, every doc and the structure loader use. Without
+        # this conversion `backends.dock: vina` could not dock at all: measured
+        # with Vina 1.2.7 installed, every redock failed with "receptor
+        # receptor.pdb is not a .pdbqt file" and the loop noted the failure and
+        # left the placement unchanged, so a run that reported dock -> vina had
+        # never moved a partner. `auto` resolves to vina whenever Vina is on
+        # PATH, so installing Vina made docking stop rather than start.
+        #
+        # obabel's conversion is a stopgap and `pdb_to_pdbqt` says why in its
+        # own docstring (receptor charges and atom types are not Meeko's); the
+        # pose is taken and re-scored with this tool's backend, never with
+        # Vina's affinity, which is what makes that acceptable here.
+        def _as_pdbqt(path, label: str, receptor_flag: bool):
+            p = Path(path)
+            if p.suffix.lower() == ".pdbqt":
+                return p
+            out_path = work / f"{p.stem}_{label}.pdbqt"
+            return pdb_to_pdbqt(p, out_path, receptor=receptor_flag)
+
+        try:
+            receptor_q = _as_pdbqt(receptor, "receptor", True)
+        except Exception as exc:
+            if "pdbqt" not in self._once:
+                self._once.add("pdbqt")
+                self.notes.append(
+                    f"Vina redock skipped: the receptor could not be converted to "
+                    f"PDBQT ({type(exc).__name__}: {exc})"
+                )
+            return out
+
         for name in sorted(mobile):
             mol = spec.molecule(name)
             try:
+                ligand_q = _as_pdbqt(mol.path, f"lig_{name}", False)
                 res = dock(
-                    receptor=receptor, ligand=mol.path, box=box, out_dir=work,
+                    receptor=receptor_q, ligand=ligand_q, box=box, out_dir=work,
                     exhaustiveness=spec.loop.vina_exhaustiveness,
                     num_modes=spec.loop.vina_num_modes,
                     seed=self.rng.randrange(1 << 30),
@@ -907,7 +1015,9 @@ class IPROLoop:
         except Exception as exc:
             self.notes.append(f"could not read Vina's pose for {name}: {exc}")
             return None
-        base = self._base_atoms.setdefault(name, _atoms_of(self._partners[name]))
+        base = self._base_atoms.setdefault(
+            name, _atoms_of(self._partners[name], molecule=name)
+        )
         if len(coords) != len(base.coords):
             # Without a one-to-one atom mapping the transform cannot be fitted,
             # and guessing would move the ligand somewhere nobody chose.
@@ -1086,6 +1196,17 @@ class IPROLoop:
 
     def run_loop(self) -> RunResult:
         spec = self.spec
+        if not spec.positions and not spec.indels:
+            # An empty `positions:` list ran to completion and reported
+            # "ok: true, accepted: 3, mutations: {}" with no note, which reads
+            # as "the optimizer found no improvement" rather than "nothing was
+            # designed". Positions may legitimately arrive from an insertion
+            # (section 1i), so indels count.
+            raise SpecError(
+                "the spec names no design positions and no indels, so there is "
+                "nothing to design. Add positions:, or indels: that create some. "
+                "('ipro-agent score' measures a structure without designing.)"
+            )
         cb = self.build_combined()
         tables = cb.tables
         self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
@@ -1155,7 +1276,11 @@ class IPROLoop:
                 f"{len(rp.pair_vetoes)} pair veto(es), "
                 f"{len(rp.unsupported)} not enforced"
             )
-        if not spec.goal_options.get("reference_energies") and not self.backend.can_relax:
+        # `screening_pairwise`, not `can_relax`: ref2015's `ref` term only
+        # reaches the design if Rosetta is actually scoring the pair table,
+        # which by default it is not -- so the advice at the end of this note
+        # was being suppressed in the one case where it was still needed.
+        if not spec.goal_options.get("reference_energies") and self.backend.screening_pairwise:
             self.notes.append(
                 "no amino-acid reference energies were supplied and the backend "
                 "has no built-in reference term, so nothing corrects for "
@@ -1491,6 +1616,24 @@ class IPROLoop:
                 break
 
         # -- finish ----------------------------------------------------------
+        # The mode is a claim about what the protocol did, and it is reported
+        # with every design, so it has to match what happened. "full" means
+        # relaxation ran; if every attempt failed, say "backbone-mc".
+        if self.mode == "full":
+            if self._relaxed:
+                self.notes.append(
+                    f"backbone relaxation ran on {self._relaxed} of {n_done} "
+                    f"iteration(s)" + (f", failing on {self._relax_failed}"
+                                       if self._relax_failed else "")
+                )
+            else:
+                self.mode = "backbone-mc"
+                self.notes.append(
+                    "mode reported as 'backbone-mc', not 'full': the backend can "
+                    "relax but no iteration was relaxed"
+                    + (f" ({self._relax_failed} attempt(s) failed)"
+                       if self._relax_failed else "")
+                )
         ensemble.sort(key=lambda d: d["score"])
         ensemble = ensemble[: spec.loop.ensemble_size]
         (self.run.path / "ensemble" / "ensemble.json").write_text(json.dumps(ensemble, indent=2))

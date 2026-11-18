@@ -39,8 +39,22 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .config import AA_GROUPS, DesignSpec, Role, MolKind, SpecError
+from .config import AA_GROUPS, DesignSpec, Role, MolKind, SpecError, as_sequence
 from .milp import Constraint
+
+#: ``goal_options`` keys read outside this module, so a goal must not reject
+#: them. Kept here beside the per-goal sets because this is where the whole
+#: vocabulary is enforced; each is grepped from its reader.
+SHARED_OPTION_KEYS: frozenset[str] = frozenset({
+    "reference_energies",        # milp.build_tables, cli, loop._self_energy_terms
+    "strain_weight",             # loop._self_energy_terms
+    "max_self_energy",           # loop._tables_for, restraints
+    "pair_eps",                  # loop._tables_for
+    "insert_phi", "insert_psi",  # loop, terminal insertions
+    "pore_axis", "pore_axis_flatness_warn",   # loop._pore_axis
+    "pore_window", "pore_window_half",        # loop._measure_geometry
+    "pore_spacing", "pore_max_centre_offset", # loop._measure_geometry
+})
 
 
 class GoalKind(str, Enum):
@@ -92,15 +106,74 @@ class Goal:
     #: Where this encoding comes from. Required: an unsourced objective is a
     #: guess, and the user needs to know which it is.
     source: str = ""
+    #: ``goal_options`` keys this goal reads. Anything outside this set (plus
+    #: :data:`SHARED_OPTION_KEYS`) is refused, because a misspelled option is
+    #: inert: ``pore_diameter_maximum`` for ``pore_diameter_max`` meant
+    #: PoreDesigner's published hard filter never ran, and the design shipped
+    #: unfiltered with nothing said. The repo already refuses unknown keys
+    #: everywhere else in the spec; this was the one hole, and it carried every
+    #: objective weight.
+    OPTION_KEYS: frozenset[str] = frozenset()
+    #: True if the goal reads ``spec.anti_targets``. A declared anti-target
+    #: that no goal term reads is reported rather than ignored.
+    uses_anti_targets: bool = False
 
     def __init__(self, spec: DesignSpec) -> None:
         self.spec = spec
         self.options: dict[str, Any] = dict(spec.goal_options)
         #: Qualifications the goal wants carried into the run's report -- a
         #: degenerate objective, a missing molecule, an unused option. The loop
-        #: collects these into state.json notes.
+        #: *shares* this list (it does not copy it), so a note raised later,
+        #: while scoring, still reaches state.json.
         self.notes: list[str] = []
+        self._check_option_keys()
         self.validate()
+        if self.spec.anti_targets and not self.uses_anti_targets:
+            self.notes.append(
+                f"goal {self.kind.value!r} does not read anti-targets, so "
+                f"{[m.name for m in self.spec.anti_targets]} "
+                "is held fixed and scored into the complex energy but does NOT "
+                "penalize the objective. Use goal 'switch_specificity' to select "
+                "against a decoy, or give it role 'target' if it should be bound."
+            )
+
+    def _check_option_keys(self) -> None:
+        known = set(self.OPTION_KEYS) | set(SHARED_OPTION_KEYS)
+        unknown = sorted(set(self.options) - known)
+        if unknown:
+            raise SpecError(
+                f"unknown goal_options key(s) {unknown} for goal "
+                f"{self.kind.value!r}. This goal reads "
+                f"{sorted(self.OPTION_KEYS) or '(no goal-specific options)'}; "
+                f"keys read elsewhere in the run: {sorted(SHARED_OPTION_KEYS)}. "
+                "Misspelled keys are rejected rather than ignored so a typo "
+                "cannot silently change the design problem."
+            )
+
+    def _positive(self, name: str, default: float) -> float:
+        """A weight, refused if it is zero or negative.
+
+        A weight scales a contribution to the objective; zero deletes the term
+        and a negative value *inverts* it. Measured with ``anti_weight: -1``,
+        binding the anti-target 8 kcal/mol tighter read as a 20 kcal/mol
+        improvement -- the loop optimized the opposite of the request and its
+        objective curve still fell. ``Assembly.weight`` is refused on the same
+        grounds (config.py), so the convention already exists.
+        """
+        if name not in self.options:
+            return float(default)
+        try:
+            val = float(self.options[name])
+        except (TypeError, ValueError) as exc:
+            raise SpecError(f"goal_options.{name} must be a number") from exc
+        if val <= 0 or not math.isfinite(val):
+            raise SpecError(
+                f"goal_options.{name} is {val}; a weight scales a contribution to "
+                "the objective and must be positive and finite (a negative weight "
+                "inverts the term, so the run would optimize the opposite of what "
+                "was asked). To drop a term, remove the option it weights."
+            )
+        return val
 
     # -- interface ---------------------------------------------------------
 
@@ -145,7 +218,18 @@ class Goal:
             )
 
     def _sum_ie(self, ctx: ScoreContext, molecules) -> float:
-        return sum(ctx.ie(m.name) for m in molecules)
+        """Sum the interaction energies of ``molecules``, once each.
+
+        ``ctx.interaction`` is keyed by molecule *name*, so summing over
+        molecule objects counted a repeated name once per object. Duplicate
+        names are now refused in :class:`~ipro_agent.config.DesignSpec`; this
+        sums over names as well so the two cannot disagree again.
+        """
+        seen: list[str] = []
+        for m in molecules:
+            if m.name not in seen:
+                seen.append(m.name)
+        return sum(ctx.ie(n) for n in seen)
 
 
 # ---------------------------------------------------------------------------
@@ -171,12 +255,30 @@ class BindTighter(Goal):
     kind = GoalKind.BIND_TIGHTER
     objective_text = "minimize sum of interaction energies with the target molecules"
     source = "IPRO (Saraf et al., Biophys J 2006); IPRO+/- (Chowdhury et al., Structure 2020)"
+    OPTION_KEYS = frozenset({"max_total_energy"})
 
     def validate(self) -> None:
         self._require_targets(1)
 
     def score(self, ctx: ScoreContext) -> float:
         return self._sum_ie(ctx, self.spec.targets)
+
+    def filter_reject(self, ctx: ScoreContext) -> str | None:
+        """Enforce ``max_total_energy``, which the docstring above promises.
+
+        It was documented and read nowhere: a spec asking for a −50 kcal/mol
+        stability cap ran to completion on candidates at +500 with no note.
+        ``ctx.total`` was already measured and carried for this purpose.
+        """
+        cap = self.options.get("max_total_energy")
+        if cap is None:
+            return None
+        if ctx.total > float(cap):
+            return (
+                f"whole-complex energy {ctx.total:.3f} exceeds "
+                f"max_total_energy {float(cap):.3f}"
+            )
+        return None
 
     def components(self, ctx: ScoreContext) -> dict[str, float]:
         out = {f"IE[{m.name}]": ctx.ie(m.name) for m in self.spec.targets}
@@ -212,6 +314,8 @@ class SwitchSpecificity(Goal):
     kind = GoalKind.SWITCH_SPECIFICITY
     objective_text = "minimize IE(target) - w * IE(anti-target), i.e. the selectivity gap"
     source = "Grisewood et al., ACS Catal 2017 (Delta IE); Saraf et al., Biophys J 2006 (decoy ligand)"
+    OPTION_KEYS = frozenset({"anti_weight", "max_target_ie"})
+    uses_anti_targets = True
 
     def validate(self) -> None:
         self._require_targets(1)
@@ -221,10 +325,14 @@ class SwitchSpecificity(Goal):
                 "role 'anti_target' -- the binding partner to select against. "
                 "Without one, use goal 'bind_tighter'."
             )
+        # At construction, not at the first score(): `ipro-agent validate` must
+        # catch a sign typo in the weight before a run spends hours optimizing
+        # the opposite of the request.
+        self._positive("anti_weight", 1.0)
 
     @property
     def weight(self) -> float:
-        return float(self.options.get("anti_weight", 1.0))
+        return self._positive("anti_weight", 1.0)
 
     def score(self, ctx: ScoreContext) -> float:
         want = self._sum_ie(ctx, self.spec.targets)
@@ -288,6 +396,11 @@ class ReshapeChannel(Goal):
     objective_text = "narrow or widen a lumen via a probe interaction energy and/or its measured radius"
     source = "PoreDesigner (Chowdhury et al., Nat Commun 2018)"
     wants_geometry = True
+    OPTION_KEYS = frozenset({
+        "direction", "target_radius", "radius_weight",
+        "pore_diameter_min", "pore_diameter_max",
+        "long_fraction", "long_residues",
+    })
 
     def validate(self) -> None:
         d = str(self.options.get("direction", "narrow")).lower()
@@ -295,12 +408,15 @@ class ReshapeChannel(Goal):
             raise SpecError(
                 f"goal_options.direction must be 'narrow' or 'widen'; got {d!r}"
             )
-        has_geometry = (
-            self.options.get("target_radius") is not None
-            or self.options.get("pore_diameter_min") is not None
-            or self.options.get("pore_diameter_max") is not None
-        )
-        if not self.spec.targets and not has_geometry:
+        self._positive("radius_weight", 1.0)
+        # `pore_diameter_min/max` are a hard acceptance FILTER (filter_reject),
+        # not a term in the objective -- nothing in score() reads them. Counting
+        # them as a geometric objective suppressed the degenerate-objective
+        # warning for exactly the spec that states the paper's published filter:
+        # a 3.2 A and a 3.8 A candidate both scored -100.0 and the user was told
+        # nothing, while a spec with no options at all got the warning.
+        has_objective = self.options.get("target_radius") is not None
+        if not self.spec.targets and not has_objective:
             # Constraint-only mode. This is a real situation, not a misuse:
             # PoreDesigner's probe was a water wire taken from an MD trajectory
             # that was never deposited, and this tool implements no pore-geometry
@@ -363,7 +479,7 @@ class ReshapeChannel(Goal):
                         "the score; only the probe-interaction term is active"
                     )
             else:
-                s += float(self.options.get("radius_weight", 1.0)) * (r - float(tgt)) ** 2
+                s += self._positive("radius_weight", 1.0) * (r - float(tgt)) ** 2
         return s
 
     def default_constraints(self) -> list[Constraint]:
@@ -378,11 +494,15 @@ class ReshapeChannel(Goal):
         frac = float(frac)
         if frac <= 0:
             return []
+        residues = [
+            str(r).upper()
+            for r in as_sequence(self.options.get("long_residues") or ["TRP", "PHE", "TYR", "MET"])
+        ]
         return [
             Constraint(
                 kind="min_class",
                 fraction=frac,
-                residues=list(self.options.get("long_residues", ["TRP", "PHE", "TYR", "MET"])),
+                residues=residues,
                 label="long_residue_fraction",
             )
         ]
@@ -437,6 +557,7 @@ class ImproveCatalysis(Goal):
     kind = GoalKind.IMPROVE_CATALYSIS
     objective_text = "minimize the interaction energy that encodes the chosen kinetic parameter"
     source = "OptZyme (Grisewood et al., PLoS ONE 2013), Eqs 7, 17, 18"
+    OPTION_KEYS = frozenset({"parameter", "temperature_k"})
 
     R_KCAL = 1.987e-3
 
@@ -468,6 +589,29 @@ class ImproveCatalysis(Goal):
                 "parameter 'kcat' needs both a 'transition_state' molecule and a "
                 "'ligand' (substrate) molecule, since it is the difference of the two terms"
             )
+        if p == "km" and not self._substrate():
+            # Eq 7 is IE with the *substrate*. With no molecule of kind
+            # 'ligand', score() silently summed every target instead: measured,
+            # an unrelated protein partner at -40 entered a "K_M" score of -49
+            # that components() reported as -9, so the number could not even be
+            # explained. One target is unambiguous (it is the substrate,
+            # whatever its kind, and that is recorded); several are not.
+            if len(self.spec.targets) == 1:
+                only = self.spec.targets[0]
+                self.notes.append(
+                    f"parameter 'km' is OptZyme Eq 7, IE with the substrate, but no "
+                    f"target molecule has kind 'ligand'. Using the only target, "
+                    f"{only.name!r} (kind {only.kind.value!r}), as the substrate. Set "
+                    f"its kind to 'ligand' to make this explicit."
+                )
+            else:
+                raise SpecError(
+                    "parameter 'km' is encoded as the interaction energy with the "
+                    "substrate, but no target molecule has kind 'ligand' and there "
+                    f"are {len(self.spec.targets)} targets "
+                    f"({', '.join(m.name for m in self.spec.targets)}), so which one "
+                    "is the substrate is ambiguous. Give the substrate kind 'ligand'."
+                )
 
     @property
     def _rt(self) -> float:
@@ -510,22 +654,62 @@ class Stabilize(Goal):
     kind = GoalKind.STABILIZE
     objective_text = "minimize the energy of the design molecule"
     source = "IPRO+/- (Chowdhury et al., Structure 2020), constrained formulation"
+    OPTION_KEYS = frozenset({"min_interaction_fraction", "reference_interaction"})
+
+    def validate(self) -> None:
+        # Checked here, not only when the first candidate is scored. The error
+        # raised from score() told the user to "measure it with 'ipro-agent
+        # score'", and that command builds the same goal and dies with the same
+        # error -- a recovery path that cannot be followed.
+        if self.options.get("min_interaction_fraction") is None:
+            return
+        self._require_targets(1)
+        if self.options.get("reference_interaction") is None:
+            raise SpecError(
+                "goal_options.min_interaction_fraction needs "
+                "goal_options.reference_interaction (the wild-type interaction "
+                "energy to stay within a fraction of). Measure it by running "
+                "'ipro-agent score' on the input structure with goal "
+                "'bind_tighter', then set the value here."
+            )
+        self._positive("min_interaction_fraction", 0.75)
+
+    def _floor(self) -> float | None:
+        frac = self.options.get("min_interaction_fraction")
+        if frac is None or not self.spec.targets:
+            return None
+        return float(frac) * float(self.options["reference_interaction"])
+
+    def filter_reject(self, ctx: ScoreContext) -> str | None:
+        """IPRO+/-'s formulation states the interaction floor as a CONSTRAINT.
+
+        docs/DESIGN.md section 1 records it as ``min E_complex s.t. IE >=
+        0.75 * IE_WT``. As a unit-weight quadratic penalty it was not a
+        constraint at all: measured, a candidate that destroyed the interaction
+        entirely (IE 0.0 against a floor of -15.0) scored -115.0, *better* than
+        a compliant candidate at -100.0, and was kept as the run's best design.
+        """
+        floor = self._floor()
+        if floor is None:
+            return None
+        ie = self._sum_ie(ctx, self.spec.targets)
+        if ie > floor:   # less negative than allowed
+            return (
+                f"interaction energy {ie:.3f} is above the floor {floor:.3f} "
+                f"({self.options['min_interaction_fraction']} x reference "
+                f"{self.options['reference_interaction']})"
+            )
+        return None
 
     def score(self, ctx: ScoreContext) -> float:
         s = ctx.design_only if ctx.design_only else ctx.total
-        frac = self.options.get("min_interaction_fraction")
-        if frac is not None and self.spec.targets:
-            ref = self.options.get("reference_interaction")
-            if ref is None:
-                raise SpecError(
-                    "goal_options.min_interaction_fraction needs "
-                    "goal_options.reference_interaction (the wild-type interaction "
-                    "energy to stay within a fraction of); measure it with "
-                    "'ipro-agent score' on the input structure first"
-                )
+        floor = self._floor()
+        if floor is not None:
+            # Kept as a gradient *inside* the feasible region's edge so the
+            # search is pushed away from the floor, with filter_reject above as
+            # the constraint proper.
             ie = self._sum_ie(ctx, self.spec.targets)
-            floor = float(frac) * float(ref)
-            if ie > floor:  # less negative than allowed
+            if ie > floor:
                 s += (ie - floor) ** 2
         return s
 
@@ -562,6 +746,11 @@ GOAL_SYNONYMS: dict[str, str] = {
     "specificity": "switch_specificity",
     "selectivity": "switch_specificity",
     "discriminate": "switch_specificity",
+    # The 2006 paper's own word for the partner to select against ("a decoy
+    # ligand"), and the one a user is most likely to reach for. Without it,
+    # "bind the target and not the decoy" matched only "bind" and suggested
+    # plain affinity maturation.
+    "decoy": "switch_specificity",
     "pore": "reshape_channel",
     "channel": "reshape_channel",
     "lumen": "reshape_channel",
@@ -595,6 +784,20 @@ def build_goal(spec: DesignSpec) -> Goal:
     return GOALS[name](spec)
 
 
+#: When a statement matches several goals, the more specific question wins.
+#: Matching in word order answered the wrong question: "change its binding
+#: specificity from C12 to C14" hit "binding" first and suggested
+#: `bind_tighter`, which optimizes plain affinity and ignores the decoy
+#: entirely. `bind_tighter` is the fallback, so it is last.
+_GOAL_PRIORITY: tuple[str, ...] = (
+    "switch_specificity",
+    "improve_catalysis",
+    "reshape_channel",
+    "stabilize",
+    "bind_tighter",
+)
+
+
 def suggest_goal(statement: str) -> str | None:
     """Best-guess goal for a plain-language statement, or None.
 
@@ -603,9 +806,10 @@ def suggest_goal(statement: str) -> str | None:
     the user meant.
     """
     words = "".join(c.lower() if c.isalnum() else " " for c in statement).split()
-    for w in words:
-        if w in GOAL_SYNONYMS:
-            return GOAL_SYNONYMS[w]
+    hits = {GOAL_SYNONYMS[w] for w in words if w in GOAL_SYNONYMS}
+    for goal in _GOAL_PRIORITY:
+        if goal in hits:
+            return goal
     return None
 
 
