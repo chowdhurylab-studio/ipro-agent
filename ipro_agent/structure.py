@@ -103,7 +103,23 @@ class Structure:
         try:
             self.model = bio[model] if not isinstance(bio, type(None)) else None
         except KeyError as exc:
-            raise StructureError(f"model {model} not in {path}") from exc
+            # A file the parser accepted but that holds no models at all is
+            # almost always not a coordinate file: a FASTA, a sequence dump or
+            # a text file with a .pdb name parses "successfully" and yields
+            # nothing. "model 0 not in <path>" is true but tells the reader
+            # nothing they can act on.
+            n_models = len(list(bio)) if bio is not None else 0
+            if n_models == 0:
+                raise StructureError(
+                    f"{path} contains no atoms the parser recognised. A PDB "
+                    f"needs ATOM/HETATM records -- a FASTA, a sequence listing "
+                    f"or any text file with a .pdb name parses to nothing. "
+                    f"Check the first lines of the file."
+                ) from exc
+            raise StructureError(
+                f"model {model} not in {path}: it has {n_models} "
+                f"model(s), numbered {[m.id for m in bio]}"
+            ) from exc
 
     # -- loading ----------------------------------------------------------
 
@@ -125,6 +141,18 @@ class Structure:
         p = Path(path).expanduser()
         if not p.exists():
             raise StructureError(f"no such structure file: {p}")
+        # Every structure in this package arrives through here, so the
+        # unreadable-input cases belong here too. They used to surface as the
+        # parser's own exceptions -- `ValueError: Empty file.` and
+        # `IsADirectoryError` -- which callers that catch StructureError (every
+        # one of them) let through as a bare traceback.
+        if p.is_dir():
+            raise StructureError(
+                f"{p} is a directory, not a structure file. Did you mean a file "
+                f"inside it?"
+            )
+        if p.stat().st_size == 0:
+            raise StructureError(f"{p} is empty (0 bytes): nothing to read")
         # QUIET=False, deliberately: QUIET suppresses the construction warnings
         # inside the parser, so there is nothing left to inspect. They are
         # captured here instead, which keeps the console as quiet as before
@@ -136,7 +164,20 @@ class Structure:
         )
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            bio = parser.get_structure(p.stem, str(p))
+            try:
+                bio = parser.get_structure(p.stem, str(p))
+            except StructureError:
+                raise
+            except Exception as exc:
+                # Anything the parser throws becomes the one exception type
+                # callers handle, with the parser's own words kept.
+                raise StructureError(
+                    f"cannot parse {p.name} as "
+                    f"{'mmCIF' if p.suffix.lower() in ('.cif', '.mmcif') else 'PDB'}"
+                    f" ({type(exc).__name__}: {exc}). Check it is a coordinate "
+                    f"file and not, say, a FASTA, a gzipped PDB, or an mmCIF "
+                    f"named .pdb."
+                ) from exc
         # Biopython's construction warnings are the only signal that the file
         # was not read as written: a residue id used twice, an atom name used
         # twice in one residue, blank altLocs on a duplicated residue. With

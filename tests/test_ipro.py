@@ -4515,3 +4515,91 @@ def test_the_example_prompts_page_states_true_numbers():
     for required in ("screening scale", "accepted: 0", "hypothesis",
                      "What not to ask it"):
         assert required in doc, required
+
+
+def test_regression_unreadable_structures_fail_clearly_not_with_a_traceback():
+    """Every structure in this package arrives through `Structure.load`, so the
+    unreadable-input cases belong there -- they used to surface as the parser's
+    own exceptions (`ValueError: Empty file.`, `IsADirectoryError`,
+    `UnicodeDecodeError` on a gzipped file), which every caller lets through as
+    a bare traceback because they all catch StructureError.
+
+    And a file the parser *accepts* but that holds no models -- a FASTA, a
+    sequence dump, any text file with a .pdb name -- reported "model 0 not in
+    <path>", which is true and useless."""
+    from ipro_agent.structure import Structure, StructureError
+
+    tmp = Path(tempfile.mkdtemp())
+    cases = {
+        "empty.pdb": b"",
+        "text.pdb": b"not a pdb at all, just prose\n",
+        "fasta.pdb": b">seq\nACDEFGHIKLMNPQRST\n",
+    }
+    for name, body in cases.items():
+        (tmp / name).write_bytes(body)
+    (tmp / "adir.pdb").mkdir()
+    import gzip
+
+    (tmp / "gz.pdb").write_bytes(gzip.compress(CRN.read_bytes()))
+
+    expected = {
+        "empty.pdb": "empty",
+        "adir.pdb": "is a directory",
+        "text.pdb": "no atoms",
+        "fasta.pdb": "no atoms",
+        "gz.pdb": "cannot parse",
+    }
+    for name, fragment in expected.items():
+        try:
+            Structure.load(tmp / name)
+        except StructureError as exc:
+            assert fragment in str(exc).lower() or fragment in str(exc), \
+                f"{name}: message should mention {fragment!r}, got {exc}"
+        else:
+            raise AssertionError(f"{name} should not have loaded")
+
+    # And the same through the agent-facing CLI: no traceback, one line.
+    for name in cases:
+        p = subprocess.run(
+            [sys.executable, "-m", "ipro_agent", "inspect", str(tmp / name)],
+            capture_output=True, text=True, cwd=REPO, timeout=300,
+        )
+        assert "Traceback" not in p.stderr, (name, p.stderr[-300:])
+        assert p.returncode == 2, (name, p.returncode)
+
+    # A real multi-model file asked for a model it lacks says how many it has.
+    nmr = tmp / "nmr.pdb"
+    nmr.write_text(
+        "MODEL        1\n"
+        "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00  0.00           N\n"
+        "ENDMDL\nMODEL        2\n"
+        "ATOM      2  N   GLY A   1       1.000   0.000   0.000  1.00  0.00           N\n"
+        "ENDMDL\nEND\n"
+    )
+    try:
+        Structure.load(nmr, model=5)
+    except StructureError as exc:
+        assert "2 model(s)" in str(exc), exc
+    else:
+        raise AssertionError("model 5 does not exist in a 2-model file")
+
+
+def test_inspect_handles_paths_with_spaces_and_non_ascii():
+    """An agent will put a structure wherever the user's files live, and that
+    includes directories with spaces and non-ASCII names."""
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+    odd = Path(tempfile.mkdtemp()) / "ünïcode dir"
+    odd.mkdir()
+    target = odd / "my struct.pdb"
+    target.write_bytes(ompf.read_bytes())
+
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "inspect", str(target),
+         "--positions", "18", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=600,
+    )
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["positions"][0]["native"] == "VAL"
