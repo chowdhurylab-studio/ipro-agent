@@ -474,16 +474,52 @@ def tool_setup(args: dict) -> dict:
         "launched": True,
         "pid": proc.pid,
         "log": str(log),
+        "when_it_finishes": _mcp_config_for_new_env(manager),
         "next_step": (
-            f"Installing in the background; follow {log}. When it finishes, the "
-            "environment must be ACTIVATED for this server to see it: the "
-            "client's MCP config has to launch the server with the new "
-            "environment's python (e.g. "
-            "$CONDA_PREFIX/envs/ipro-agent/bin/python -m ipro_agent.mcp_server), "
-            "or PyMOL will still not resolve. Call ipro_doctor to check."
+            f"Installing in the background; follow {log}. When it finishes this "
+            "server must be RESTARTED under the new environment's python, or "
+            "PyMOL still will not resolve -- a local server sees only what its "
+            "own interpreter can import. Give the user the config in "
+            "`when_it_finishes`, then call ipro_doctor to confirm."
         ),
     })
     return plan
+
+
+def _mcp_config_for_new_env(manager: str) -> dict:
+    """The exact MCP config block to use once the environment exists.
+
+    Telling someone to "activate the environment" is useless here: the client
+    launches this server, not a shell, so `conda activate` never runs. What they
+    need is the interpreter path, and it is predictable -- so predict it rather
+    than describing it.
+    """
+    import shutil
+
+    base = Path(shutil.which(manager) or "/").resolve().parent.parent
+    candidates = [base / "envs" / "ipro-agent" / "bin" / "python",
+                  Path.home() / "miniforge3" / "envs" / "ipro-agent" / "bin" / "python",
+                  Path.home() / "miniconda3" / "envs" / "ipro-agent" / "bin" / "python"]
+    predicted = next((c for c in candidates if c.parent.parent.parent.exists()),
+                     candidates[0])
+    return {
+        "note": (
+            "Put this in the client's MCP config and restart it. `cwd` matters: "
+            "it is how the server finds the documents it serves as resources "
+            "(ipro://skill and the rest), which do not ship inside the package."
+        ),
+        "python": str(predicted),
+        "config": {
+            "mcpServers": {
+                "ipro-agent": {
+                    "command": str(predicted),
+                    "args": ["-m", "ipro_agent.mcp_server"],
+                    "cwd": str(REPO_ROOT),
+                }
+            }
+        },
+        "verify": "then call ipro_doctor; can_design must be true",
+    }
 
 
 def _which(name: str) -> str | None:

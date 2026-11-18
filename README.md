@@ -101,13 +101,22 @@ pip install git+https://github.com/chowdhurylab-studio/ipro-agent
 ```
 
 ```json
-{"mcpServers": {"ipro-agent": {"command": "ipro-agent-mcp"}}}
+{"mcpServers": {"ipro-agent": {"command": "ipro-agent-mcp",
+                               "cwd": "/path/to/a/clone"}}}
 ```
 
 That block goes in your client's MCP config (Claude Desktop's config file,
-`.mcp.json` for Claude Code, Cursor's settings — the shape is shared). From a
-clone instead of an install, use
-`{"command": "python3", "args": ["-m", "ipro_agent.mcp_server"], "cwd": "/path/to/ipro-agent"}`.
+`.mcp.json` for Claude Code, Cursor's settings — the shape is shared).
+`bash scripts/bootstrap.sh` prints it with your own paths already filled in,
+which is the easier route.
+
+**Set `cwd` to a checkout even when you installed with pip.** The documents
+served as resources (`ipro://skill` and the rest) ship with the repository, not
+inside the package, so a server that cannot see a checkout will list them and
+then tell the agent where to fetch them instead of serving them. And use the
+**conda environment's** python, not a bare `python3`: a local server sees only
+what its own interpreter can import, so the wrong one means PyMOL does not
+resolve and no design can run.
 
 | Tool | What it does |
 |---|---|
