@@ -715,22 +715,70 @@ RESOURCES: list[dict[str, str]] = [
 _BY_URI = {r["uri"]: r for r in RESOURCES}
 
 
+#: Where the documents are looked for, in order. ``REPO_ROOT`` is the repo when
+#: the server runs from a clone, but **site-packages** when it was pip-installed
+#: -- and the documents are not inside the package, so a pip-installed copy
+#: found none of them. Measured: `resources/list` returned 0 entries, which
+#: silently removed the operating manual that the server's own instructions tell
+#: the client to read. The client's working directory is tried as well, so a
+#: pip-installed server whose MCP config sets `cwd` to a checkout still works.
+def _doc_roots() -> list[Path]:
+    roots = [REPO_ROOT]
+    try:
+        cwd = Path.cwd()
+    except OSError:                       # a deleted cwd is survivable
+        return roots
+    if cwd != REPO_ROOT:
+        roots.append(cwd)
+    return roots
+
+
+#: Canonical location of each document, for a copy that has neither.
+RAW_BASE = "https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/main/"
+
+
+def _resolve_doc(rel: str) -> Path | None:
+    for root in _doc_roots():
+        candidate = root / rel
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _resource_list() -> list[dict]:
-    return [
-        {k: r[k] for k in ("uri", "name", "description", "mimeType")}
-        for r in RESOURCES
-        if (REPO_ROOT / r["path"]).exists()
-    ]
+    """Every document, always -- listed whether or not this copy has the file.
+
+    Listing only what exists hid the manual from a pip-installed server without
+    saying so. An agent is better served by a name it can ask for and a clear
+    answer about where to get it than by a silently shorter list.
+    """
+    out = []
+    for r in RESOURCES:
+        entry = {k: r[k] for k in ("uri", "name", "description", "mimeType")}
+        if _resolve_doc(r["path"]) is None:
+            entry["description"] += (
+                " [NOT in this installation: it ships with the repository, not "
+                "the package. Reading it returns the URL to fetch, or run the "
+                "server from a clone.]"
+            )
+        out.append(entry)
+    return out
 
 
 def _resource_read(uri: str) -> dict:
     spec = _BY_URI.get(uri)
     if spec is None:
         raise ToolError(f"unknown resource {uri!r}; have {sorted(_BY_URI)}")
-    path = REPO_ROOT / spec["path"]
-    if not path.exists():
+    path = _resolve_doc(spec["path"])
+    if path is None:
         raise ToolError(
-            f"{uri} maps to {spec['path']}, which is not in this checkout"
+            f"{uri} is the file {spec['path']}, which ships with the repository "
+            f"rather than with the installed package, and this server cannot see "
+            f"a checkout (it looked in {', '.join(str(r) for r in _doc_roots())}).\n"
+            f"Either fetch it from {RAW_BASE}{spec['path']}\n"
+            f"or run the server from a clone, or set `cwd` to a checkout in the "
+            f"MCP config -- `git clone "
+            f"https://github.com/chowdhurylab-studio/ipro-agent`."
         )
     return {
         "contents": [{

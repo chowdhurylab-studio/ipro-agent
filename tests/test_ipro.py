@@ -4240,3 +4240,44 @@ def test_mcp_unexercised_paths_are_declared():
         attr = re.split(r"[\s(]", name)[0]
         assert hasattr(m, attr), f"declared-unexercised {name!r} no longer exists"
         assert len(why.strip()) > 40, f"{name} needs a real reason"
+
+
+def test_mcp_resources_survive_a_pip_install():
+    """`REPO_ROOT` is the repo from a clone but **site-packages** when
+    pip-installed, and the documents are not inside the package -- so a
+    pip-installed server found none of them and `resources/list` returned 0
+    entries, silently removing the operating manual the server's own
+    instructions tell the client to read.
+
+    Now every document is always listed (marked when this copy lacks the file),
+    reading a missing one returns the raw URL to fetch, and the client's working
+    directory is searched too, so a pip-installed server whose MCP config sets
+    `cwd` to a checkout serves them normally."""
+    from ipro_agent import mcp_server as m
+
+    listed = m._resource_list()
+    assert len(listed) == len(m.RESOURCES), "every document must be listed"
+    # From a clone, every one resolves.
+    for r in m.RESOURCES:
+        assert m._resolve_doc(r["path"]) is not None, r["uri"]
+        assert "[NOT in this installation" not in next(
+            x["description"] for x in listed if x["uri"] == r["uri"]
+        )
+
+    # A document the copy does not have: the error must name where to get it.
+    m._BY_URI["ipro://_probe"] = {
+        "uri": "ipro://_probe", "path": "no/such/file.md",
+        "name": "probe", "description": "", "mimeType": "text/markdown",
+    }
+    try:
+        m._resource_read("ipro://_probe")
+    except m.ToolError as exc:
+        assert m.RAW_BASE in str(exc), exc
+        assert "git clone" in str(exc)
+    else:
+        raise AssertionError("a missing document must not read as empty")
+    finally:
+        del m._BY_URI["ipro://_probe"]
+
+    # The cwd fallback is what makes a pip-installed server usable.
+    assert "Path.cwd()" in (REPO / "ipro_agent" / "mcp_server.py").read_text()
