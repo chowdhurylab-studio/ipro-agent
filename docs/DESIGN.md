@@ -646,9 +646,27 @@ Reported **clean** by this review: identity-coupling completeness and
 constraint scoping, `split_vpos` on `A-1` and `A115B`, the pore `window`
 semantics and centre-offset re-enforcement, deleting a design position,
 `_sort_chain`, `A0`/`A-1` parsing, the phi/psi moving sets, the annealing
-endpoints, and `net_interaction`'s pair counting. One item is **unverified**:
-whether PyMOL accepts `/prot//A/-1` for a negative residue number
-(`scripts/harvest_rotamers.py`, `scripts/apply_design.py` pass it unescaped) —
-the reviewer had no PyMOL available.
+endpoints, and `net_interaction`'s pair counting.
 
-Each of the fourteen has a regression test. The suite is **93 tests**.
+### 7c. The item the review could not check was a fifteenth defect
+
+The one thing the reviewer left unverified — it had no PyMOL installed — was
+whether PyMOL accepts `/prot//A/-1` for a negative residue number. It does
+not, and the alternative is worse. A negative residue number is exactly what
+an N-terminal insertion creates, since it numbers downward so that nothing
+existing is renumbered:
+
+| Selection | Selects |
+|---|---|
+| `/prot//A/-1` | **0 atoms** — the slash form does not take a leading minus at all |
+| `prot and chain A and resi -1` | **residues −1, 0 and 1** — PyMOL reads `-` as its range operator, so this is the range "up to 1" (measured: 15 atoms where the residue has 4) |
+| `prot and chain A and resi \-1` | 4 atoms, residue −1 only — the one correct form |
+
+Both scripts used the slash form whenever there was no insertion code, so a
+design position at a negative number harvested nothing. Measured end to end on
+1CRN with two residues prepended and `A-1`/`A0` as the design positions: the
+previous commit reported **one** mutation (`G0W`) where two positions were
+requested, left `A-1` as glycine with only backbone atoms, and raised nothing.
+It now reports `G-1S G0W`, with SER's OG and TRP's full indole built.
+
+Each of the fifteen has a regression test. The suite is **94 tests**.
