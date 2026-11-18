@@ -1,0 +1,23 @@
+# --- Reference material: papers (copyright) and upstream source clones ---
+# Kept locally for provenance, never committed (see AGENTS.md: bulk data out of git).
+refs/papers/
+refs/source/
+
+# --- Run output: structures, trajectories, logs, solver files ---
+runs/
+*.pdb.gz
+*.lp
+*.sol
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- OS ---
+.DS_Store
