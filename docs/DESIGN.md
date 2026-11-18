@@ -34,6 +34,7 @@ from this tool as an IPRO result.
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
+| Re-placing partner molecules each Nth iteration | `docking.py` (local MC), `dock.py` (Vina), chosen by `backends.dock` | IPRO Suite step 3: "a local, rigid-body redocking of the TMs ... uses the same energy functions as the rotamer selection step", 500 moves, sigma 0.2 A / 2.0 deg, annealed 3640 K to 2190 K |
 | Multiple binding assemblies (one sequence, per-assembly packing, conjunctive acceptance) | `assemblies.py`, `config.Assembly` | IPRO Suite: "rotamers are selected sequentially for each BA whereas residue identity remains the same for all BAs", and "all BAs must pass the selection criteria" |
 | Atom-position restraints (fix, tether, distance, dihedral) | `restraints.py`, `Constraint` vetoes in `milp.py` | IPRO Suite: four kinds of restraint "rigorously enforced throughout all functions"; the ±0.2 Å catalytic-distance form is from ACS Catal 2017 |
 | Design/target/anti-target vocabulary | `config.Role` | IPRO's own **DM** / **TM** / **DP** input vocabulary (design molecule, target molecule, design position); `anti_target` is this repo's addition |
@@ -231,6 +232,50 @@ minimized, because that is what the protein will actually do when it meets that
 partner; the trade-off between partners lives in the objective and in
 acceptance.
 
+### 1e. Placing the partners: two different operations
+
+`backends.dock` chooses, and the two options are **not** two qualities of the
+same thing:
+
+| | `builtin` | `vina` |
+|---|---|---|
+| what it is | IPRO's own step: local rigid-body Monte Carlo | AutoDock Vina: global search in a box |
+| search scope | the six rigid-body degrees of freedom, near the current pose | the whole box, any orientation |
+| scoring | **the same energy as rotamer selection** | Vina's own scoring function |
+| finds a pose from nothing? | no — it refines one | yes, that is what it is for |
+| measured cost | **0.15–0.40 s** per 500 moves (327-atom receptor, 3–60 atom partner; ~0.3–0.8 ms/move) | seconds to minutes per ligand at exhaustiveness 8, plus receptor/ligand prep and file I/O per call |
+| reproducible | yes, from `loop.random_seed` | with `--seed`, subject to Vina's own determinism |
+| external dependency | none | a Vina binary, and ideally Meeko for ligand prep |
+
+`auto` prefers Vina when it is installed and falls back to `builtin`, with a
+note saying so — the same precedence as `energy: auto` preferring PyRosetta.
+An explicit `dock: vina` with no Vina **raises**; it never quietly degrades to
+the cheaper option, because the two answer different questions.
+
+**Vina's affinity never enters the objective.** The pose is taken and the energy
+that drives the loop stays the backend's. Otherwise the objective would depend
+on which docking program happened to be installed and scores would not be
+comparable between runs. Vina's number is reported alongside, labelled as being
+on its own scale.
+
+**Why re-placing partners is affordable at all.** Only the **self** energies
+depend on where the partners are — a pair energy is rotamer-against-rotamer and
+the partners do not appear in it. So a redock invalidates
+O(positions x rotamers) terms rather than the O(n^2) pair block, and
+`_refresh_self_energies` updates only those. The rotamer *set* is left as it was
+pruned against the input pose, so the design space does not drift between
+iterations. There is a test that refreshing with unmoved partners changes
+nothing, which also proves the two template constructions agree.
+
+**A caveat on Vina as the redock.** The published step is a *local refinement*.
+Using a global search in its place changes the protocol: each redock re-places
+the ligand rather than nudging it, so the trajectory is no longer a local walk.
+That may be what you want — particularly if mutations have moved the pocket
+enough that the old pose is meaningless — but it is a different protocol, and a
+Vina pose is only applied when its atoms correspond one-to-one with the input
+ligand's (otherwise the transform cannot be fitted, and the run says so rather
+than moving the ligand somewhere nobody chose).
+
 ### The one concept added here
 
 `role: anti_target` is **not** in IPRO. It is the minimal addition that lets a
@@ -302,7 +347,6 @@ specified, and this table is the record of what that changes.
 | **Insertions and deletions** | **Not implemented.** A spec containing `indels:` raises `NotImplementedError` with a pointer to the alternative. | Changing chain length needs loop closure after the edit. Protein-InDelMaker does this with PyRosetta's GeneralizedKIC over a 6-residue window followed by Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. No loop-closure backend is available here. `config.IndelSpec` models the input so the schema is ready. Workaround: build the variant with Protein-InDelMaker, then design on that structure. |
 | **Backbone perturbation and relaxation** | Only in `mode: full`, which needs PyRosetta. Otherwise the loop runs `fixed-backbone` and says so. | Perturbing a backbone without minimizing afterwards only manufactures clashes, so the step is skipped rather than faked. |
 | **Pore / channel geometry measurement** | Not implemented. `geometry["min_pore_radius"]` is never populated, so `reshape_channel`'s radius term is inert and PoreDesigner's hard bottleneck filter cannot be applied. The goal reports this. | PoreDesigner measured the bottleneck by fitting ellipses to ~16 slices through the constriction, outside the optimization loop. |
-| **Vina re-docking inside the loop** | `dock.py` exists and is tested in dry-run; it is not wired into the iteration. | Vina is not installed in this environment, so a wired-in untested path would be a liability. When wiring it: re-score Vina poses with the energy backend, and **never** add Vina affinities to the objective — the scales are unrelated. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | IPRO's 20-entry table was not recovered. Inventing values would put unsourced numbers at the centre of the objective. Without one, nothing corrects for unfolded-state propensity, so identities are decided by packing alone and large side chains are disfavoured at buried positions. The loop emits a note when this applies. **Note on history:** an earlier version of this document attributed an observed all-alanine bias entirely to this gap. That was wrong — the dominant cause was a defect in which each rotamer was scored against its own backbone, inflating every side chain's energy in proportion to its size. That is fixed (see §7); the reference-energy gap is a real but smaller effect. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |

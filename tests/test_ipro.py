@@ -1202,6 +1202,210 @@ def test_assembly_mismatched_rotamer_sets_are_rejected():
         raise AssertionError("mismatched rotamer sets should be rejected")
 
 
+# ---------------------------------------------------------------------------
+# Placing the partners
+# ---------------------------------------------------------------------------
+
+
+def test_pose_round_trip_is_exact():
+    """A known rigid transform must be recovered to floating-point accuracy;
+    everything downstream of docking depends on this fit."""
+    import random as _random
+
+    from ipro_agent.docking import _pose_between, _random_rotation
+
+    rng = _random.Random(1)
+    start = np.array([[0.0, 0, 0], [1.5, 0, 0], [0, 1.4, 0], [0.3, 0.2, 1.1]])
+    R = _random_rotation(30.0, rng)
+    shift = np.array([0.7, -0.4, 0.25])
+    c = start.mean(axis=0)
+    end = (start - c) @ R.T + c + shift
+    pose = _pose_between(start, end, c)
+    assert np.abs(pose.apply(start) - end).max() < 1e-9
+    # A single atom has no orientation, so only the shift is recoverable.
+    one = _pose_between(np.array([[1.0, 2, 3]]), np.array([[2.0, 2, 3]]), np.zeros(3))
+    assert np.allclose(one.translation, [1.0, 0, 0])
+
+
+def test_rigid_body_anneal_never_worsens_and_its_pose_reproduces_its_energy():
+    """The two properties that make the result usable: the search cannot report
+    a worse best than it started with, and the pose it hands back must actually
+    give the energy it claims."""
+    import random as _random
+
+    from ipro_agent.docking import moved_atomset, net_interaction, redock
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    design = _atoms_of(st)
+    be = resolve("builtin")
+    cb = np.array(st.find("A", 16).child_dict["CB"].coord)
+    probe = AtomSet(
+        names=["C1", "O1", "C2"],
+        coords=np.array([cb + [2.6, 0, 0], cb + [3.9, 0, 0], cb + [2.6, 1.3, 0]]),
+        resnames=["LIG"] * 3, reskeys=[("X", 1, "")] * 3,
+    )
+    res = redock(design, {"L": probe}, be, moves=150, rng=_random.Random(3))["L"]
+    assert res.best_energy <= res.start_energy + 1e-9
+    rescored = net_interaction(design, {"L": moved_atomset(probe, res.pose)}, be)
+    assert abs(rescored - res.best_energy) < 1e-6, (rescored, res.best_energy)
+
+
+def test_rigid_body_anneal_is_reproducible_from_a_seed():
+    """IPRO seeds nothing; this does, so a run can be repeated."""
+    import random as _random
+
+    from ipro_agent.docking import redock
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    design = _atoms_of(st)
+    be = resolve("builtin")
+    cb = np.array(st.find("A", 16).child_dict["CB"].coord)
+    probe = AtomSet(names=["C1"], coords=np.array([cb + [3.0, 0, 0]]),
+                    resnames=["LIG"], reskeys=[("X", 1, "")])
+    a = redock(design, {"L": probe}, be, moves=60, rng=_random.Random(42))["L"]
+    b = redock(design, {"L": probe}, be, moves=60, rng=_random.Random(42))["L"]
+    assert a.best_energy == b.best_energy
+    assert np.allclose(a.pose.translation, b.pose.translation)
+
+
+def test_rigid_body_moves_respect_the_published_step_sizes():
+    """sigma 0.2 A and 2.0 deg are the paper's numbers; a bug here would turn a
+    local refinement into a random relocation."""
+    import math as _math
+    import random as _random
+
+    from ipro_agent.docking import _random_rotation
+
+    rng = _random.Random(7)
+    angles = []
+    for _ in range(3000):
+        R = _random_rotation(2.0, rng)
+        angles.append(_math.degrees(
+            _math.acos(max(-1.0, min(1.0, (np.trace(R) - 1.0) / 2.0)))
+        ))
+    # Mean |angle| for a Gaussian of sigma=2 deg is sigma*sqrt(2/pi) ~ 1.6.
+    assert 1.2 < float(np.mean(angles)) < 2.2, float(np.mean(angles))
+    assert max(angles) < 15.0, "a single move must stay local"
+
+
+def test_dock_backend_choice_is_honoured():
+    """The user picks the placement program. 'vina' must not silently become
+    something cheaper, and 'auto' must say what it fell back to."""
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.dock import find_vina
+    from ipro_agent.loop import IPROLoop
+
+    def spec_with(dock: str, redock: bool):
+        return DesignSpec.from_dict({
+            "goal": "stabilize", "goal_statement": "x",
+            "molecules": [
+                {"name": "m", "path": str(CRN), "role": "design",
+                 "kind": "protein", "chains": ["A"]},
+                {"name": "L", "path": str(CRN), "role": "target",
+                 "kind": "ligand", "redock": redock},
+            ],
+            "positions": ["A16"],
+            "backends": {"dock": dock},
+        })
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_dock_"))
+    try:
+        # Nothing mobile -> nothing to place, whatever was asked for.
+        loop = IPROLoop(spec_with("builtin", False), tmp)
+        assert loop._resolve_dock() == "none"
+        assert any("redock: true" in n for n in loop.notes)
+
+        assert IPROLoop(spec_with("none", True), tmp)._resolve_dock() == "none"
+        assert IPROLoop(spec_with("builtin", True), tmp)._resolve_dock() == "builtin"
+
+        have_vina = find_vina() is not None
+        auto = IPROLoop(spec_with("auto", True), tmp)
+        resolved = auto._resolve_dock()
+        assert resolved == ("vina" if have_vina else "builtin")
+        if not have_vina:
+            assert any("no AutoDock Vina binary" in n for n in auto.notes)
+            # An explicit request must fail loudly, not degrade.
+            try:
+                IPROLoop(spec_with("vina", True), tmp)._resolve_dock()
+            except RuntimeError as exc:
+                assert "builtin" in str(exc) and "Install it" in str(exc)
+            else:
+                raise AssertionError("dock: vina with no Vina should raise")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_vina_pose_is_rejected_when_atoms_do_not_correspond():
+    """Without a one-to-one atom mapping the transform cannot be fitted, and
+    guessing would move the ligand somewhere nobody chose."""
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.loop import IPROLoop
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_vinapose_"))
+    try:
+        spec = DesignSpec.from_dict({
+            "goal": "stabilize", "goal_statement": "x",
+            "molecules": [
+                {"name": "m", "path": str(CRN), "role": "design",
+                 "kind": "protein", "chains": ["A"]},
+                {"name": "L", "path": str(CRN), "role": "target", "kind": "ligand"},
+            ],
+            "positions": ["A16"],
+        })
+        loop = IPROLoop(spec, tmp)
+        loop._partners["L"] = __import__(
+            "ipro_agent.structure", fromlist=["Structure"]
+        ).Structure.load(CRN)
+
+        pose_file = tmp / "pose.pdb"
+        pose_file.write_text(
+            "ATOM      1  C1  LIG X   1       0.000   0.000   0.000"
+            "  1.00  0.00           C\nEND\n"
+        )
+
+        class _Res:
+            poses = [pose_file]
+
+        assert loop._pose_from_vina("L", _Res()) is None
+        assert any("was NOT applied" in n for n in loop.notes)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_redock_only_invalidates_self_energies():
+    """Pair energies are rotamer-against-rotamer, so moving a partner cannot
+    change them. Refreshing with unmoved partners must change nothing at all --
+    which also proves the two template constructions agree."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+    from ipro_agent.config import DesignSpec
+    from ipro_agent.loop import IPROLoop
+
+    tmp = Path(tempfile.mkdtemp(prefix="ipro_refresh_"))
+    try:
+        spec = DesignSpec.from_dict({
+            "goal": "stabilize", "goal_statement": "x",
+            "molecules": [{"name": "m", "path": str(CRN), "role": "design",
+                           "kind": "protein", "chains": ["A"]}],
+            "positions": [{"position": "A16", "allowed": ["ALA", "SER"]}],
+        })
+        loop = IPROLoop(spec, tmp)
+        loop.prepare()
+        cb = loop.build_combined()
+        before_self = dict(cb.tables.self_energy)
+        before_pair = dict(cb.tables.pair_energy)
+        loop._refresh_self_energies(cb)      # all poses are identity
+        assert cb.tables.self_energy == before_self
+        assert cb.tables.pair_energy == before_pair
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def collect():
     g = globals()
     return [(n, g[n]) for n in sorted(g) if n.startswith("test_")]

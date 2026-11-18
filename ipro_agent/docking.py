@@ -1,0 +1,280 @@
+"""IPRO's redocking step: local rigid-body Monte Carlo with annealing.
+
+Worth being precise about what this is, because it is easy to assume otherwise.
+The IPRO Suite paper describes step three of an iteration as
+
+    a **local, rigid-body** redocking of the TMs ... Docking uses **the same
+    energy functions as the rotamer selection step**. During docking, a TM is
+    randomly perturbed along and around the X, Y and Z axes using a Gaussian
+    distribution centered at zero, with standard deviations of 0.2 A and 2.0
+    [degrees] ... the movement of the TM is retained if the net interaction
+    energy has improved. Each TM is randomly perturbed and 500 iterations are
+    performed. A constant cooling schedule is used for simulated annealing. The
+    temperature at the start (3640 K) and end (2190 K) of docking retain 25 and
+    10%, respectively, of positions within 10 kcal/mol of the best solutions
+    thus far.
+
+So it is **not** a docking program. It is a short local search in the six
+rigid-body degrees of freedom, scored with the same energy the MILP uses, which
+means it needs no external dependency and is reproducible from a seed. That is
+what this module implements.
+
+AutoDock Vina solves a different problem -- a *global* search with its own
+scoring function -- and is the right tool when there is no starting pose at all.
+It stays available as the explicit ``ipro-agent dock`` command, and can be opted
+into for this step (``backends.dock: vina``), with the caveat recorded in
+:func:`redock` that doing so replaces local refinement with global re-placement.
+
+The objective, following the paper, is the **net interaction energy of all the
+partners with each other and with the design molecule** -- not each partner
+scored in isolation, since partners can touch.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import random
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .energy.base import AtomSet, EnergyBackend
+
+log = logging.getLogger(__name__)
+
+#: Gas constant in kcal/(mol K), as elsewhere in this package.
+R_KCAL = 1.987e-3
+
+
+@dataclass
+class Pose:
+    """A rigid-body placement: rotate about the body's own centroid, then shift.
+
+    Stored as an accumulated rotation and translation rather than as coordinates
+    so it can be applied to a full-atom structure later (including hydrogens and
+    any atoms the scoring set left out).
+    """
+
+    rotation: np.ndarray = field(default_factory=lambda: np.eye(3))
+    translation: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    #: Centroid the rotation is taken about, in the input frame.
+    centre: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+    def apply(self, coords: np.ndarray) -> np.ndarray:
+        c = np.asarray(coords, dtype=float)
+        return (c - self.centre) @ self.rotation.T + self.centre + self.translation
+
+    @property
+    def is_identity(self) -> bool:
+        return (
+            np.allclose(self.rotation, np.eye(3), atol=1e-12)
+            and np.allclose(self.translation, 0.0, atol=1e-12)
+        )
+
+    def rmsd_of(self, coords: np.ndarray) -> float:
+        """How far this pose moves the given atoms, in Angstroms."""
+        c = np.asarray(coords, dtype=float)
+        if c.size == 0:
+            return 0.0
+        return float(np.sqrt(((self.apply(c) - c) ** 2).sum(axis=1).mean()))
+
+    def describe(self) -> str:
+        ang = math.degrees(
+            math.acos(max(-1.0, min(1.0, (np.trace(self.rotation) - 1.0) / 2.0)))
+        )
+        return (
+            f"translation {np.linalg.norm(self.translation):.3f} A, "
+            f"rotation {ang:.2f} deg"
+        )
+
+
+def _random_rotation(sigma_deg: float, rng: random.Random) -> np.ndarray:
+    """Small rotation: a Gaussian angle about a uniformly random axis.
+
+    The paper perturbs "around the X, Y and Z axes" with a Gaussian of 2.0
+    degrees. Composing three such rotations is equivalent, to first order, to
+    one Gaussian rotation about a random axis with the same per-axis spread, and
+    the single-axis form cannot accumulate the ordering bias that applying three
+    in sequence does.
+    """
+    axis = np.array([rng.gauss(0.0, 1.0) for _ in range(3)])
+    n = np.linalg.norm(axis)
+    if n < 1e-12:
+        return np.eye(3)
+    axis = axis / n
+    angle = math.radians(rng.gauss(0.0, sigma_deg))
+    K = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ])
+    # Rodrigues' rotation formula.
+    return np.eye(3) + math.sin(angle) * K + (1.0 - math.cos(angle)) * (K @ K)
+
+
+@dataclass
+class RedockResult:
+    """Outcome of one partner's local search."""
+
+    pose: Pose
+    start_energy: float
+    best_energy: float
+    moves: int
+    accepted: int
+    #: True when the search left the partner where it started.
+    unchanged: bool = False
+
+    @property
+    def improvement(self) -> float:
+        return self.best_energy - self.start_energy
+
+    def describe(self) -> str:
+        return (
+            f"{self.start_energy:+.3f} -> {self.best_energy:+.3f} "
+            f"({self.improvement:+.3f}) in {self.moves} moves, "
+            f"{self.accepted} accepted; {self.pose.describe()}"
+        )
+
+
+def net_interaction(
+    design: AtomSet,
+    partners: dict[str, AtomSet],
+    backend: EnergyBackend,
+) -> float:
+    """Net interaction energy of the partners with the design and each other.
+
+    The paper's objective for this step. Partner-partner terms matter whenever
+    more than one partner is present, which is exactly when a redock can push
+    two of them into each other.
+    """
+    total = 0.0
+    names = sorted(partners)
+    for n in names:
+        total += backend.interaction(design, partners[n])
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            total += backend.interaction(partners[a], partners[b])
+    return total
+
+
+def redock(
+    design: AtomSet,
+    partners: dict[str, AtomSet],
+    backend: EnergyBackend,
+    *,
+    moves: int = 500,
+    sigma_angstrom: float = 0.2,
+    sigma_deg: float = 2.0,
+    temperature_start_k: float = 3640.0,
+    temperature_end_k: float = 2190.0,
+    rng: random.Random | None = None,
+    mobile: set[str] | None = None,
+) -> dict[str, RedockResult]:
+    """Locally refine each partner's rigid-body placement.
+
+    One Monte Carlo chain over all mobile partners jointly: each move perturbs
+    one randomly chosen partner, the *net* interaction energy is re-evaluated,
+    and the move is kept if it improved or by the Metropolis test at the current
+    temperature. Temperature falls linearly from ``temperature_start_k`` to
+    ``temperature_end_k`` across the run ("a constant cooling schedule").
+
+    Returns the best pose found for each mobile partner. Poses are relative to
+    the coordinates passed in, so applying one twice would move a partner twice.
+
+    ``rng`` makes the search reproducible, which the published protocol is not:
+    IPRO seeds nothing.
+    """
+    rng = rng or random.Random(0)
+    movable = sorted(mobile if mobile is not None else partners)
+    movable = [m for m in movable if m in partners and len(partners[m])]
+    if not movable:
+        return {}
+
+    current = {n: np.array(a.coords, dtype=float) for n, a in partners.items()}
+    centres = {n: current[n].mean(axis=0) for n in movable}
+
+    def sets_from(coords: dict[str, np.ndarray]) -> dict[str, AtomSet]:
+        return {
+            n: AtomSet(
+                names=list(partners[n].names), coords=coords[n],
+                resnames=list(partners[n].resnames), reskeys=list(partners[n].reskeys),
+            )
+            for n in partners
+        }
+
+    start_energy = net_interaction(design, sets_from(current), backend)
+    best_energy = cur_energy = start_energy
+    best = {n: current[n].copy() for n in movable}
+    accepted = 0
+
+    for step in range(max(0, int(moves))):
+        frac = (step / (moves - 1)) if moves > 1 else 1.0
+        temp = temperature_start_k + frac * (temperature_end_k - temperature_start_k)
+        kt = max(R_KCAL * temp, 1e-12)
+
+        name = movable[rng.randrange(len(movable))]
+        rot = _random_rotation(sigma_deg, rng)
+        shift = np.array([rng.gauss(0.0, sigma_angstrom) for _ in range(3)])
+        centre = current[name].mean(axis=0)
+        trial = (current[name] - centre) @ rot.T + centre + shift
+
+        keep = current[name]
+        current[name] = trial
+        trial_energy = net_interaction(design, sets_from(current), backend)
+        delta = trial_energy - cur_energy
+        if delta <= 0 or rng.random() < math.exp(-min(delta / kt, 700.0)):
+            cur_energy = trial_energy
+            accepted += 1
+            if trial_energy < best_energy:
+                best_energy = trial_energy
+                best = {n: current[n].copy() for n in movable}
+        else:
+            current[name] = keep
+
+    out: dict[str, RedockResult] = {}
+    for n in movable:
+        pose = _pose_between(partners[n].coords, best[n], centres[n])
+        out[n] = RedockResult(
+            pose=pose,
+            start_energy=start_energy,
+            best_energy=best_energy,
+            moves=int(moves),
+            accepted=accepted,
+            unchanged=pose.rmsd_of(partners[n].coords) < 1e-9,
+        )
+    return out
+
+
+def _pose_between(
+    start: np.ndarray, end: np.ndarray, centre: np.ndarray
+) -> Pose:
+    """Recover the rigid transform taking ``start`` to ``end`` (Kabsch).
+
+    The chain accumulates coordinates, not transforms, so the net pose is
+    recovered at the end. Both sets are the same rigid body, so the fit is
+    exact up to floating point.
+    """
+    a = np.asarray(start, dtype=float)
+    b = np.asarray(end, dtype=float)
+    if a.shape != b.shape or len(a) == 0:
+        return Pose(centre=np.asarray(centre, dtype=float))
+    ca, cb = a.mean(axis=0), b.mean(axis=0)
+    if len(a) == 1:
+        return Pose(translation=cb - ca, centre=ca)
+    H = (a - ca).T @ (b - cb)
+    U, _S, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    # start -> end is: rotate about ca, then shift by (cb - ca)
+    return Pose(rotation=R, translation=cb - ca, centre=ca)
+
+
+def moved_atomset(original: AtomSet, pose: Pose) -> AtomSet:
+    """``original`` with ``pose`` applied."""
+    return AtomSet(
+        names=list(original.names),
+        coords=pose.apply(original.coords),
+        resnames=list(original.resnames),
+        reskeys=list(original.reskeys),
+    )

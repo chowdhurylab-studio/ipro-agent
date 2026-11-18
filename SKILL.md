@@ -259,10 +259,33 @@ them):
 designed positions to be long residues (W/F/Y/M), and `reshape_channel` adds
 that constraint automatically when narrowing.
 
-### 5. Dock, if a partner must be re-placed
+### 5. Decide how partners get re-placed
 
-The iteration loop does **not** auto-dock. When a ligand has to find a new pose
-after the pocket is mutated, dock it explicitly:
+Mark a partner `redock: true` and the loop re-places it every `redock_every`
+iterations (default 3, as published). **You choose the program**, because the
+two available do different jobs:
+
+```yaml
+backends:
+  dock: auto     # auto | vina | builtin | none
+```
+
+| Choice | Use it when | Cost |
+|---|---|---|
+| `builtin` | the pose is roughly right and should be *refined* — IPRO's own local rigid-body Monte Carlo, scored with the same energy as rotamer selection | ~0.2–0.4 s per 500 moves |
+| `vina` | there is no usable starting pose, or mutations have moved the pocket so much the old one is meaningless — a global search of the box | seconds to minutes per ligand, plus prep and file I/O |
+| `auto` | Vina if installed, else `builtin` (it says which in the notes) | — |
+| `none` | the input poses are what you want scored | free |
+
+An explicit `dock: vina` with no Vina installed **fails** rather than quietly
+using the cheaper option — they answer different questions, so a silent
+substitution would change the science.
+
+**Vina's affinity is never added to the objective.** The pose is taken; the
+score stays the energy backend's. Report Vina's number separately if at all,
+and say it is on its own scale.
+
+You can also place a partner once, outside the loop:
 
 ```bash
 python3 -m ipro_agent dock spec.yaml --out-dir runs/dock --seed 1 --json

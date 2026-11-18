@@ -555,9 +555,18 @@ class LoopSettings:
 
     #: Rigid-body redocking of target molecules every Nth iteration.
     redock_every: int = 3
+    #: Monte-Carlo controls, used by the 'builtin' dock backend.
     redock_moves: int = 500
     redock_sigma_angstrom: float = 0.2
     redock_sigma_deg: float = 2.0
+    #: Docking anneals from loop.temperature_k down to this. IPRO: 3640 -> 2190 K,
+    #: retaining 25% and 10% of positions within 10 kcal/mol of the best so far.
+    redock_temperature_end_k: float = 2190.0
+    #: Vina controls, used by the 'vina' dock backend.
+    vina_exhaustiveness: int = 8
+    vina_num_modes: int = 9
+    #: Box side (A) centred on the design positions when Vina places a partner.
+    vina_box_size: float = 22.5
 
     #: Metropolis acceptance temperature in kelvin. IPRO's default, 3640 K, is
     #: calibrated so that a 10 kcal/mol worsening is accepted 25% of the time:
@@ -622,10 +631,34 @@ class Backends:
     #: auto | pymol. There is no built-in mutagenesis: rotamers come from
     #: PyMOL's library, so PyMOL is effectively required.
     mutate: str = "auto"
-    dock: str = "auto"         # auto | vina | none
+    #: Which program places the partner molecules each redock.
+    #:
+    #: ``vina``    AutoDock Vina: a **global** search with its own scoring
+    #:             function. Finds a pose when there is no good starting one,
+    #:             and is the heavier of the two by a wide margin. Its affinity
+    #:             is on its own scale and is never added to the objective --
+    #:             the pose is taken and re-scored with the energy backend.
+    #: ``builtin`` IPRO's own step: a **local** rigid-body Monte Carlo over the
+    #:             six rigid-body degrees of freedom, scored with the same
+    #:             energy as rotamer selection (500 moves, sigma 0.2 A / 2.0
+    #:             deg, annealed 3640 K -> 2190 K). Cheap, reproducible from a
+    #:             seed, and refines a pose rather than finding one.
+    #: ``auto``    Vina when it is installed, otherwise ``builtin``.
+    #: ``none``    Keep the input poses.
+    #:
+    #: These are different operations, not two qualities of the same one. See
+    #: docs/DESIGN.md for the trade-off table.
+    dock: str = "auto"
     milp_solver: str = "auto"  # auto | cbc | glpk | cplex | gurobi | highs | greedy
 
     def __post_init__(self) -> None:
+        if self.dock not in ("auto", "vina", "builtin", "none"):
+            raise SpecError(
+                f"backends.dock must be 'auto', 'vina', 'builtin' or 'none' "
+                f"(got {self.dock!r}). 'vina' is a global search; 'builtin' is "
+                "IPRO's local rigid-body Monte Carlo. They do different jobs -- "
+                "see docs/DESIGN.md."
+            )
         if self.mutate not in ("auto", "pymol"):
             raise SpecError(
                 f"backends.mutate must be 'auto' or 'pymol' (got {self.mutate!r}); "

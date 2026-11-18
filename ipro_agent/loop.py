@@ -49,6 +49,8 @@ from .energy import resolve as resolve_energy
 from .goals import Goal, ScoreContext, build_goal, metropolis_accept
 from .milp import Constraint, EnergyTables, RotamerMILP, Rotamer, build_tables
 from .assemblies import CombinedTables, combine, split_vpos, vpos
+from .docking import Pose, _pose_between, moved_atomset
+from .docking import redock as mc_redock
 from .restraints import RestraintError, RestraintPlan, plan_restraints
 from .rotamers import build_template, harvest
 from .state import IterationRecord, RunDir, Status
@@ -118,6 +120,23 @@ def _atoms_of(st: Structure, skip_sidechains_at: set[str] = frozenset()) -> Atom
     )
 
 
+
+def _read_pose_coords(path) -> "np.ndarray":
+    """Heavy-atom coordinates from a PDB or PDBQT pose file, in file order."""
+    import pathlib as _pl
+
+    coords = []
+    for line in _pl.Path(path).read_text().splitlines():
+        if not line.startswith(("ATOM", "HETATM")):
+            continue
+        el = line[76:78].strip().upper() if len(line) >= 78 else ""
+        name = line[12:16].strip().upper()
+        # PDBQT uses its own type column; hydrogens are H/HD/HS.
+        if el in ("H", "HD", "HS") or (not el and name.startswith("H")):
+            continue
+        coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+    return np.array(coords, dtype=float)
+
 class IPROLoop:
     """Runs the IPRO procedure for one :class:`DesignSpec`."""
 
@@ -161,6 +180,14 @@ class IPROLoop:
         #: Assembly name -> its partner structures.
         self._asm_partners: dict[str, list[Structure]] = {}
         self._combined: CombinedTables | None = None
+        #: Current rigid-body placement of each partner, per assembly. Keyed
+        #: (assembly, molecule); absent means "as supplied".
+        self._poses: dict[tuple[str, str], Pose] = {}
+        #: Partner atoms as supplied, cached so a pose is always applied to the
+        #: original coordinates rather than compounding on itself.
+        self._base_atoms: dict[str, AtomSet] = {}
+        #: Which placement backend resolved for this run.
+        self._dock_backend: str = "none"
 
     # -- setup -------------------------------------------------------------
 
@@ -218,6 +245,9 @@ class IPROLoop:
                 "assemblies: rotamers are chosen separately in each, identity is "
                 "shared, and every gating assembly must pass acceptance"
             )
+
+        self._dock_backend = self._resolve_dock()
+        self.run.log(f"placement backend: {self._dock_backend}")
 
         self.run.write_spec(spec.to_dict())
         self.run.log(f"prepared: mode={self.mode} backend={self.backend.describe()}")
@@ -281,13 +311,14 @@ class IPROLoop:
             ctx = ScoreContext()
             partners = self.spec.assembly_molecules(a)
             for m in partners:
-                st = self._partners.get(m.name)
-                if st is None:
+                if m.name not in self._partners:
                     continue
-                ctx.interaction[m.name] = self.backend.interaction(design_all, _atoms_of(st))
+                ctx.interaction[m.name] = self.backend.interaction(
+                    design_all, self._partner_atoms(a.name, m.name)
+                )
             ctx.design_only = self.backend.internal(design_all)
             ctx.total = ctx.design_only + sum(ctx.interaction.values()) + sum(
-                self.backend.internal(_atoms_of(self._partners[m.name]))
+                self.backend.internal(self._partner_atoms(a.name, m.name))
                 for m in partners if m.name in self._partners
             )
             per[a.name] = ctx
@@ -312,6 +343,258 @@ class IPROLoop:
         structures.
         """
         return self._contexts_for(chosen)[0]
+
+    # -- placing the partners ----------------------------------------------
+
+    def _resolve_dock(self) -> str:
+        """Which placement program to use, honouring the user's choice.
+
+        ``auto`` prefers AutoDock Vina when it is installed -- the same
+        precedence as ``energy: auto`` preferring PyRosetta -- and falls back to
+        IPRO's own local Monte Carlo otherwise.
+
+        The two are different operations, not two qualities of one. Vina
+        searches the box **globally** with its own scoring function and is much
+        the heavier: it writes a receptor file, runs an external binary and
+        parses poses. The Monte Carlo **refines** an existing placement in the
+        six rigid-body degrees of freedom using the same energy the MILP uses,
+        which is cheap and reproducible from a seed but will not find a pose
+        that is not already roughly right. Choose by which job you have.
+        """
+        want = (self.spec.backends.dock or "auto").lower()
+        mobile = any(m.redock for m in self.spec.molecules)
+        if not mobile:
+            if want in ("vina", "builtin"):
+                self.notes.append(
+                    f"backends.dock is {want!r} but no molecule has 'redock: true', "
+                    "so nothing is re-placed. Set redock: true on the partners that "
+                    "should move."
+                )
+            return "none"
+        if want == "none":
+            return "none"
+
+        from .dock import find_vina
+
+        have_vina = find_vina() is not None
+        if want == "vina":
+            if not have_vina:
+                raise RuntimeError(
+                    "backends.dock: vina was requested but no Vina binary was "
+                    "found. Install it (see docs/INSTALL.md), or choose "
+                    "backends.dock: builtin for IPRO's local rigid-body Monte "
+                    "Carlo, or 'none' to keep the input poses."
+                )
+            return "vina"
+        if want == "builtin":
+            return "builtin"
+        if have_vina:
+            return "vina"
+        self.notes.append(
+            "backends.dock: auto resolved to 'builtin' (IPRO's local rigid-body "
+            "Monte Carlo) because no AutoDock Vina binary was found. That refines "
+            "a placement rather than searching for one; install Vina, or set "
+            "backends.dock explicitly, if a global search is what you need."
+        )
+        return "builtin"
+
+    def _partner_atoms(self, assembly: str, name: str) -> AtomSet:
+        """A partner's atoms in this assembly, with its current pose applied."""
+        if name not in self._base_atoms:
+            self._base_atoms[name] = _atoms_of(self._partners[name])
+        base = self._base_atoms[name]
+        pose = self._poses.get((assembly, name))
+        return base if pose is None else moved_atomset(base, pose)
+
+    def _assembly_partner_map(self, assembly: str) -> dict[str, AtomSet]:
+        a = next(x for x in self._assemblies if x.name == assembly)
+        return {
+            m.name: self._partner_atoms(assembly, m.name)
+            for m in self.spec.assembly_molecules(a)
+            if m.name in self._partners
+        }
+
+    def _design_atoms(self, chosen: dict[str, Rotamer], assembly: str) -> AtomSet:
+        assert self._design_st is not None
+        fixed = _atoms_of(self._design_st, {p.label for p in self.spec.positions})
+        rots = [
+            r for v, r in chosen.items()
+            if (split_vpos(v)[0] or assembly) == assembly
+        ]
+        return fixed.extend(AtomSet.concat([r.atoms for r in rots]))
+
+    def _redock_step(self, chosen: dict[str, Rotamer], iteration: int) -> dict[str, str]:
+        """Re-place every mobile partner, in each assembly, and report what moved."""
+        report: dict[str, str] = {}
+        if self._dock_backend == "none":
+            return report
+        spec = self.spec
+        for a in self._assemblies:
+            mobile = {
+                m.name for m in spec.assembly_molecules(a)
+                if m.redock and m.name in self._partners
+            }
+            if not mobile:
+                continue
+            design = self._design_atoms(chosen, a.name)
+            partners = self._assembly_partner_map(a.name)
+            if self._dock_backend == "builtin":
+                results = mc_redock(
+                    design, partners, self.backend,
+                    moves=spec.loop.redock_moves,
+                    sigma_angstrom=spec.loop.redock_sigma_angstrom,
+                    sigma_deg=spec.loop.redock_sigma_deg,
+                    temperature_start_k=spec.loop.temperature_k,
+                    temperature_end_k=spec.loop.redock_temperature_end_k,
+                    rng=random.Random(self.rng.randrange(1 << 30)),
+                    mobile=mobile,
+                )
+                for name, res in results.items():
+                    # The returned pose is relative to the atoms handed in,
+                    # which already carry the current pose. Re-fit from the
+                    # ORIGINAL coordinates so poses never compound.
+                    base = self._base_atoms[name]
+                    current = self._partner_atoms(a.name, name)
+                    self._poses[(a.name, name)] = _pose_between(
+                        base.coords,
+                        res.pose.apply(current.coords),
+                        base.coords.mean(axis=0),
+                    )
+                    report[f"{a.name}/{name}"] = res.describe()
+            else:
+                report.update(self._redock_with_vina(a.name, mobile, chosen, iteration))
+        if report:
+            self.run.log(
+                f"iteration {iteration}: redocked via {self._dock_backend}: "
+                + "; ".join(f"{k} {v}" for k, v in sorted(report.items()))
+            )
+        return report
+
+    def _redock_with_vina(
+        self, assembly: str, mobile: set[str], chosen: dict[str, Rotamer], iteration: int
+    ) -> dict[str, str]:
+        """Place partners with AutoDock Vina, then re-score with the backend.
+
+        Vina's affinity is on its own scale and is deliberately **never**
+        returned into the objective: the *pose* is taken, and the energy that
+        drives the loop stays the backend's. Otherwise the objective would
+        depend on which docking program happened to be installed, and scores
+        would not be comparable between runs.
+        """
+        from .dock import DockBox, dock
+        from .mutate import apply_design
+
+        spec = self.spec
+        out: dict[str, str] = {}
+        work = self.run.path / "logs" / f"dock_iter{iteration:04d}_{assembly}"
+        work.mkdir(parents=True, exist_ok=True)
+
+        receptor = work / "receptor.pdb"
+        try:
+            apply_design(
+                self._design_st.path,
+                receptor,
+                {
+                    (split_vpos(v)[1] or v): (r.aa, r.state)
+                    for v, r in chosen.items()
+                    if (split_vpos(v)[0] or assembly) == assembly
+                },
+            )
+        except Exception as exc:
+            self.notes.append(
+                f"Vina redock skipped at iteration {iteration}: could not write the "
+                f"receptor ({type(exc).__name__}: {exc})"
+            )
+            return out
+
+        pts = []
+        for p in spec.positions:
+            try:
+                pts.append(
+                    self._design_st.coords(
+                        self._design_st.find(p.chain, p.number, p.insertion_code)
+                    )
+                )
+            except Exception:
+                continue
+        if pts:
+            centre = tuple(float(x) for x in np.vstack(pts).mean(axis=0))
+        else:
+            centre = tuple(float(x) for x in self._design_atoms(chosen, assembly).centroid())
+        side = float(spec.loop.vina_box_size)
+        box = DockBox(center=centre, size=(side, side, side))
+
+        for name in sorted(mobile):
+            mol = spec.molecule(name)
+            try:
+                res = dock(
+                    receptor=receptor, ligand=mol.path, box=box, out_dir=work,
+                    exhaustiveness=spec.loop.vina_exhaustiveness,
+                    num_modes=spec.loop.vina_num_modes,
+                    seed=self.rng.randrange(1 << 30),
+                )
+            except Exception as exc:
+                self.notes.append(
+                    f"Vina redock of {name} failed at iteration {iteration} "
+                    f"({type(exc).__name__}: {exc}); its placement was left unchanged"
+                )
+                continue
+            placed = self._pose_from_vina(name, res)
+            if placed is None:
+                continue
+            self._poses[(assembly, name)] = placed
+            out[f"{assembly}/{name}"] = (
+                f"vina best {res.best_score:+.2f} kcal/mol on its own scale "
+                f"(objective still uses {self.backend.name}); {placed.describe()}"
+            )
+        return out
+
+    def _pose_from_vina(self, name: str, res) -> Pose | None:
+        """Rigid transform taking the input ligand onto Vina's best pose."""
+        if not res.poses:
+            return None
+        try:
+            coords = _read_pose_coords(res.poses[0])
+        except Exception as exc:
+            self.notes.append(f"could not read Vina's pose for {name}: {exc}")
+            return None
+        base = self._base_atoms.setdefault(name, _atoms_of(self._partners[name]))
+        if len(coords) != len(base.coords):
+            # Without a one-to-one atom mapping the transform cannot be fitted,
+            # and guessing would move the ligand somewhere nobody chose.
+            self.notes.append(
+                f"Vina returned {len(coords)} atoms for {name} but the input has "
+                f"{len(base.coords)}; the pose was NOT applied. Prepare the ligand "
+                "with Meeko so the atom order round-trips."
+            )
+            return None
+        return _pose_between(base.coords, coords, base.coords.mean(axis=0))
+
+    def _refresh_self_energies(self, cb: CombinedTables) -> None:
+        """Recompute self energies after the partners have moved.
+
+        Only the **self** energies depend on where the partners are: a pair
+        energy is rotamer-against-rotamer and the partners are not in it. So a
+        redock invalidates O(positions x rotamers) terms, not the O(n^2) pair
+        block, which is what makes re-placing partners every few iterations
+        affordable.
+
+        The rotamer *set* is left as it was pruned against the input pose, so
+        the design space does not drift between iterations.
+        """
+        assert self._design_st is not None
+        weights = {a.name: a.weight for a in self._assemblies}
+        design_labels = {p.label for p in self.spec.positions}
+        fixed = _atoms_of(self._design_st, design_labels)
+        for a in self._assemblies:
+            partners = self._assembly_partner_map(a.name)
+            template = fixed.extend(AtomSet.concat(list(partners.values())))
+            w = weights[a.name]
+            for v in cb.by_assembly.get(a.name, []):
+                for i, rot in enumerate(cb.tables.rotamers[v]):
+                    cb.tables.self_energy[(v, i)] = w * self.backend.interaction(
+                        rot.atoms, template
+                    )
 
     # -- measurement without designing -------------------------------------
 
@@ -567,6 +850,19 @@ class IPROLoop:
             if spec.loop.integer_cuts:
                 self._visited.append(dict(identities_v))
 
+            # (4) every Nth iteration, re-place the mobile partners. The paper
+            # puts this between rotamer selection and the energy evaluation, and
+            # only every third iteration because it is the expensive step.
+            dock_note = ""
+            every = max(0, int(spec.loop.redock_every))
+            if self._dock_backend != "none" and every and it % every == 0:
+                moved = self._redock_step(chosen, it)
+                if moved:
+                    # Only self energies depend on where the partners are, so
+                    # the O(n^2) pair block is left alone.
+                    self._refresh_self_energies(cb)
+                    dock_note = f"; redocked {len(moved)} partner(s)"
+
             # (5) score, in every assembly
             ctx, per_asm = self._contexts_for(chosen)
             score = self.goal.score(ctx)
@@ -614,7 +910,7 @@ class IPROLoop:
                 mutations=mutations,
                 components={k: float(v) for k, v in self.goal.components(ctx).items()},
                 sequence=self._sequence_string(identities),
-                reason=f"{reason}; redesigned {','.join(window)}",
+                reason=f"{reason}; redesigned {','.join(window)}{dock_note}",
                 seconds=time.time() - t0,
             )
             self.run.append_iteration(rec)
