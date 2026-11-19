@@ -69,6 +69,19 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _host() -> str:
+    """The machine a run's pid belongs to; a pid means nothing elsewhere."""
+    # platform.node(), not socket: the repo's own isolation test forbids
+    # importing socket outside the one networked command, and this is a local
+    # name lookup rather than anything on a wire.
+    try:
+        import platform
+
+        return platform.node()
+    except Exception:                                     # pragma: no cover
+        return ""
+
+
 class RunDir:
     """Owns one run's directory and its durable state."""
 
@@ -191,9 +204,37 @@ class RunDir:
         st = self.read_state()
         recs = list(self.iterations())
         accepted = sum(1 for r in recs if r.accepted)
+        status = st.get("status")
+        stale_for = None
+        if status == "running":
+            # A run that was killed, or whose machine went away, left
+            # `status: "running"` in state.json for ever -- measured, a status
+            # call 4.5 minutes after the process died still reported "running,
+            # 20 of 60 iterations", and an agent polling it waits for ever.
+            # The pid is written at start, so this is answerable.
+            pid = st.get("pid")
+            alive = None
+            if isinstance(pid, int) and pid > 0 and st.get("host") in (None, _host()):
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    alive = True          # someone else's process, but it exists
+            if st.get("updated"):
+                stale_for = max(0.0, time.time() - float(st["updated"]))
+            if alive is False:
+                status = "stale"
+            elif alive is None and stale_for is not None and stale_for > 1800:
+                # No pid recorded (an older run) and nothing written for half
+                # an hour: say so rather than claim it is running.
+                status = "stale"
         out = {
             "run": str(self.path),
-            "status": st.get("status"),
+            "status": status,
+            "status_in_file": st.get("status"),
+            "seconds_since_update": None if stale_for is None else round(stale_for, 1),
             "mode": st.get("mode"),
             "iterations_done": len(recs),
             "total_iterations": st.get("total_iterations"),
@@ -207,6 +248,17 @@ class RunDir:
             "goal": st.get("goal"),
             "error": st.get("error"),
         }
+        if status == "stale":
+            out["notes"] = list(out.get("notes") or []) + [
+                "THIS RUN IS NOT RUNNING. state.json still says 'running', but "
+                "the process that wrote it is gone"
+                + (f" and nothing has been written for {stale_for / 60:.0f} "
+                   f"minute(s)" if stale_for else "")
+                + ". It was killed, or the machine went away. Whatever is "
+                "reported here is the partial trajectory up to that point -- "
+                "iterations_done is real, but the run did not finish. Start a "
+                "fresh run in a new directory; do not keep polling."
+            ]
         if len(recs) and accepted == 0:
             # Spelled out rather than left to be inferred from accepted: 0,
             # because `best_*` above is then the starting point, not a design.

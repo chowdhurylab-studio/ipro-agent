@@ -363,10 +363,24 @@ barrel's axis is *not* its largest-variance direction, so guessing from the
 protein fails outright: on OmpF the whole-protein principal axis measures the
 eyelet at **1.4 A**. The default instead fits a plane through the **design
 positions**, which line the constriction, and takes its normal. On 2OMF chain A
-the 25 published positions give an eyelet of **6.24 A** (re-measured
-2026-11-18; an earlier version of this section recorded 8.1 A, which does not
-reproduce), against the published 11 x 7 A — the right ballpark for a circle
-bounded by a 7 A minor axis, from an independent reimplementation.
+the 25 published positions give a wild-type eyelet of **8.07 A** against the
+published 11 x 7 A — the right ballpark for a circle bounded by a 7 A minor
+axis, from an independent reimplementation.
+
+**8.07 A and 6.24 A are two different structures, and an earlier version of
+this section confused them.** 8.07 A is the deposited coordinates:
+`axis_from_lining` over the 25 CAs, `spacing` 0.5, `max_centre_offset` 6.0,
+which is what the regression test measures. 6.24 A is what `ipro-agent score`
+reports for `spec_full.yaml`, and that is **not the wild type**: the spec's
+9-residue alphabet does not include the native residue at 13 of the 25
+positions, so scoring substitutes the best allowed rotamer there — 8 of them to
+tryptophan — and the run says so in a note ("the native residue is not an
+allowed choice at A110, A113, ... so the reported starting score is for the
+best allowed residue there, not the wild type"). The note was right and the
+section misread it: a retraction of 8.07 A as "does not reproduce" replaced a
+correct number with a partly redesigned pore's. With the alphabet pinned to the
+native identities the same path gives 6.80 A, the difference from 8.07 A being
+PyMOL-rebuilt side chains rather than the deposited ones.
 `goal_options.pore_axis: ["A18:CA", "A119:CA"]` overrides it with two atoms
 spanning the channel, and the run warns when the lining residues are too far
 from coplanar for the fitted axis to mean anything.
@@ -386,10 +400,15 @@ and when they do not, the number it reports is not a pore measurement at all.
 Re-measured 2026-11-18 (the figures in earlier versions of this section were not
 reproducible; these are from `ipro-agent score` on the shipped specs):
 
-| spec | design positions | axis clearance | bottleneck | radius score |
+| spec | design positions | axis clearance (input structure) | bottleneck | radius score |
 |---|---|---|---|---|
-| `spec_full.yaml` | 25, ringing the constriction | 1.30 A | **6.24 A** | 1.257 |
+| `spec_full.yaml` | 25, ringing the constriction | **2.80 A** | 6.24 A (8.07 A wild type) | 1.257 |
 | `spec_smoke.yaml` | 4, all on one wall | **0.30 A** | 1.53 A | 1.528 |
+
+Clearance is measured on the **input structure with its native side chains**,
+not on the candidate: see §7h. The bottleneck column is `score`'s number, which
+for `spec_full.yaml` is the starting design after substitution at the 13
+positions whose native residue the alphabet excludes.
 
 "Axis clearance" is how far the fitted axis origin sits from the nearest van der
 Waals surface. A water needs 1.4 A. The smoke spec's four positions put that
@@ -812,17 +831,24 @@ wall: measured, it clears the nearest van der Waals surface by **0.30 Å** where
 a water needs 1.4 Å, and the profile then reports the sliver beside the wall as
 the channel. That reads **1.53 Å**, which silently **passes** PoreDesigner's
 published "bottleneck below 4 Å" filter — a design accepted as a sub-4 Å pore on
-a measurement of the wrong thing. The 25-position spec, whose ring does surround
-the lumen, clears 1.30 Å and measures 6.24 Å.
+a measurement of the wrong thing.
 
-Three cheap discriminators were tried and all three fail, which is why this is
-recorded rather than fixed:
+**This was recorded here as unfixed, and that was wrong — see §7h.** Three cheap
+discriminators were tried and all three appeared to fail:
 
 | candidate test | bad axis (4 positions) | good axis (25 positions) | separates? |
 |---|---|---|---|
-| axis-origin clearance | 0.30 Å | 1.30 Å | **no** — both below a water's 1.4 Å |
+| axis-origin clearance, **on the candidate** | 0.30 Å | 1.30 Å | **no** — both below a water's 1.4 Å |
 | widest slice in the window | 3.765 Å | 4.752 Å | **no** — overlapping ranges |
 | bottleneck ÷ clearance | 2.52 | 2.41 | **no** — the ratios are the same |
+
+The first row is the fix, measured wrongly. Clearance was computed from the
+*candidate's* atoms — and the 25-position candidate carries 13 substitutions, 8
+of them tryptophan, which fill the lumen on purpose. A narrowing design is
+*supposed* to reduce that clearance, so the number conflated "the axis is buried
+in a wall" with "the design worked". Measured on the **input structure with its
+native side chains**, the two specs separate by an order of magnitude — 2.80 Å
+against 0.30 Å — and a water's 1.4 Å is a usable test. §7h has the measurement.
 
 A clearance threshold was implemented and then **reverted** on the first of
 those: it rejected the 25-position spec's sound reading too. Telling the two

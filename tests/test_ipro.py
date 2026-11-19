@@ -4128,7 +4128,18 @@ def test_mcp_tools_return_parsed_json_not_prose():
 
 
 def test_mcp_accepts_an_inline_spec():
-    """An agent usually has the spec in context, not on disk."""
+    """An agent usually has the spec in context, not on disk.
+
+    The partner is a separate little molecule, not a second reference to
+    1crn.pdb: two molecules at identical coordinates are now a validation
+    problem, because they measure as an "interaction energy" in the tens of
+    thousands (see the same-coordinates regression test)."""
+    lig = Path(tempfile.mkdtemp()) / "lig.pdb"
+    lig.write_text(
+        "HETATM    1  C1  LIG B   1      20.000  20.000  20.000  1.00  0.00           C\n"
+        "HETATM    2  C2  LIG B   1      21.500  20.000  20.000  1.00  0.00           C\n"
+        "END\n"
+    )
     inline = (
         "goal_statement: inline probe\n"
         "goal: bind_tighter\n"
@@ -4137,9 +4148,9 @@ def test_mcp_accepts_an_inline_spec():
         f"    path: {CRN}\n"
         "    role: design\n"
         f"  - name: LIG\n"
-        f"    path: {CRN}\n"
+        f"    path: {lig}\n"
         "    role: target\n"
-        "    kind: protein\n"
+        "    kind: ligand\n"
         "positions: [A16]\n"
     )
     replies = _mcp([_INIT, _call(2, "ipro_validate", {"spec": inline})])
@@ -4973,3 +4984,412 @@ def test_regression_a_pip_installed_server_can_doctor_setup_and_run():
     finally:
         g["_doc_roots"], g["_doctor"] = keep_roots, keep_doctor
     assert m._env_file() == real
+
+
+def test_regression_optzyme_eq18_weights_the_two_terms_as_the_paper_does():
+    """OptZyme's Eq 18 is ``IE_TSA/(RT)_TSA - IE_S/(RT)_S`` and the two
+    constants are not the same number: the paper gives
+    ``(RT)_TSA = 15.3 kJ/mol`` and ``(RT)_S = 386.7 kJ/mol`` for GUS/pNP-GLU,
+    self-consistent with the weights it also states (0.06 and 0.002 mol/kJ), so
+    the substrate term carries 4% of the TSA term's weight.
+
+    This divided both terms by one RT at 298.15 K, which sets the relative
+    weight to 1.0 -- a 25x over-weighting of the substrate term that changes
+    the ARGMIN, not the scale. Measured on two candidates with both energies
+    favourable: A (IE_TSA -15.0, IE_S -2.0) and B (IE_TSA -20.0, IE_S -12.0).
+    Eq 18 gives A -4.080, B -5.339, so B wins. One RT gave A -21.944,
+    B -13.504, so A won -- rejecting the candidate that binds the transition
+    state 5 kcal/mol better. There was no test for `kcat` at all.
+
+    These are fitted correlating constants for one enzyme/substrate pair, not
+    temperatures ("experimental and correlating temperatures do not match"),
+    hence the explicit refusal of a single `temperature_k` for this parameter.
+    """
+    from ipro_agent.goals import ImproveCatalysis, ScoreContext, build_goal
+
+    rt_tsa, rt_s = ImproveCatalysis.RT_TSA_KCAL, ImproveCatalysis.RT_SUBSTRATE_KCAL
+    assert abs(rt_tsa - 15.3 / 4.184) < 1e-9 and abs(rt_s - 386.7 / 4.184) < 1e-9
+    assert abs(rt_s / rt_tsa - 25.27) < 0.05, rt_s / rt_tsa
+
+    spec = DesignSpec.from_dict({
+        "goal": "improve_catalysis",
+        "goal_statement": "raise kcat",
+        "goal_options": {"parameter": "kcat"},
+        "molecules": [
+            {"name": "enz", "path": str(CRN), "role": "design",
+             "kind": "protein", "chains": ["A"]},
+            {"name": "tsa", "path": str(CRN), "role": "target",
+             "kind": "transition_state"},
+            {"name": "sub", "path": str(CRN), "role": "target",
+             "kind": "ligand"},
+        ],
+        "positions": ["A16"],
+    })
+    goal = build_goal(spec)
+    goal.validate()
+
+    def score(ie_tsa, ie_sub):
+        return goal.score(ScoreContext(interaction={"tsa": ie_tsa, "sub": ie_sub}))
+
+    a, b = score(-15.0, -2.0), score(-20.0, -12.0)
+    assert abs(a - (-4.080)) < 0.01, a
+    assert abs(b - (-5.339)) < 0.01, b
+    assert b < a, (
+        "the candidate binding the transition state better must win; one "
+        "shared RT inverted this"
+    )
+
+    # The weighting is visible in the report, since it is the trap.
+    comp = goal.components(ScoreContext(interaction={"tsa": -15.0, "sub": -2.0}))
+    assert abs(comp["RT_TSA_kcal"] - rt_tsa) < 1e-9
+    assert abs(comp["RT_substrate_kcal"] - rt_s) < 1e-9
+    assert abs(comp["weighted_IE_substrate"]) < abs(comp["weighted_IE_TSA"]) / 10
+
+    # Another system can override both; one temperature for both is refused.
+    spec.goal_options.update({"rt_tsa_kcal": 1.0, "rt_substrate_kcal": 1.0})
+    flat = build_goal(spec)
+    assert abs(flat.score(ScoreContext(interaction={"tsa": -15.0, "sub": -2.0}))
+               - (-13.0)) < 1e-9
+
+    spec.goal_options.clear()
+    spec.goal_options.update({"parameter": "kcat", "temperature_k": 310.0})
+    try:
+        build_goal(spec).validate()   # build_goal validates as it builds
+    except SpecError as exc:
+        assert "25" in str(exc) and "rt_tsa_kcal" in str(exc), exc
+    else:
+        raise AssertionError("a single temperature_k must be refused for kcat")
+
+    # km and kcat_over_km are single-RT by the paper's own Eqs 7 and 17.
+    spec.goal_options.clear()
+    spec.goal_options.update({"parameter": "kcat_over_km", "temperature_k": 310.0})
+    build_goal(spec).validate()
+
+
+def test_regression_one_bad_request_costs_one_reply_not_the_session():
+    """Only ``tools/call`` was exception-guarded, so five other malformed
+    shapes killed the whole server -- one bad message ending the session for
+    every later one. Measured, each with exit=1 and the session gone:
+    ``params`` as an array on initialize and on tools/call
+    (``AttributeError: 'list' object has no attribute 'get'``), a tools/call
+    ``name`` that is a dict and a resources/read ``uri`` that is a list
+    (``TypeError: unhashable type``), and ``arguments`` as a list or a string
+    (``TypeError: list indices must be integers``).
+
+    And the declared schemas were decorative: a missing ``spec`` came back as
+    ``KeyError: 'spec'`` and ``spec: 42`` as ``AttributeError: 'int' object
+    has no attribute 'strip'`` -- neither of which a model can act on, and
+    both of which read as a bug in the tool rather than in the call.
+
+    A one-line inline spec was treated as a filename, because inline content
+    was detected by looking for a newline: an agent holding the spec in
+    context sent ``goal: bind_tighter, ...`` and got ``spec not found: goal:
+    bind_tighter``."""
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "0"}}}
+    cases = [
+        ("params array on initialize", {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": ["x"]}, "rpc"),
+        ("params array on tools/call", {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["x"]}, "rpc"),
+        ("unhashable tool name", {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": {"a": 1}}}, "rpc"),
+        ("unhashable uri", {"jsonrpc": "2.0", "id": 5, "method": "resources/read", "params": {"uri": ["a"]}}, "rpc"),
+        ("arguments as a list", {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "ipro_validate", "arguments": ["x"]}}, "rpc"),
+        ("arguments as a string", {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "ipro_validate", "arguments": "spec"}}, "rpc"),
+        ("spec missing", {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "ipro_validate", "arguments": {}}}, "tool"),
+        ("spec is a number", {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "ipro_validate", "arguments": {"spec": 42}}}, "tool"),
+        ("iterations as a float", {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "ipro_run", "arguments": {"spec": "x.yaml", "iterations": 8.5}}}, "tool"),
+        ("unknown notification", {"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}, "silent"),
+    ]
+    payload = "\n".join(json.dumps(m) for m in [init] + [c[1] for c in cases]) + "\n"
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.mcp_server"],
+                       input=payload, capture_output=True, text=True,
+                       cwd=REPO, timeout=900)
+    assert p.returncode == 0, (
+        f"the server must survive every one of these: {p.stderr[-400:]}"
+    )
+    replies = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            m = json.loads(line)
+            replies[m.get("id")] = m
+    assert None not in replies, (
+        f"a notification must get no reply at all, got "
+        f"{json.dumps(replies[None])[:200]}"
+    )
+    assert replies[1]["result"]["serverInfo"], "initialize must still work"
+
+    for label, msg, kind in cases:
+        mid = msg.get("id")
+        if mid is None:
+            continue
+        r = replies.get(mid)
+        assert r is not None, f"{label}: no reply at all"
+        if kind == "rpc":
+            assert "error" in r, f"{label}: expected a JSON-RPC error, got {r}"
+            assert r["error"]["code"] == -32602, (label, r["error"])
+            text = r["error"]["message"]
+        else:
+            assert r["result"].get("isError") is True, (label, r)
+            text = json.loads(r["result"]["content"][0]["text"])["error"]
+        # Every message must name what was wrong in words, not as a Python
+        # exception class.
+        for forbidden in ("KeyError", "AttributeError", "TypeError: list indices",
+                          "unhashable"):
+            assert forbidden not in text, (label, text)
+        assert len(text) > 20, (label, text)
+
+    # A one-line inline spec is inline, not a filename.
+    from ipro_agent import mcp_server as m
+
+    assert m._looks_inline("goal: bind_tighter")
+    assert m._looks_inline("{goal: bind_tighter, positions: [A16]}")
+    assert m._looks_inline("goal: x\npositions: [A16]")
+    assert not m._looks_inline("examples/ompf_pore/spec_smoke.yaml")
+    assert not m._looks_inline("/tmp/my spec.yaml")
+
+
+def test_regression_a_run_that_died_at_once_is_not_reported_as_launched():
+    """``tool_run`` passed its numeric arguments through as ``str(...)`` and
+    never looked at the child again. A JSON float for an integer field --
+    which a model will emit -- became ``--iterations 8.0``, argparse exited 2
+    within milliseconds, and the reply was still ``isError: false,
+    launched: true`` with a pid that was already gone. ``ipro_status`` on that
+    directory then answered ``"pending"``, so a polling agent waited forever
+    on a run that never started; the real error sat in launch.log, which the
+    agent had no reason to read.
+
+    Now the arguments are coerced (and refused with a sentence naming the
+    argument), the child is given a moment and polled, and a non-zero exit
+    comes back as an error carrying the tail of its own log."""
+    from ipro_agent import mcp_server as m
+
+    # Coercion happens before anything is launched.
+    for bad in (8.5, "lots", True, [8]):
+        try:
+            m.tool_run({"spec": str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml"),
+                        "iterations": bad})
+        except m.ToolError as exc:
+            assert "iterations" in str(exc), (bad, exc)
+        except Exception as exc:
+            raise AssertionError(f"{bad!r} should be a ToolError, got {exc!r}")
+        else:
+            raise AssertionError(f"{bad!r} must be refused")
+
+    # A spec the CLI refuses outright: the child dies, and so must the claim.
+    tmp = Path(tempfile.mkdtemp())
+    bad_spec = tmp / "bad.yaml"
+    bad_spec.write_text("goal: bind_tighter\ngoal_statement: x\nmolecules: []\npositions: []\n")
+    g = m.tool_run.__globals__
+    keep = g["_doctor"]
+    try:
+        g["_doctor"] = lambda: {"can_run": True, "can_design": True,
+                                "degraded": [], "resolved": {}}
+        try:
+            out = m.tool_run({"spec": str(bad_spec), "run_dir": str(tmp / "r")})
+        except m.ToolError as exc:
+            assert "exited immediately" in str(exc), exc
+            assert len(str(exc)) > 60, "the error must carry the log tail"
+        else:
+            raise AssertionError(
+                f"a run that died at once must not report launched: {out}"
+            )
+    finally:
+        g["_doctor"] = keep
+
+
+def test_regression_malformed_specs_report_errors_not_tracebacks():
+    """Eleven classes of malformed-but-plausible spec died with a bare Python
+    traceback from an agent-facing CLI. Each is an ordinary mistake:
+
+    - a tab used for indentation -> ``yaml.scanner.ScannerError`` after 18
+      frames (PyYAML's message carries the line and column, which is the only
+      useful part);
+    - no ``goal_statement:`` -> ``TypeError: DesignSpec.__init__() missing 1
+      required positional argument: 'goal_statement'``, Python internals for a
+      missing line in the user's own file;
+    - ``positions:`` written as a mapping -> parsed as its KEYS, so every
+      allowed-residue set was dropped and the alphabet silently widened to all
+      18 (measured: a design space of 324 sequences where 1 was asked for);
+    - ``allowed: []`` -> the same silent widening, because "absent" and
+      "empty" were the same test;
+    - ``target_radius: "two"`` -> ``validate`` said "spec is usable" and the
+      RUN then died at iteration 0 with ValueError.
+
+    And the four read-only subcommands crashed where ``validate`` was clean:
+    an unknown goal name reported properly by ``validate`` killed ``score``,
+    ``milp``, ``positions`` and ``dock`` with a traceback, because only
+    ``_load`` was guarded and ``build_goal`` raises later."""
+    tmp = Path(tempfile.mkdtemp())
+    mol = (f"molecules:\n  - {{name: m, path: {CRN}, role: design, "
+           f"kind: protein, chains: [A]}}\n")
+
+    cases = {
+        "a_tab.yaml": "goal: reshape_channel\n\tname: bad\n",
+        "no_statement.yaml": "goal: bind_tighter\n",
+        "no_goal.yaml": "goal_statement: x\n",
+        "pos_mapping.yaml": (
+            "goal: bind_tighter\ngoal_statement: x\n" + mol
+            + "positions:\n  A16: [TRP]\n  A18: [TRP]\n"),
+        "empty_allowed.yaml": (
+            "goal: bind_tighter\ngoal_statement: x\n" + mol
+            + "positions:\n  - {position: A16, allowed: []}\n"),
+        "bad_radius.yaml": (
+            "goal: reshape_channel\ngoal_statement: narrow it\n" + mol
+            + "positions: [A16, A18, A20]\n"
+            + 'goal_options: {direction: narrow, target_radius: "two"}\n'),
+        "not_a_mapping.yaml": "- a\n- b\n",
+    }
+    for name, body in cases.items():
+        (tmp / name).write_text(body)
+        p = subprocess.run(
+            [sys.executable, "-m", "ipro_agent", "validate", str(tmp / name)],
+            capture_output=True, text=True, cwd=REPO, timeout=600,
+        )
+        both = p.stdout + p.stderr
+        assert "Traceback" not in both, f"{name}:\n{both[-500:]}"
+        assert p.returncode != 0, (name, both[-300:])
+        for junk in ("ScannerError", "__init__()", "could not convert string"):
+            assert junk not in both, (name, junk, both[-300:])
+    # The messages say what to do, not just what broke.
+    out = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "validate", str(tmp / "a_tab.yaml")],
+        capture_output=True, text=True, cwd=REPO, timeout=600).stderr
+    assert "line 2" in out and "spaces" in out, out
+    out = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "validate", str(tmp / "pos_mapping.yaml")],
+        capture_output=True, text=True, cwd=REPO, timeout=600).stderr
+    assert "must be a LIST" in out and "position: A16" in out, out
+
+    # An empty allowed set is an error; an absent one is the default.
+    from ipro_agent.config import DesignPosition
+
+    assert len(DesignPosition.parse("A16").allowed) == 18
+    assert len(DesignPosition.parse("A16", None).allowed) == 18
+    try:
+        DesignPosition.parse("A16", [])
+    except SpecError as exc:
+        assert "empty allowed-residue set" in str(exc), exc
+    else:
+        raise AssertionError("allowed: [] must be refused, not widened to 18")
+
+    # Every read-only subcommand gets the same contract as validate.
+    bad_goal = tmp / "bad_goal.yaml"
+    bad_goal.write_text("goal: improve_affinity\ngoal_statement: x\n" + mol
+                        + "positions: [A16]\n")
+    for cmd in (["score"], ["milp"], ["positions"], ["dock"]):
+        p = subprocess.run(
+            [sys.executable, "-m", "ipro_agent", *cmd, str(bad_goal), "--json"],
+            capture_output=True, text=True, cwd=REPO, timeout=900,
+        )
+        both = p.stdout + p.stderr
+        assert "Traceback" not in both, (cmd, both[-400:])
+        assert p.returncode != 0, (cmd, p.returncode, both[-200:])
+        # Either the spec-error contract, or that subcommand's own one-line
+        # refusal (`positions` needs a target molecule before it gets as far
+        # as the goal). What must never happen is a traceback.
+        assert len(both.strip().splitlines()) <= 6, (cmd, both[-300:])
+    # score and milp reach the goal, so they must name it.
+    for cmd in (["score"], ["milp"]):
+        p = subprocess.run(
+            [sys.executable, "-m", "ipro_agent", *cmd, str(bad_goal), "--json"],
+            capture_output=True, text=True, cwd=REPO, timeout=900,
+        )
+        assert "unknown goal" in (p.stdout + p.stderr), (cmd, p.stderr[-200:])
+        assert p.returncode == 2, (cmd, p.returncode)
+
+
+def test_regression_a_dead_run_does_not_report_itself_as_running():
+    """A killed run left ``status: "running"`` in state.json for ever:
+    measured, a status call 4.5 minutes after the process had gone still
+    reported "running, 20 of 60 iterations", and nothing in the payload let an
+    agent tell that apart from a healthy run -- so a polling agent waits for
+    ever. The pid is now recorded at start, and status answers the question.
+
+    Re-running into a directory that already holds a run was the other half:
+    two 6-iteration runs of DIFFERENT specs left iterations.jsonl with 12
+    lines, status reporting "12 of 6 iterations", and best_score carried over
+    from the other spec's run -- a result attributed to a spec that never
+    produced it. The MCP server refused this; the CLI appended."""
+    from ipro_agent.state import RunDir
+
+    tmp = Path(tempfile.mkdtemp())
+    rd = RunDir(tmp / "r", create=True)
+    rd.update_state(status="running", pid=999_999, host=None,
+                    total_iterations=60, mode="fixed-backbone")
+    out = rd.as_json()
+    assert out["status"] == "stale", out
+    assert out["status_in_file"] == "running", out
+    assert out["seconds_since_update"] is not None
+    assert any("THIS RUN IS NOT RUNNING" in n for n in out["notes"]), out["notes"]
+
+    # A live pid is still reported as running.
+    import os as _os
+
+    rd.update_state(status="running", pid=_os.getpid(), host=None)
+    assert rd.as_json()["status"] == "running"
+
+    # And the CLI refuses to append to a used run directory.
+    used = tmp / "used"
+    used.mkdir()
+    (used / "state.json").write_text("{}")
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "run",
+         str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml"),
+         "--run-dir", str(used), "--iterations", "1"],
+        capture_output=True, text=True, cwd=REPO, timeout=900,
+    )
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "already holds a run" in p.stderr, p.stderr[-300:]
+    assert "--resume" in p.stderr
+    assert "Traceback" not in p.stderr
+
+
+def test_regression_two_molecules_at_one_place_are_not_an_interaction():
+    """The design molecule and a "partner" both pointing at 2omf_A.pdb chain A
+    validated clean and scored an interaction energy of **+149,211 kcal/mol**
+    -- atoms at zero distance, reported as a measurement. A goal whose filter
+    is "better than the reference" would have adopted that as the reference.
+
+    A homodimer legitimately shares a *file*, so this is not a parse-time
+    error: validate reports it, and the loop reports any interaction energy
+    that is physically impossible whatever its cause (a partner that was never
+    docked, for instance)."""
+    tmp = Path(tempfile.mkdtemp())
+    same = tmp / "same.yaml"
+    same.write_text(
+        f"goal: bind_tighter\ngoal_statement: x\nmolecules:\n"
+        f"  - {{name: a, path: {CRN}, role: design, kind: protein, chains: [A]}}\n"
+        f"  - {{name: b, path: {CRN}, role: target, kind: protein, chains: [A]}}\n"
+        f"positions: [A16]\n"
+    )
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "validate", str(same), "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=600,
+    )
+    assert p.returncode != 0, p.stdout
+    body = json.loads(p.stdout)
+    assert body["ok"] is False
+    assert any("same coordinates" in x for x in body["problems"]), body["problems"]
+
+    # Constructing the spec is still allowed (the fixture above is one line of
+    # YAML away from a legitimate homodimer).
+    DesignSpec.load(same)
+
+    # The energy-side guard, measured rather than grepped: `score` does not
+    # run validate's checks, so it is the path that would report the number.
+    if not _have_pymol():
+        print("    (partial: energy-side guard needs PyMOL)")
+        return
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "score", str(same), "--json",
+         "--run-dir", str(tmp / "score")],
+        capture_output=True, text=True, cwd=REPO, timeout=900,
+    )
+    assert p.returncode == 0, p.stderr[-400:]
+    got = json.loads(p.stdout)
+    ie = got.get("interaction_energy") or sum(
+        (got.get("components") or {}).get(k, 0.0)
+        for k in (got.get("components") or {}) if k.startswith("IE")
+    )
+    assert any("not a" in n and "physical interaction" in n
+               for n in got.get("notes", [])), (ie, got.get("notes"))

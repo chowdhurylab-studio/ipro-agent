@@ -243,12 +243,15 @@ goal_options:
 
   # Aim for a ~4 A bottleneck (radius 2 A). With all 25 positions the geometric
   # term does respond to the design, because these positions ring the lumen.
-  # Re-measured 2026-11-18 with `ipro-agent score` on this spec: starting
-  # bottleneck 6.24 A (radius 3.121), radius score 1.257. (Earlier comments
-  # here quoted 1.102 -> 0.678 and 6.41 -> 5.65 A for a 4-iteration run; those
-  # figures are not reproducible and the starting point alone differs, so treat
-  # them as withdrawn -- see docs/DESIGN.md 7d.) Budget about 85 s/iteration at
-  # this size (25 positions x 9 residues).
+  # Measured with `ipro-agent score` on this spec: starting bottleneck 6.24 A
+  # (radius 3.121), radius score 1.257. That starting point is NOT the wild
+  # type: the 9-residue alphabet below excludes the native residue at 13 of
+  # these 25 positions, so scoring substitutes the best allowed rotamer there
+  # (8 of them tryptophan) and the run says so in a note. The deposited
+  # wild-type eyelet is 8.07 A. (Earlier comments here quoted 1.102 -> 0.678
+  # and 6.41 -> 5.65 A for a 4-iteration run; those are withdrawn -- see
+  # docs/DESIGN.md 7d.) Budget about 85 s/iteration at this size
+  # (25 positions x 9 residues).
   target_radius: 2.0
 
   # LIVE since the pore-geometry measurement landed: `pore_diameter_min` /
@@ -258,9 +261,12 @@ goal_options:
   #
   # The axis is fitted as the normal to the plane of the design positions, which
   # line the constriction; on this structure that measures the wild-type eyelet
-  # at 6.24 A against the published 11 x 7 A (an inscribed circle is bounded by
+  # at 8.07 A against the published 11 x 7 A (an inscribed circle is bounded by
   # the narrow direction, so ~7 A is the comparison). See docs/DESIGN.md 1h.
-  # That fit is only meaningful because these 25 positions SURROUND the lumen.
+  # That fit is only meaningful because these 25 positions SURROUND the lumen:
+  # the axis origin clears the nearest van der Waals surface by 2.80 A in the
+  # input structure, where a water needs 1.40 A. The 4-position smoke spec
+  # clears 0.30 A and its "bottleneck" is a gap beside a wall.
   # Acceptance filter, SI section 3 step 3 "Check 1": keep a redesign only if
   # the pore bottleneck is below 4 A. Applied BEFORE the interaction energy is
   # computed, so most proposals die here -- this is what sets the run length.

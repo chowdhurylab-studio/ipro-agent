@@ -38,6 +38,7 @@ than minutes.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import random
 import time
@@ -102,6 +103,19 @@ class RunResult:
 # ---------------------------------------------------------------------------
 # Atom bookkeeping
 # ---------------------------------------------------------------------------
+
+
+def _hostname() -> str:
+    """Recorded beside the pid: a pid is only meaningful on its own machine."""
+    # platform.node(), not socket: the repo's own isolation test forbids
+    # importing socket outside the one networked command, and this is a local
+    # name lookup rather than anything on a wire.
+    try:
+        import platform
+
+        return platform.node()
+    except Exception:                                     # pragma: no cover
+        return ""
 
 
 def _atoms_of(
@@ -429,6 +443,27 @@ class IPROLoop:
                 ctx.interaction[m.name] = self.backend.interaction(
                     design_all, self._partner_atoms(a.name, m.name)
                 )
+                # A number this large is not an interaction energy. Each pair
+                # term is capped at +/-10, so +1000 means hundreds of atoms
+                # overlapping -- a partner that was never docked, or two
+                # molecules that are the same coordinates (measured: +149,211
+                # for a "partner" pointing at the design molecule's own file
+                # and chain). Reported rather than clamped, because the fix is
+                # in the spec and no energy from this geometry means anything.
+                if (ctx.interaction[m.name] > 1000.0
+                        and f"clash_{m.name}" not in self._once):
+                    self._once.add(f"clash_{m.name}")
+                    self.notes.append(
+                        f"the interaction energy with {m.name!r} is "
+                        f"{ctx.interaction[m.name]:+.0f}, which is not a "
+                        f"physical interaction: it means its atoms overlap the "
+                        f"design molecule's. Either the partner was never "
+                        f"docked into place, or it is the same coordinates as "
+                        f"another molecule in the spec. No energy measured on "
+                        f"this geometry can be interpreted -- fix the spec "
+                        f"(ipro-agent validate reports the same-coordinates "
+                        f"case) and measure again."
+                    )
             ctx.design_only = self.backend.internal(design_all)
             ctx.total = ctx.design_only + sum(ctx.interaction.values()) + sum(
                 self.backend.internal(self._partner_atoms(a.name, m.name))
@@ -1485,6 +1520,9 @@ class IPROLoop:
 
         self.run.update_state(
             status=Status.RUNNING,
+            # So a status call can tell "running" from "died hours ago".
+            pid=os.getpid(),
+            host=_hostname(),
             mode=self.mode,
             total_iterations=spec.loop.iterations,
             start_score=start_score,

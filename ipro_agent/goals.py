@@ -150,6 +150,39 @@ class Goal:
                 "cannot silently change the design problem."
             )
 
+    def _number(self, name: str, default: "float | None" = None) -> "float | None":
+        """A numeric option, refused at validation rather than at run time.
+
+        ``target_radius: "two"`` passed ``ipro-agent validate`` ("spec is
+        usable", no problems) and then killed the run with
+        ``ValueError: could not convert string to float: 'two'`` -- measured,
+        at iteration 0 of a run the user had already waited for. Every numeric
+        option goes through here, and every goal's ``validate`` calls it, so
+        the spec fails before any CPU is spent.
+        """
+        if self.options.get(name) is None:
+            return default
+        raw = self.options[name]
+        if isinstance(raw, bool):
+            raise SpecError(
+                f"goal_options.{name} must be a number; got the boolean {raw!r}"
+            )
+        try:
+            val = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise SpecError(
+                f"goal_options.{name} must be a number; got "
+                f"{type(raw).__name__} {raw!r}"
+            ) from exc
+        if not math.isfinite(val):
+            raise SpecError(f"goal_options.{name} must be finite; got {raw!r}")
+        return val
+
+    def _check_numeric_options(self, *names: str) -> None:
+        """Coerce each named option now, for its error message alone."""
+        for name in names:
+            self._number(name)
+
     def _positive(self, name: str, default: float) -> float:
         """A weight, refused if it is zero or negative.
 
@@ -259,6 +292,8 @@ class BindTighter(Goal):
 
     def validate(self) -> None:
         self._require_targets(1)
+        self._check_numeric_options("reference_interaction",
+                                    "min_interaction_fraction")
 
     def score(self, ctx: ScoreContext) -> float:
         return self._sum_ie(ctx, self.spec.targets)
@@ -319,6 +354,8 @@ class SwitchSpecificity(Goal):
 
     def validate(self) -> None:
         self._require_targets(1)
+        self._check_numeric_options("anti_weight", "reference_interaction",
+                                    "min_interaction_fraction")
         if not self.spec.anti_targets:
             raise SpecError(
                 "goal 'switch_specificity' needs at least one molecule with "
@@ -409,6 +446,14 @@ class ReshapeChannel(Goal):
                 f"goal_options.direction must be 'narrow' or 'widen'; got {d!r}"
             )
         self._positive("radius_weight", 1.0)
+        # Coerced here so a typo'd number fails `validate` rather than the run:
+        # `target_radius: "two"` reported "spec is usable" and then died at
+        # iteration 0 with ValueError.
+        self._check_numeric_options(
+            "target_radius", "pore_diameter_min", "pore_diameter_max",
+            "long_fraction", "pore_spacing", "pore_max_centre_offset",
+            "pore_window_half", "pore_axis_flatness_warn",
+        )
         # `pore_diameter_min/max` are a hard acceptance FILTER (filter_reject),
         # not a term in the objective -- nothing in score() reads them. Counting
         # them as a geometric objective suppressed the degenerate-objective
@@ -542,10 +587,31 @@ class ImproveCatalysis(Goal):
         separates the turnover number from substrate binding. This needs **both**
         a transition-state analogue and a substrate molecule.
 
+        **The two divisors are different, and that is the whole point.** The
+        paper states them outright for GUS/pNP-GLU: ``(RT)_TSA = 15.3 kJ/mol``
+        and ``(RT)_S = 386.7 kJ/mol``, self-consistent with the weights it also
+        gives (``1/(RT)_TSA = 0.06`` and ``1/(RT)_S = 0.002 mol/kJ``), so the
+        substrate term carries 4% of the TSA term's weight. Dividing both by one
+        RT -- which this code did -- sets that relative weight to 1.0 and
+        changes the argmin, not just the scale: for candidates A (IE_TSA -15.0,
+        IE_S -2.0) and B (IE_TSA -20.0, IE_S -12.0), Eq 18 gives A -4.080 and
+        B -5.339 so B wins, while one RT gave A -21.944 and B -13.504 so A won
+        -- rejecting the candidate that binds the transition state 5 kcal/mol
+        better.
+
+        These are **fitted correlating constants, not temperatures**: the paper
+        says plainly that "experimental and correlating temperatures do not
+        match", and they are system-specific to GUS/pNP-GLU. (Its parenthetical
+        temperatures, 4.65e4 K and 1840 K, are transposed relative to its own
+        RT values -- R*4.65e4 = 386.6 kJ/mol -- so the RT pair is the one to
+        trust.) Override with ``goal_options.rt_tsa_kcal`` and
+        ``goal_options.rt_substrate_kcal`` for another system.
+
     The molecule roles carry the distinction: a molecule of kind
     ``transition_state`` is the analogue, one of kind ``ligand`` is the
-    substrate. Temperatures default to 298.15 K and can be set per term with
-    ``goal_options.temperature_k``.
+    substrate. ``goal_options.temperature_k`` sets RT for ``km`` and
+    ``kcat_over_km``, where one RT is what the paper's Eqs 7 and 17 use; for
+    ``kcat`` it is refused, because a single RT is meaningful for neither term.
 
     A warning worth heeding: the ACS Catal 2017 thioesterase work deliberately
     did *not* model the transition state, imposing catalytic-distance restraints
@@ -557,9 +623,16 @@ class ImproveCatalysis(Goal):
     kind = GoalKind.IMPROVE_CATALYSIS
     objective_text = "minimize the interaction energy that encodes the chosen kinetic parameter"
     source = "OptZyme (Grisewood et al., PLoS ONE 2013), Eqs 7, 17, 18"
-    OPTION_KEYS = frozenset({"parameter", "temperature_k"})
+    OPTION_KEYS = frozenset({
+        "parameter", "temperature_k", "rt_tsa_kcal", "rt_substrate_kcal",
+    })
 
     R_KCAL = 1.987e-3
+    #: OptZyme's Eq-18 constants for GUS/pNP-GLU, converted from the paper's
+    #: kJ/mol: 15.3 / 4.184 and 386.7 / 4.184. Fitted, system-specific, and
+    #: 25.3x apart -- see the class docstring.
+    RT_TSA_KCAL = 15.3 / 4.184
+    RT_SUBSTRATE_KCAL = 386.7 / 4.184
 
     @property
     def parameter(self) -> str:
@@ -573,6 +646,8 @@ class ImproveCatalysis(Goal):
 
     def validate(self) -> None:
         self._require_targets(1)
+        self._check_numeric_options("temperature_k", "rt_tsa_kcal",
+                                    "rt_substrate_kcal")
         p = self.parameter
         if p not in ("km", "kcat", "kcat_over_km"):
             raise SpecError(
@@ -583,6 +658,16 @@ class ImproveCatalysis(Goal):
                 f"parameter {p!r} is encoded through a transition-state analogue, so the "
                 "spec needs a target molecule with kind 'transition_state'. "
                 "Use parameter 'km' to optimize substrate binding instead."
+            )
+        if p == "kcat" and "temperature_k" in self.options:
+            raise SpecError(
+                "goal_options.temperature_k does not apply to parameter 'kcat': "
+                "Eq 18 weights the two interaction energies by DIFFERENT fitted "
+                "constants ((RT)_TSA = 15.3 kJ/mol, (RT)_S = 386.7 kJ/mol -- a "
+                "factor of 25), and one temperature for both over-weights the "
+                "substrate term 25-fold and changes which candidate wins. Set "
+                "rt_tsa_kcal and rt_substrate_kcal (kcal/mol) if your system is "
+                "not GUS/pNP-GLU."
             )
         if p == "kcat" and not self._substrate():
             raise SpecError(
@@ -617,13 +702,24 @@ class ImproveCatalysis(Goal):
     def _rt(self) -> float:
         return self.R_KCAL * float(self.options.get("temperature_k", 298.15))
 
+    @property
+    def _rt_pair(self) -> tuple[float, float]:
+        """``(RT_TSA, RT_substrate)`` in kcal/mol, for Eq 18."""
+        return (
+            float(self.options.get("rt_tsa_kcal", self.RT_TSA_KCAL)),
+            float(self.options.get("rt_substrate_kcal", self.RT_SUBSTRATE_KCAL)),
+        )
+
     def score(self, ctx: ScoreContext) -> float:
         if self.parameter == "km":
             return self._sum_ie(ctx, self._substrate() or self.spec.targets)
         if self.parameter == "kcat_over_km":
             return self._sum_ie(ctx, self._tsa())
-        rt = self._rt
-        return self._sum_ie(ctx, self._tsa()) / rt - self._sum_ie(ctx, self._substrate()) / rt
+        rt_tsa, rt_s = self._rt_pair
+        return (
+            self._sum_ie(ctx, self._tsa()) / rt_tsa
+            - self._sum_ie(ctx, self._substrate()) / rt_s
+        )
 
     def components(self, ctx: ScoreContext) -> dict[str, float]:
         out: dict[str, float] = {"parameter_score": self.score(ctx)}
@@ -631,6 +727,14 @@ class ImproveCatalysis(Goal):
             out[f"IE_TSA[{m.name}]"] = ctx.ie(m.name)
         for m in self._substrate():
             out[f"IE_substrate[{m.name}]"] = ctx.ie(m.name)
+        if self.parameter == "kcat":
+            rt_tsa, rt_s = self._rt_pair
+            out["RT_TSA_kcal"] = rt_tsa
+            out["RT_substrate_kcal"] = rt_s
+            out["weighted_IE_TSA"] = self._sum_ie(ctx, self._tsa()) / rt_tsa
+            out["weighted_IE_substrate"] = (
+                self._sum_ie(ctx, self._substrate()) / rt_s
+            )
         out["score"] = self.score(ctx)
         return out
 
@@ -661,6 +765,8 @@ class Stabilize(Goal):
         # raised from score() told the user to "measure it with 'ipro-agent
         # score'", and that command builds the same goal and dies with the same
         # error -- a recovery path that cannot be followed.
+        self._check_numeric_options("min_interaction_fraction",
+                                    "reference_interaction")
         if self.options.get("min_interaction_fraction") is None:
             return
         self._require_targets(1)

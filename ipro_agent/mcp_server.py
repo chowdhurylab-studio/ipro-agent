@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,34 +94,92 @@ _SPEC_PROPERTY = {
 }
 
 
+#: A line that only a spec would have. Used to tell inline YAML from a path
+#: without opening anything, so that a typo'd path is reported as a missing
+#: file instead of being silently parsed as YAML.
+_SPEC_LINE = re.compile(
+    r"^\s*(goal|goal_statement|molecules|positions|restraints|loop|"
+    r"goal_options|assemblies|indels)\s*:", re.M
+)
+
+
 def _looks_inline(spec: str) -> bool:
     """Inline YAML rather than a path.
 
-    A path is one line and has no colon-space; a spec always has at least
-    ``goal:`` on a line of its own. Checked this way rather than by trying to
-    open it, so that a typo'd path is reported as a missing file instead of
-    being silently parsed as YAML.
+    Multi-line input is inline. A *single* line can be too -- an agent that
+    holds the spec in context may well send ``{goal: bind_tighter, ...}`` or
+    ``goal: bind_tighter`` with no newline at all, and those were treated as
+    filenames and reported as "spec not found: goal: bind_tighter".
     """
-    if "\n" in spec.strip():
+    s = spec.strip()
+    if "\n" in s:
         return True
-    return False
+    if _SPEC_LINE.search(s):
+        return True
+    # A YAML flow mapping, which is what a one-line spec looks like.
+    return s.startswith("{") and s.endswith("}")
 
 
 def _resolve_spec(spec: str, keep: list[Path]) -> str:
     """Return a filesystem path for ``spec``, writing inline content if needed."""
+    if not isinstance(spec, str) or not spec.strip():
+        raise ToolError(
+            "`spec` must be a path to a spec file, or the spec's YAML content "
+            f"inline; got {type(spec).__name__} "
+            f"{'(empty)' if isinstance(spec, str) else repr(spec)[:80]}"
+        )
     if not _looks_inline(spec):
+        # resolve(), not expanduser() alone: the child runs with cwd=REPO_ROOT,
+        # so a relative path the client meant against ITS own directory was
+        # checked here and then handed over to be re-resolved somewhere else.
+        # Measured: a spec sitting next to the client reported "spec not
+        # found" while the file plainly existed.
         p = Path(spec).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
         if not p.exists():
             raise ToolError(
                 f"spec not found: {spec}\n"
-                "Pass a path to a spec file, or the spec's YAML content inline "
-                "(inline specs must use absolute paths for their structures)."
+                f"(looked for {p}; the server's working directory is "
+                f"{Path.cwd()})\n"
+                "Pass an absolute path to a spec file, or the spec's YAML "
+                "content inline (inline specs must use absolute paths for "
+                "their structures)."
             )
         return str(p)
     tmp = Path(tempfile.mkdtemp(prefix="ipro_mcp_spec_")) / "spec.yaml"
-    tmp.write_text(spec)
+    tmp.write_text(spec, encoding="utf-8")
     keep.append(tmp)
     return str(tmp)
+
+
+def _writable_dir(preferred: "Path | None" = None) -> Path:
+    """A directory this process may actually write to.
+
+    Runs and LP files used to default under ``REPO_ROOT``, which is
+    *site-packages* in a pip-installed copy: a run then wrote into the
+    installed package tree, and on a read-only install failed with a chopped
+    PermissionError traceback. Honour ``IPRO_RUN_ROOT``, then
+    ``XDG_STATE_HOME``, then the user's home, then a temp directory.
+    """
+    cands = []
+    if preferred is not None:
+        cands.append(Path(preferred))
+    for var in ("IPRO_RUN_ROOT", "XDG_STATE_HOME"):
+        if os.environ.get(var):
+            cands.append(Path(os.environ[var]).expanduser() / "ipro-agent")
+    cands.append(Path.home() / ".local" / "state" / "ipro-agent")
+    cands.append(Path(tempfile.gettempdir()) / "ipro-agent")
+    for c in cands:
+        try:
+            c.mkdir(parents=True, exist_ok=True)
+            probe = c / ".write_probe"
+            probe.write_text("")
+            probe.unlink()
+            return c
+        except OSError:
+            continue
+    return Path(tempfile.mkdtemp(prefix="ipro_agent_"))
 
 
 class ToolError(RuntimeError):
@@ -152,7 +212,7 @@ def _cli(args: list[str], timeout: float = DEFAULT_TIMEOUT) -> dict:
         # about there being no output.
         err = (proc.stderr or "").strip()
         raise ToolError(
-            err[-800:] if err else
+            _explain_stderr(err, args) if err else
             f"`{' '.join(args)}` produced no output at all (exit {proc.returncode})"
         )
     # The CLI pretty-prints its JSON across many lines, so this cannot be a
@@ -183,6 +243,35 @@ def _cli(args: list[str], timeout: float = DEFAULT_TIMEOUT) -> dict:
         prose if prose else
         f"`{' '.join(args)}` produced no usable output (exit {proc.returncode}); "
         f"stderr: {(proc.stderr or '')[-400:]}"
+    )
+
+
+#: `ValueError: ...`, `ipro_agent.config.SpecError: ...` -- the line of a
+#: traceback that actually says what went wrong.
+_EXC_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning|Exit):", re.M)
+
+
+def _explain_stderr(err: str, args: list[str]) -> str:
+    """The useful sentence first, the traceback second.
+
+    A tail slice of stderr handed the agent 800 characters that began in the
+    middle of a line -- one measured message literally started ``ile "`` --
+    with the actual exception last, where a model is least likely to act on it.
+    """
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    hits = [ln.strip() for ln in lines if _EXC_LINE.match(ln.strip())]
+    if not hits:
+        return err[-800:]
+    message = hits[-1]
+    if "Traceback (most recent call last)" not in err:
+        return message
+    context = err[-400:]
+    at = context.find("\n")
+    if at != -1:
+        context = context[at + 1:]
+    return (
+        f"{message}\n\n(from `{' '.join(args)}`; traceback tail follows)\n"
+        f"{context}"
     )
 
 
@@ -247,14 +336,27 @@ def tool_positions(args: dict) -> dict:
 
 def tool_score(args: dict) -> dict:
     keep: list[Path] = []
-    return _cli(["score", _resolve_spec(args["spec"], keep)])
+    cmd = ["score", _resolve_spec(args["spec"], keep)]
+    # `score` writes a small run directory for its log. Defaulted under
+    # REPO_ROOT, which is site-packages in a pip-installed copy, that wrote
+    # into the installed package tree -- and failed outright on a read-only
+    # install, with a PermissionError traceback chopped mid-line.
+    cmd += ["--run-dir", str(_writable_dir(args.get("run_dir")) / "score")]
+    return _cli(cmd)
 
 
 def tool_milp(args: dict) -> dict:
     keep: list[Path] = []
     cmd = ["milp", _resolve_spec(args["spec"], keep)]
-    if args.get("out"):
-        cmd += ["-o", str(args["out"])]
+    out = args.get("out")
+    if out:
+        # Absolute, because the child runs with cwd=REPO_ROOT: a relative
+        # `out` landed inside the installed package and the reported path was
+        # relative, so the agent could not find the file it had just asked for.
+        q = Path(str(out)).expanduser()
+        if not q.is_absolute():
+            q = _writable_dir() / q.name
+        cmd += ["-o", str(q)]
     return _cli(cmd)
 
 
@@ -280,8 +382,10 @@ def tool_run(args: dict) -> dict:
 
     keep: list[Path] = []
     spec = _resolve_spec(args["spec"], keep)
-    run_dir = Path(args.get("run_dir") or (REPO_ROOT / "runs" / _run_id(spec)))
+    run_dir = Path(args.get("run_dir") or (_writable_dir() / "runs" / _run_id(spec)))
     run_dir = run_dir.expanduser()
+    if not run_dir.is_absolute():
+        run_dir = (Path.cwd() / run_dir).resolve()
     if run_dir.exists() and any(run_dir.iterdir()):
         raise ToolError(
             f"run directory is not empty: {run_dir}\n"
@@ -290,10 +394,29 @@ def tool_run(args: dict) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [sys.executable, "-m", "ipro_agent", "run", spec, "--run-dir", str(run_dir)]
-    for flag, key in (("--iterations", "iterations"), ("--seed", "seed"),
-                      ("--max-minutes", "max_minutes")):
-        if args.get(key) is not None:
-            cmd += [flag, str(args[key])]
+    # Coerced, not stringified. The schema says `iterations` is an integer, but
+    # nothing enforced it: a JSON float -- which a model will happily emit for
+    # an integer field -- became `--iterations 8.0`, argparse exited 2 within
+    # milliseconds, and the reply was still `launched: true` with a pid that
+    # was already gone. ipro_status then answered "pending" forever.
+    for flag, key, cast in (("--iterations", "iterations", int),
+                            ("--seed", "seed", int),
+                            ("--max-minutes", "max_minutes", float)):
+        if args.get(key) is None:
+            continue
+        raw = args[key]
+        try:
+            value = cast(raw) if not isinstance(raw, bool) else None
+            if value is None:
+                raise TypeError("bool")
+            if cast is int and isinstance(raw, float) and raw != int(raw):
+                raise ValueError("not a whole number")
+        except (TypeError, ValueError):
+            raise ToolError(
+                f"`{key}` must be a {'whole number' if cast is int else 'number'}; "
+                f"got {type(raw).__name__} {raw!r}. Nothing was launched."
+            )
+        cmd += [flag, str(value)]
 
     log = run_dir / "launch.log"
     with open(log, "wb") as fh:
@@ -304,8 +427,27 @@ def tool_run(args: dict) -> dict:
             # that asked for it -- the same reason SKILL.md recommends setsid.
             start_new_session=True,
         )
+    # Did it survive the first moment? A spec the CLI refuses, or a bad
+    # argument, kills the child instantly -- and "launched: true" then sends
+    # the agent into an endless poll of a run that never started.
+    rc = None
+    for _ in range(20):
+        rc = proc.poll()
+        if rc is not None:
+            break
+        time.sleep(0.1)
+    if rc is not None and rc != 0:
+        tail = ""
+        try:
+            tail = log.read_text(errors="replace").strip()[-600:]
+        except OSError:
+            pass
+        raise ToolError(
+            f"the run exited immediately (status {rc}) and nothing is running. "
+            f"Its output:\n{tail or '(launch.log is empty)'}"
+        )
     return {
-        "run_id": run_dir.name,
+        "run_id": str(run_dir),
         "run_dir": str(run_dir),
         "pid": proc.pid,
         "log": str(log),
@@ -321,7 +463,7 @@ def tool_run(args: dict) -> dict:
 def _run_id(spec: str) -> str:
     """A stable-ish directory name from the spec's own name."""
     stem = Path(spec).stem.replace(" ", "_") or "run"
-    base = REPO_ROOT / "runs"
+    base = _writable_dir() / "runs"
     n = 1
     while (base / f"{stem}_{n:03d}").exists():
         n += 1
@@ -332,11 +474,32 @@ def tool_status(args: dict) -> dict:
     run = args.get("run_dir") or args.get("run_id")
     if not run:
         raise ToolError("give run_dir (a path) or run_id (a directory name)")
-    p = Path(run).expanduser()
+    p = Path(str(run)).expanduser()
     if not p.exists():
-        p = REPO_ROOT / "runs" / str(run)
+        # `run_id` used to be the directory's *name*, which only resolved for
+        # runs started in the default location: a run launched with an explicit
+        # run_dir returned an id that ipro_status then rejected as "no such
+        # run". It is now the absolute path, and these fallbacks keep the old
+        # short form working.
+        for base in (_writable_dir() / "runs", REPO_ROOT / "runs", Path.cwd()):
+            cand = base / str(run)
+            if cand.exists():
+                p = cand
+                break
     if not p.exists():
-        raise ToolError(f"no such run: {run}")
+        raise ToolError(
+            f"no such run: {run}\n"
+            f"Pass the `run_dir` that ipro_run returned (an absolute path). "
+            f"Looked in {_writable_dir() / 'runs'} and {Path.cwd()}."
+        )
+    if not (p / "state.json").exists() and not (p / "ipro.log").exists():
+        # `status` on a directory that is not a run reported
+        # {"status": "pending"}, so a mistyped path polled forever.
+        raise ToolError(
+            f"{p} is not a run directory: it has no state.json and no "
+            f"ipro.log. Check the path -- a run that never started leaves a "
+            f"launch.log, and ipro_run reports that case itself now."
+        )
     rep = _cli(["status", str(p)], timeout=120)
     # The house rule, restated where an agent will see it. `mode` and `notes`
     # come from status itself (state.RunDir.as_json).
@@ -1151,11 +1314,27 @@ def handle(message: dict) -> dict | None:
 
     if method == "tools/call":
         name = params.get("name")
+        if not isinstance(name, str):
+            # An unhashable name (a dict, a list) used to reach _BY_NAME.get
+            # and raise `TypeError: unhashable type`, which killed the session.
+            return _err(mid, -32602,
+                        f"tools/call `name` must be a string, got "
+                        f"{type(name).__name__}")
         tool = _BY_NAME.get(name)
         if tool is None:
             return _err(mid, -32602, f"unknown tool {name!r}; have {sorted(_BY_NAME)}")
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return _err(mid, -32602,
+                        f"`arguments` must be an object, got "
+                        f"{type(arguments).__name__}")
         try:
-            result = tool["handler"](params.get("arguments") or {})
+            problem = _check_args(tool, arguments)
+            if problem:
+                return _ok(mid, _content({"error": problem}, is_error=True))
+            result = tool["handler"](arguments)
             return _ok(mid, _content(result))
         except ToolError as exc:
             # A tool-level failure, reported to the model rather than to the
@@ -1169,8 +1348,12 @@ def handle(message: dict) -> dict | None:
         return _ok(mid, {"resources": _resource_list()})
 
     if method == "resources/read":
+        uri = params.get("uri", "")
+        if not isinstance(uri, str):
+            return _err(mid, -32602,
+                        f"`uri` must be a string, got {type(uri).__name__}")
         try:
-            return _ok(mid, _resource_read(params.get("uri", "")))
+            return _ok(mid, _resource_read(uri))
         except ToolError as exc:
             return _err(mid, -32602, str(exc))
 
@@ -1178,9 +1361,14 @@ def handle(message: dict) -> dict | None:
         return _ok(mid, {"prompts": PROMPTS})
 
     if method == "prompts/get":
+        pname = params.get("name", "")
+        pargs = params.get("arguments") or {}
+        if not isinstance(pname, str) or not isinstance(pargs, dict):
+            return _err(mid, -32602,
+                        "prompts/get needs `name` (a string) and optional "
+                        "`arguments` (an object)")
         try:
-            return _ok(mid, _prompt_get(params.get("name", ""),
-                                        params.get("arguments") or {}))
+            return _ok(mid, _prompt_get(pname, pargs))
         except ToolError as exc:
             return _err(mid, -32602, str(exc))
 
@@ -1191,6 +1379,63 @@ def handle(message: dict) -> dict | None:
         # Unknown, and a notification: silence is the correct response.
         return None
     return _err(mid, -32601, f"method not found: {method}")
+
+
+#: JSON type names to the Python types a json.loads result can hold.
+_JSON_TYPES: dict[str, tuple] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _check_args(tool: dict, arguments: dict) -> str:
+    """Check arguments against the tool's own declared schema.
+
+    The schemas were decorative: a missing ``spec`` reached the handler and
+    came back as ``KeyError: 'spec'``, and ``spec: 42`` as
+    ``AttributeError: 'int' object has no attribute 'strip'``. A model cannot
+    act on either, and both look like a bug in the tool rather than in the
+    call. Unknown extra arguments are still ignored, which is correct -- a
+    client may send more than the schema names.
+    """
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") or {}
+    missing = [
+        k for k in (schema.get("required") or [])
+        if arguments.get(k) is None
+    ]
+    if missing:
+        names = ", ".join(f"`{k}`" for k in missing)
+        detail = "; ".join(
+            f"{k}: {(props.get(k) or {}).get('description', '')}".strip(": ")
+            for k in missing
+        )
+        return (
+            f"{tool['name']} needs {names}, which "
+            f"{'was' if len(missing) == 1 else 'were'} not given. {detail}"
+        )
+    for key, value in arguments.items():
+        want = (props.get(key) or {}).get("type")
+        allowed = _JSON_TYPES.get(want)
+        if not allowed or value is None:
+            continue
+        # JSON has no integer type of its own: 8.0 is a whole number.
+        if want == "integer" and isinstance(value, float) and value == int(value):
+            continue
+        if isinstance(value, bool) and want != "boolean":
+            return (
+                f"{tool['name']}: `{key}` must be {want}, got a boolean"
+            )
+        if not isinstance(value, allowed):
+            return (
+                f"{tool['name']}: `{key}` must be {want}, got "
+                f"{type(value).__name__} ({json.dumps(value, default=str)[:60]})"
+            )
+    return ""
 
 
 def _content(payload: dict, is_error: bool = False) -> dict:

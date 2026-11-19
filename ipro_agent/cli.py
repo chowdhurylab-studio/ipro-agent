@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from .config import DesignSpec, Role, SpecError
+from .structure import StructureError
 from .goals import GOALS, build_goal, suggest_goal
 from .state import RunDir
 
@@ -91,6 +92,30 @@ def cmd_validate(args) -> int:
             }
         except Exception as exc:
             problems.append(f"{m.role.value} molecule {m.name} ({m.path}): {exc}")
+
+    # Two molecules that are literally the same coordinates. A homodimer
+    # docked from one monomer legitimately shares a FILE, so this is not a spec
+    # error -- but same file AND same chains, with no pose applied, means two
+    # bodies occupying one space. Measured with the design molecule and a
+    # "partner" both pointing at 2omf_A.pdb chain A: validate reported ok, and
+    # score returned an interaction energy of +149,211 kcal/mol from atoms at
+    # zero distance. A number like that is not an interaction, but it was
+    # reported as one -- and a goal whose filter is "better than the reference"
+    # would have adopted it as the reference.
+    bodies: dict[tuple, str] = {}
+    for m in spec.molecules:
+        key = (str(Path(str(m.path)).resolve()), tuple(sorted(m.chains or ())))
+        if key in bodies:
+            problems.append(
+                f"molecules {bodies[key]!r} and {m.name!r} are the same "
+                f"coordinates -- the same file ({Path(str(m.path)).name}) and "
+                f"the same chain(s) {list(key[1]) or '(all chains)'}. They "
+                f"would be scored as two bodies in one space, which measures "
+                f"as an 'interaction energy' in the tens of thousands. For a "
+                f"homodimer, give the partner its own chain id, or its own "
+                f"file with the second copy's coordinates."
+            )
+        bodies[key] = m.name
 
     if st is not None:
         for p in spec.positions:
@@ -336,6 +361,28 @@ def cmd_run(args) -> int:
     from .loop import run_design
 
     run_dir = args.run_dir or f"runs/{spec.name}"
+    # A second run into the same directory APPENDED to the first one's
+    # trajectory: measured, two 6-iteration runs of different specs left
+    # iterations.jsonl with 12 lines, status reporting "12 of 6 iterations",
+    # and best_score carried over from the other spec's run -- a result
+    # attributed to a spec that never produced it. The MCP server already
+    # refused this; the CLI did not.
+    existing = Path(run_dir)
+    if existing.exists() and not args.resume:
+        used = [
+            n for n in ("state.json", "iterations.jsonl", "best", "ensemble")
+            if (existing / n).exists()
+        ]
+        if used:
+            print(
+                f"run directory already holds a run: {existing} ({', '.join(used)}).\n"
+                f"Its trajectory would be appended to, and the status would "
+                f"report both runs as one. Pass a fresh --run-dir, read this "
+                f"one with `ipro-agent status {existing}`, or pass --resume to "
+                f"continue it deliberately.",
+                file=sys.stderr,
+            )
+            return 2
     try:
         res = run_design(spec, run_dir)
     except Exception as exc:
@@ -721,6 +768,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--iterations", type=int, help="override spec loop.iterations")
     p.add_argument("--seed", type=int, help="override spec loop.random_seed")
     p.add_argument("--max-minutes", type=float, help="wall-clock budget; stops cleanly")
+    p.add_argument("--resume", action="store_true",
+                   help="continue a run directory that already holds one "
+                        "(without this, a used directory is refused rather "
+                        "than appended to)")
     p.set_defaults(func=cmd_run)
 
     p = add_json(sub.add_parser("dock", help="dock the spec's partners with AutoDock Vina"))
@@ -769,7 +820,23 @@ def main(argv: list[str] | None = None) -> int:
         level=[logging.WARNING, logging.INFO, logging.DEBUG][min(args.verbose, 2)],
         format="%(levelname)s %(name)s: %(message)s",
     )
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SpecError as exc:
+        # `validate` reported these cleanly while `score`, `milp`, `positions`
+        # and `dock` died with a 20-frame traceback for the SAME spec -- an
+        # unknown goal name, a molecule with no path -- because only _load was
+        # guarded and the error came later, from build_goal or from the loop's
+        # constructor. One handler here gives every subcommand the contract
+        # _load already had.
+        print(f"spec error: {exc}", file=sys.stderr)
+        return 2
+    except StructureError as exc:
+        print(f"structure error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

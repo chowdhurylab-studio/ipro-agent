@@ -274,10 +274,11 @@ goal_options:
   # filter below. Do not read it as a sub-4 A pore, and do not compare it to
   # the paper. (Earlier comments here quoted 5.69 A / 0.716, which does not
   # reproduce.) With all 25 positions, which do surround the lumen, the
-  # measurement is sound: 6.24 A, clearance 1.30 A. docs/DESIGN.md 7d records
-  # this as a confirmed defect left unfixed and explains why. The remedy for a
-  # spec like this one is `goal_options.pore_axis`, two atoms spanning the
-  # channel.
+  # measurement is sound: the axis origin clears 2.80 A in the input structure.
+  # The run now says outright that this spec's radius is not a pore radius
+  # (docs/DESIGN.md 7h). The remedy for a spec like this one is
+  # `goal_options.pore_axis`, two atoms spanning the channel, or adding
+  # positions on the opposite wall.
   target_radius: 2.0
 
   # LIVE since the pore-geometry measurement landed: `pore_diameter_min` /
@@ -286,7 +287,7 @@ goal_options:
   # considered. `target_radius` additionally puts the radius in the objective.
   #
   # The axis is fitted as the normal to the plane of the design positions. With
-  # the full 25 positions that measures the wild-type eyelet at 6.24 A against
+  # the full 25 positions that measures the wild-type eyelet at 8.07 A against
   # the published 11 x 7 A (an inscribed circle is bounded by the narrow
   # direction, so ~7 A is the comparison). With these four it does not work at
   # all -- see the caveat above. docs/DESIGN.md 1h.

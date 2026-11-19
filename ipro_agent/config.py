@@ -281,11 +281,22 @@ class DesignPosition:
                 f"cannot parse position {text!r}; expected forms like 'A115', "
                 "'A:115', '115' or 'A115B'"
             )
+        # `if allowed` conflated "not given" with "given as empty": a spec
+        # written `allowed: []` -- or `allowed:` with nothing after it, which
+        # YAML reads as None inside a list of one -- silently became the full
+        # 18-residue `standard` set, so a user who meant "nothing may change
+        # here" got the widest alphabet in the tool and a design space 18x
+        # larger per position than they asked for. Absent is the default;
+        # empty is an error, which __post_init__ already raises.
+        if allowed is None:
+            chosen = list(AA_GROUPS["standard"])
+        else:
+            chosen = list(allowed)
         return cls(
             chain=m.group("chain") or m.group("nchain") or "A",
             number=int(m.group("num")),
             insertion_code=(m.group("icode") or "").upper(),
-            allowed=list(allowed) if allowed else list(AA_GROUPS["standard"]),
+            allowed=chosen,
         )
 
 
@@ -956,11 +967,55 @@ class DesignSpec:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DesignSpec":
+        if not isinstance(d, dict):
+            raise SpecError(
+                f"a spec must be a mapping of keys to values, not a "
+                f"{type(d).__name__}"
+            )
         d = dict(d)
-        mols = [Molecule(**m) for m in d.pop("molecules", [])]
+        # Named explicitly, because `cls(**d)` reported them as
+        # `TypeError: DesignSpec.__init__() missing 1 required positional
+        # argument: 'goal_statement'` -- a Python-internals message for a
+        # missing line in the user's own file.
+        for required, why in (
+            ("goal", "bind_tighter, switch_specificity, reshape_channel, "
+                      "improve_catalysis or stabilize (`ipro-agent goals` "
+                      "lists what each one optimizes)"),
+            ("goal_statement", "the objective in your own words, which travels "
+                               "with the design and into the report"),
+        ):
+            if not d.get(required):
+                raise SpecError(
+                    f"the spec has no `{required}:`. It needs one: {why}."
+                )
+        try:
+            mols = [Molecule(**m) for m in as_sequence(d.pop("molecules", []))]
+        except TypeError as exc:
+            raise SpecError(
+                f"a molecule entry has the wrong keys ({exc}). Each needs "
+                f"name, path, role and kind -- see `ipro://example-spec`."
+            ) from exc
 
         positions: list[DesignPosition] = []
-        for item in as_sequence(d.pop("positions", [])):
+        raw_positions = d.pop("positions", [])
+        if isinstance(raw_positions, dict):
+            # `as_sequence` over a mapping yields its KEYS, so
+            #     positions:
+            #       A18: [TRP]
+            #       A20: [TRP]
+            # parsed as two positions with the full 18-residue default and the
+            # requested alphabets silently dropped -- measured, a design space
+            # of 324 sequences where the user had asked for 1. The list form
+            # is the only one that carries `allowed`.
+            example = next(iter(raw_positions.items()), ("A18", ["TRP"]))
+            raise SpecError(
+                "`positions:` must be a LIST, not a mapping -- a mapping drops "
+                "every allowed-residue set and silently widens the alphabet to "
+                "all 18. Write:\n"
+                f"  positions:\n"
+                f"    - {{position: {example[0]}, allowed: {example[1]}}}"
+            )
+        for item in as_sequence(raw_positions):
             if isinstance(item, (str, int)):
                 positions.append(DesignPosition.parse(item))
             elif isinstance(item, dict):
@@ -1029,9 +1084,29 @@ class DesignSpec:
                     "reading a YAML spec needs PyYAML (pip install pyyaml); "
                     "or write the spec as .json"
                 ) from exc
-            data = yaml.safe_load(text)
+            try:
+                data = yaml.safe_load(text)
+            except yaml.YAMLError as exc:
+                # A tab for indentation, an unclosed bracket, a stray colon --
+                # all ordinary mistakes, all of which came out as a 20-frame
+                # traceback ending in yaml.scanner.ScannerError. PyYAML's own
+                # message carries the line and column, so it is the useful
+                # part; the frames are not.
+                where = ""
+                mark = getattr(exc, "problem_mark", None)
+                if mark is not None:
+                    where = f" at line {mark.line + 1}, column {mark.column + 1}"
+                detail = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+                raise SpecError(
+                    f"{p} is not valid YAML{where}: {detail}. "
+                    f"(A tab character cannot indent YAML -- use spaces.)"
+                ) from exc
         if not isinstance(data, dict):
-            raise SpecError(f"{p} does not contain a mapping at the top level")
+            raise SpecError(
+                f"{p} does not contain a mapping at the top level"
+                + (f" (it parsed as {type(data).__name__})" if data is not None
+                   else " (it is empty)")
+            )
         spec = cls.from_dict(data)
         # Resolve relative molecule paths against the spec file's directory, so
         # an example case is portable.
