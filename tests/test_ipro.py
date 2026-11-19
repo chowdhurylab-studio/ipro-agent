@@ -3407,9 +3407,19 @@ def test_regression_full_mode_relaxes_after_the_choice_not_before():
     assert loop._post_relaxed == 1 and loop._post_relax_failed == 0
 
     # The stand-in backend copies its input, so the relaxed atoms must come
-    # back identical -- i.e. the candidate really is what was written.
-    assert float(np.abs(out.coords - atoms.coords).max()) == 0.0
-    assert list(out.reskeys) == list(atoms.reskeys)
+    # back identical -- i.e. the candidate really is what was written. Keyed by
+    # (residue, atom name), not by index: the writer groups atoms by residue
+    # with the backbone first, which is what makes the file parseable at all
+    # (see the candidate-PDB regression test), so the order is deliberately
+    # not the AtomSet's.
+    before = {(str(k), n): c for k, n, c in
+              zip(atoms.reskeys, atoms.names, atoms.coords)}
+    after = {(str(k), n): c for k, n, c in
+             zip(out.reskeys, out.names, out.coords)}
+    assert set(before) == set(after), (
+        sorted(set(before) ^ set(after))[:5]
+    )
+    assert max(float(np.abs(before[k] - after[k]).max()) for k in before) == 0.0
 
     # The perturbation must NOT relax any more: one relaxation per iteration,
     # and it happens after the choice.
@@ -5857,3 +5867,62 @@ def test_regression_the_hard_reject_guard_watches_the_complex_energy():
     assert "complex energy worse by" in src
     # And the accepted structure's complex energy is what it is measured from.
     assert "current_complex = ctx.total" in src
+
+
+def test_regression_a_candidate_pdb_is_one_residue_per_residue():
+    """The structure that gets relaxed after the MILP is written from the
+    candidate's AtomSet, and that set is "template (minus the design
+    positions' side chains)" followed by "the chosen rotamers". Written in that
+    order the file was malformed twice over, and both were found by running
+    full mode with real PyRosetta rather than a stand-in:
+
+    1. residue 16's backbone appeared near the top of the file and its side
+       chain at the very end, so the residue read as a duplicate;
+    2. the template keeps the NATIVE residue name on the backbone it
+       contributes while the rotamer carries the designed one, so residue 16
+       was written ``CYS`` for N/CA/C/O and ``SER`` for CB/OG.
+
+    Biopython refuses such a file outright ("Blank altlocs in duplicate
+    residue SER (' ', 16, ' ')"). PyRosetta *accepted* it and returned a
+    structure with one atom more than it was given -- which is the dangerous
+    half: the energies that decide acceptance were computed on whatever it
+    made of a split residue, and the only visible symptom was a note about an
+    atom count. Fixed, the same run keeps 326 atoms through the relaxation."""
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.output import write_atomset_pdb
+    from ipro_agent.structure import Structure
+
+    st = Structure.load(CRN)
+    full = _atoms_of(st, set())
+    template = _atoms_of(st, {"A16"})          # A16's side chain removed
+    # A "rotamer" at A16 with a DIFFERENT identity, appended last, as the real
+    # candidate has it.
+    rot = AtomSet(
+        names=["CB", "OG"],
+        coords=np.array([full.coords[0] + 1.0, full.coords[0] + 2.0]),
+        resnames=["SER", "SER"],
+        reskeys=[("A", 16, ""), ("A", 16, "")],
+        elements=["C", "O"],
+    )
+    candidate = template.extend(rot)
+    out = Path(tempfile.mkdtemp()) / "cand.pdb"
+    n = write_atomset_pdb(candidate, out)
+    assert n == len(candidate), (n, len(candidate))
+
+    # The strict loader is the test: it raises on a duplicate residue.
+    back = _atoms_of(Structure.load(out), set())
+    assert len(back) == len(candidate), (len(back), len(candidate))
+
+    # One name per residue, and it is the designed one.
+    names = {
+        str(k): r for k, r in zip(back.reskeys, back.resnames)
+    }
+    assert names["('A', 16, '')"] == "SER", names["('A', 16, '')"]
+    text = out.read_text()
+    assert "CYS A  16" not in text, "the native name must not survive"
+
+    # Atoms of one residue are contiguous, backbone first.
+    idx = [i for i, k in enumerate(back.reskeys) if k == ("A", 16, "")]
+    assert idx == list(range(idx[0], idx[-1] + 1)), idx
+    assert back.names[idx[0]].strip() == "N", back.names[idx[0]]

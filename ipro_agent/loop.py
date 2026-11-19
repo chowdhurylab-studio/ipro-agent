@@ -235,6 +235,9 @@ class IPROLoop:
         self._axis_clear_cache = None
         self._post_relaxed = 0
         self._post_relax_failed = 0
+        #: The starting point's relaxation, counted apart from the iterations
+        #: so the run cannot report "3 of 2 iteration(s)".
+        self._baseline_relaxed = 0
         self._moved_this_iteration = False
         self._last_cb = None
         self._last_tables = None
@@ -840,7 +843,10 @@ class IPROLoop:
                     f"'backbone-mc' in effect, not 'full'."
                 )
             return None
-        self._post_relaxed += 1
+        if tag.startswith("start") or tag.startswith("native"):
+            self._baseline_relaxed += 1
+        else:
+            self._post_relaxed += 1
         return atoms
 
     # -- writing structures -------------------------------------------------
@@ -1944,6 +1950,9 @@ class IPROLoop:
                     f"{self._post_relaxed} of {n_done} iteration(s)"
                     + (f", failing on {self._post_relax_failed}"
                        if self._post_relax_failed else "")
+                    + (" (the starting point was relaxed the same way, so the "
+                       "comparison is like-for-like)"
+                       if self._baseline_relaxed else "")
                 )
             else:
                 self.mode = "backbone-mc"

@@ -1372,6 +1372,41 @@ otherwise take the diagnosis down on exactly the interpreter that needs it.
 | `--iterations 0` and `--max-minutes 0` were dropped | tested for truthiness, so a zero-length request ran the spec's full length; `max_minutes: 0` meant *no* limit | refused, with the reason |
 | Windows runs would have died with their client | `start_new_session` is silently ignored there (CPython names it `unused_start_new_session`) | creation flags on `nt`; README states that Windows is untested and points at WSL 2 |
 
+### Running full mode for real, which found two more
+
+The post-MILP relaxation above was first tested with a counting stand-in
+backend. Run for real — PyRosetta 2026.29, crambin, two design positions, two
+iterations — it worked (`mode: full`, both iterations accepted, `C16S L18V`)
+and exposed two defects in the candidate writer that no stand-in could:
+
+* the candidate's atoms are *template (minus the design positions' side
+  chains)* followed by *the chosen rotamers*, so residue 16's backbone was
+  written near the top of the file and its side chain at the very end — the
+  residue read as a **duplicate**;
+* the template keeps the **native** residue name on the backbone it
+  contributes while the rotamer carries the designed one, so residue 16 came
+  out as `CYS` for N/CA/C/O and `SER` for CB/OG.
+
+Biopython refuses such a file outright ("Blank altlocs in duplicate residue
+SER (' ', 16, ' ')"). PyRosetta **accepted** it and returned a structure with
+one atom more than it was given — which is the dangerous half: the energies
+that decided acceptance were computed on whatever it made of a split residue,
+and the only visible symptom was a note about an atom count. Both fixed; the
+same run now keeps 326 atoms through the relaxation and the start score moved
+from −174.3 to −183.7, which is the size of the error that was being scored.
+
+What the relaxation actually does, measured on that run (326 atoms, all
+matched): **mean displacement 1.20 Å, centroid shift 0.83 Å, RMSD after
+superposition 0.98 Å** — a local minimization, not a refold, which is what the
+coordinate constraints are for. The largest single move is 8.79 Å, and it is a
+TYR ring flip at A29 whose own backbone moves 1.31 Å; side chains repack during
+relaxation, as the published protocol has them.
+
+A miscount came out of the same run: the starting point's relaxation shared the
+per-iteration counter, so a 2-iteration run reported "relaxation ran on 3 of 2
+iteration(s)". Counted apart now, and the note says the baseline was relaxed
+the same way.
+
 Unfixed by choice, and stated: one slow tool call blocks the stdio server for
 up to 900 s (it is single-threaded by design, and `ipro_run` exists precisely
 so a design is not that call); `notifications/cancelled` is accepted and cannot

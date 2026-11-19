@@ -249,7 +249,50 @@ def write_atomset_pdb(atoms, path) -> int:
     path = _Path(path)
     lines: list[str] = []
     serial = 0
-    for i in range(len(atoms)):
+
+    # Grouped by residue, in chain/number order. Written in AtomSet order the
+    # file was malformed: a candidate's atoms are "template (minus the design
+    # positions' side chains)" followed by "the chosen rotamers", so residue
+    # 16's backbone appeared near the top and its side chain at the very end,
+    # which reads as a DUPLICATE residue. Measured on a real full-mode run,
+    # Biopython refused the file outright ("Blank altlocs in duplicate residue
+    # SER (' ', 16, ' ')") while PyRosetta accepted it and silently returned a
+    # structure with one atom more than it was given.
+    def sort_key(i: int):
+        key = atoms.reskeys[i]
+        if isinstance(key, tuple) and len(key) >= 2 and isinstance(key[1], int):
+            return (str(key[0]), int(key[1]),
+                    str(key[2]) if len(key) > 2 and key[2] else "", i)
+        return ("", 0, "", i)
+
+    order = sorted(range(len(atoms)), key=sort_key)
+    # Backbone first within each residue, as a PDB conventionally has it.
+    _BB_ORDER = {"N": 0, "CA": 1, "C": 2, "O": 3, "OXT": 4}
+    order.sort(key=lambda i: (sort_key(i)[:3],
+                              _BB_ORDER.get(atoms.names[i].strip().upper(), 9)))
+
+    # ONE residue name per residue, and it is the DESIGNED one. A candidate's
+    # template keeps the native name on the backbone it contributes while the
+    # chosen rotamer carries the new name, so the same residue came out as two
+    # different residues -- measured on a real full-mode run, residue 16 was
+    # written "CYS" for N/CA/C/O and "SER" for CB/OG, which Biopython refuses
+    # ("Blank altlocs in duplicate residue SER") and which PyRosetta accepted
+    # while silently returning a structure one atom larger than it was given.
+    # The side chain names the residue: it is what the mutation changed.
+    _BB = set(_BB_ORDER)
+    resname_for: dict[tuple, str] = {}
+    for i in order:
+        k = sort_key(i)[:3]
+        nm = atoms.names[i].strip().upper()
+        rn = (atoms.resnames[i] or "").strip()
+        if not rn:
+            continue
+        if k not in resname_for or (nm not in _BB and resname_for[k] != rn):
+            if k in resname_for and nm in _BB:
+                continue
+            resname_for[k] = rn
+
+    for i in order:
         key = atoms.reskeys[i]
         chain, number, icode = "A", 1, " "
         if isinstance(key, tuple) and len(key) >= 2 and isinstance(key[1], int):
@@ -267,8 +310,9 @@ def write_atomset_pdb(atoms, path) -> int:
         else:
             name = f"{name:<4}"
         x, y, z = atoms.coords[i]
+        resname = resname_for.get(sort_key(i)[:3], atoms.resnames[i])
         lines.append(
-            f"ATOM  {serial:5d} {name}{atoms.resnames[i][:3]:>4}{chain:>2}"
+            f"ATOM  {serial:5d} {name}{resname[:3]:>4}{chain:>2}"
             f"{number:4d}{icode}   {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
             f"          {atoms.elements[i].strip()[:2]:>2}"
         )
