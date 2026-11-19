@@ -46,12 +46,15 @@ are not available at all.
 **The caveat that matters here, and it is not small.** Four positions along one
 wall do not *ring* the lumen, and the channel axis is fitted through their
 centroid — so it runs inside the protein and the reported "bottleneck" is a gap
-beside a wall. Measured: 0.30 Å of clearance where a water needs 1.4 Å, giving
-a 1.53 Å reading that *passes* a sub-4 Å filter. The run says so in its notes
-and reports the clearance. **Do not read a pore radius from this prompt.** For a
-real measurement, give `goal_options.pore_axis` as two atoms spanning the
-channel, or use all 25 positions (`examples/ompf_pore/spec_full.yaml`, which
-measures 6.24 Å). DESIGN.md §7d has the full account.
+beside a wall. Measured on the input structure: **0.30 Å** of clearance where a
+water needs 1.4 Å, giving a 1.53 Å reading that *passes* a sub-4 Å filter. The
+run now says this outright — "THE PORE RADIUS HERE IS NOT A PORE RADIUS" — and
+names the fix. **Do not read a pore radius from this prompt.** For a real
+measurement, give `goal_options.pore_axis` as two atoms spanning the channel, or
+use all 25 positions (`examples/ompf_pore/spec_full.yaml`, whose axis clears
+2.80 Å and whose wild-type eyelet measures **8.07 Å**). DESIGN.md §7h has the
+full account, including why the clearance has to be measured on the input
+structure and not on a candidate.
 
 ---
 

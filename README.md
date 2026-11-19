@@ -40,6 +40,13 @@ That creates the environment, reports what resolved, runs the test suite and the
 shipped example, and prints the exact commands and MCP config with your own
 paths filled in. Safe to re-run; deletes nothing.
 
+![inspect, validate, run](docs/tour.gif)
+
+*The three commands you will actually use, on the shipped OmpF example —
+real output. `inspect` comes first because a bare residue number does not
+say which chain it is in, and the run ends on its notes because they are
+the result as much as the score is.*
+
 By hand instead — and the install step is **not optional**, because rotamers
 come only from PyMOL's mutagenesis wizard and `pymol-open-source` is conda-only,
 so `pip install` alone cannot give you a working design pipeline:

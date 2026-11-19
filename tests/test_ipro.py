@@ -5926,3 +5926,25 @@ def test_regression_a_candidate_pdb_is_one_residue_per_residue():
     idx = [i for i, k in enumerate(back.reskeys) if k == ("A", 16, "")]
     assert idx == list(range(idx[0], idx[-1] + 1)), idx
     assert back.names[idx[0]].strip() == "N", back.names[idx[0]]
+
+
+def test_the_tour_gif_exists_and_is_small_enough_to_ship():
+    """README and HANDOFF.md both show `docs/tour.gif`. A broken image in the
+    first screen of a README is worse than no image, and a multi-megabyte one
+    makes every clone pay for it."""
+    gif = REPO / "docs" / "tour.gif"
+    assert gif.is_file(), "README and HANDOFF reference this file"
+    size_mb = gif.stat().st_size / 1048576
+    assert size_mb < 2.0, f"{size_mb:.1f} MB is too big to ship in a clone"
+    assert gif.read_bytes()[:6] in (b"GIF87a", b"GIF89a")
+
+    for doc, ref in (("README.md", "docs/tour.gif"),
+                     ("docs/HANDOFF.md", "tour.gif")):
+        text = (REPO / doc).read_text()
+        assert f"]({ref})" in text, f"{doc} must reference the gif"
+
+    # It is tracked, not ignored: a clone that cannot see it shows a broken
+    # image. (refs/ is git-ignored on purpose; docs/ is not.)
+    tracked = subprocess.run(["git", "ls-files", "docs/tour.gif"],
+                             capture_output=True, text=True, cwd=REPO).stdout
+    assert tracked.strip() == "docs/tour.gif", "the gif must be committed"

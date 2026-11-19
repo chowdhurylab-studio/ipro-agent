@@ -15,7 +15,8 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
   running the loop, and the degraded modes that change how a result must be
   reported.
 
-- **Before anything else**, run `python3 scripts/doctor.py --require pymol`.
+- **Before anything else**, run `python3 scripts/doctor.py --require pymol`
+  (equivalently `python3 -m ipro_agent.doctor --require pymol`).
   PyMOL has no fallback — rotamers come only from its mutagenesis wizard — so
   without it `run` cannot produce a design, and `--require pymol` makes that a
   non-zero exit instead of something to discover mid-run. The protocol also
@@ -36,7 +37,7 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
 
 - **Driving this from another agent, without cloning it**: there is an MCP
   server (`python3 -m ipro_agent.mcp_server`, or the `ipro-agent-mcp` console
-  script) exposing eight typed tools. See README.md, "Use it from another agent
+  script) exposing eleven typed tools. See README.md, "Use it from another agent
   (MCP)". If you are reading this file you have the repo, so prefer the skill:
   it carries the degraded modes and the reporting rules that tool schemas
   cannot.

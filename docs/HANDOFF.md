@@ -13,6 +13,12 @@ https://github.com/chowdhurylab-studio/ipro-agent
 git clone https://github.com/chowdhurylab-studio/ipro-agent && cd ipro-agent && bash scripts/bootstrap.sh
 ```
 
+![inspect, validate, run](tour.gif)
+
+*Real output from the three commands above, on the shipped OmpF example. Note
+how it ends: a run that changed nothing says so, and the two notes are the
+result as much as the score is.*
+
 `scripts/bootstrap.sh` creates the conda environment, prints what resolved,
 runs the whole test suite, runs the shipped example end to end, and finishes by
 printing the exact commands and MCP config **with that machine's own paths
@@ -108,19 +114,36 @@ need a human decision first.
 
 ---
 
-## Known open defect, so they hear it from you
+## The one thing to say about pores, so they hear it from you
 
 The channel axis is fitted through the centroid of the design positions, so it
 only follows the channel when those positions *ring* the lumen. When they do not
 — four positions along one wall, as in the shipped smoke example — the axis runs
 inside the protein and the reported "bottleneck" is a gap beside a wall, which
-then *passes* PoreDesigner's published sub-4 Å filter. The run reports the axis
-clearance and says it cannot vouch for the radius.
+then *passes* PoreDesigner's published sub-4 Å filter.
 
-So: **any pore radius from a spec whose positions do not surround the channel is
-meaningless.** Give `goal_options.pore_axis` as two atoms spanning the channel
-instead. `docs/DESIGN.md` §7d has the measurements and the three candidate fixes
-that were tried and rejected.
+The tool now **detects this and says so outright** ("THE PORE RADIUS HERE IS NOT
+A PORE RADIUS"), by measuring how far the axis origin clears the nearest van der
+Waals surface **in the input structure**: 2.80 Å for the sound 25-position spec
+against 0.30 Å for the 4-position one, where a water needs 1.4 Å. This was
+recorded as an unfixable defect for a while, because the clearance was being
+measured on the *candidate* — and a narrowing design fills the lumen on purpose,
+so the number could not tell a buried axis from a design that worked.
+`docs/DESIGN.md` §7h has the measurements.
+
+So: **a pore radius is only meaningful when the run does not print that
+warning.** If it does, give `goal_options.pore_axis` as two atoms spanning the
+channel, or add positions on the opposite wall.
+
+Two more worth passing on, both with the same shape — a number that looks like a
+result:
+
+- **`accepted: 0` is not a design** (also below).
+- **An allowed residue can be unreachable.** If every rotamer of it clashes with
+  the current template, it is pruned, and `validate` still advertises the full
+  design space. The run names them: on the shipped smoke spec, "A18: TRP, TYR;
+  A20: PRO; A38: PHE" — and A18/TRP is exactly the residue the published OmpF
+  design uses there.
 
 ---
 
