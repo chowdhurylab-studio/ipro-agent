@@ -1,0 +1,146 @@
+{
+  "goal_statement": "Smoke test of the PoreDesigner redesign of OmpF: shrink the porin eyelet below 4 A by lining it with long hydrophobic side chains, using only four of the paper's 25 pore-constriction positions so the run finishes in minutes on a laptop.\n",
+  "goal": "reshape_channel",
+  "molecules": [
+    {
+      "name": "ompf",
+      "path": "/Users/supantha/Documents/test123/ipro-agent/examples/ompf_pore/2omf_A.pdb",
+      "kind": "protein",
+      "role": "design",
+      "chains": [
+        "A"
+      ],
+      "redock": false
+    }
+  ],
+  "positions": [
+    {
+      "chain": "A",
+      "number": 18,
+      "allowed": [
+        "ALA",
+        "ILE",
+        "LEU",
+        "MET",
+        "PHE",
+        "PRO",
+        "TRP",
+        "TYR",
+        "VAL"
+      ],
+      "insertion_code": "",
+      "native": "VAL"
+    },
+    {
+      "chain": "A",
+      "number": 20,
+      "allowed": [
+        "ALA",
+        "ILE",
+        "LEU",
+        "MET",
+        "PHE",
+        "PRO",
+        "TRP",
+        "TYR",
+        "VAL"
+      ],
+      "insertion_code": "",
+      "native": "LEU"
+    },
+    {
+      "chain": "A",
+      "number": 38,
+      "allowed": [
+        "ALA",
+        "ILE",
+        "LEU",
+        "MET",
+        "PHE",
+        "PRO",
+        "TRP",
+        "TYR",
+        "VAL"
+      ],
+      "insertion_code": "",
+      "native": "MET"
+    },
+    {
+      "chain": "A",
+      "number": 40,
+      "allowed": [
+        "ALA",
+        "ILE",
+        "LEU",
+        "MET",
+        "PHE",
+        "PRO",
+        "TRP",
+        "TYR",
+        "VAL"
+      ],
+      "insertion_code": "",
+      "native": "TYR"
+    }
+  ],
+  "indels": [],
+  "restraints": [],
+  "assemblies": [],
+  "loop": {
+    "iterations": 8,
+    "stop_after_accepted": 3,
+    "max_rotamers": 1300,
+    "neighbour_cutoff": 4.5,
+    "energy_cutoff": 12.0,
+    "design_per_iteration": [
+      1,
+      2
+    ],
+    "perturb_backbone": false,
+    "perturbation_segment": [
+      1,
+      5
+    ],
+    "perturbation_sigma_deg": 1.5,
+    "perturbation_cap_deg": 5.0,
+    "perturbation_flank": 5,
+    "redock_every": 3,
+    "redock_moves": 500,
+    "redock_sigma_angstrom": 0.2,
+    "redock_sigma_deg": 2.0,
+    "redock_temperature_end_k": 2190.0,
+    "vina_exhaustiveness": 8,
+    "vina_num_modes": 9,
+    "vina_box_size": 22.5,
+    "temperature_k": 3640.0,
+    "greedy_fraction": 0.1,
+    "hard_reject_kcal": 40.0,
+    "hard_reject_fraction": 0.05,
+    "integer_cuts": true,
+    "ensemble_size": 5,
+    "random_seed": 1,
+    "max_minutes": 10.0,
+    "keep_structures": true
+  },
+  "backends": {
+    "energy": "auto",
+    "mutate": "auto",
+    "dock": "auto",
+    "milp_solver": "auto"
+  },
+  "goal_options": {
+    "direction": "narrow",
+    "long_fraction": 0.5,
+    "target_radius": 2.0,
+    "pore_diameter_max": 4.0,
+    "pore_diameter_min": null,
+    "long_residues": [
+      "TRP",
+      "PHE",
+      "TYR",
+      "MET"
+    ]
+  },
+  "name": "ompf_pore_smoke",
+  "notes": "Smoke test only -- 4 of 25 positions, 8 of hundreds of iterations, and no target molecule. Read EXPECTED.md before comparing any output of this run to the paper. The one comparison this spec supports well is qualitative: do the chosen identities concentrate in the LONG set, and does position 18, 20, 38 or 40 come out as Trp, as it did in all three published designs.\n"
+}

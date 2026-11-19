@@ -3937,6 +3937,12 @@ def test_the_public_facing_claims_are_consistent():
             continue
         if f == "tests/test_ipro.py":
             continue      # names the phrases above in order to forbid them
+        if f.startswith("docs/provenance/"):
+            # Verbatim records: the grep log that searched for this phrasing,
+            # and two audit reports quoting what reviewers wrote. They are
+            # evidence ABOUT the claim, not the repo making it. The assertion
+            # below still covers every file that speaks in the repo's voice.
+            continue
         try:
             text = path.read_text(errors="ignore").lower()
         except OSError:

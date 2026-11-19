@@ -1,0 +1,7 @@
+.claude/skills/ipro-agent/SKILL.md:532:This is a clean-room reimplementation of the published IPRO procedure, not the
+AGENTS.md:38:- This is a clean-room reimplementation. Cite the original papers for the
+LICENSE:31:* **No upstream IPRO code is reproduced here.** This is a clean-room
+README.md:81:This is **research code and a clean-room reimplementation**, written from the
+README.md:139:available to academic users — which is precisely why this is a clean-room
+docs/DESIGN.md:3:This repo is a **clean-room reimplementation** of the published IPRO procedure.
+docs/INSTALL.md:9:ipro-agent is a clean-room reimplementation of IPRO (Iterative Protein Redesign
