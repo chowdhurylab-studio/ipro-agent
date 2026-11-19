@@ -225,7 +225,7 @@ def write_complex(
         chain_map[name] = mapping
 
     lines.append("END")
-    out.write_text("\n".join(lines) + "\n")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     n_atoms = sum(1 for line in lines if line.startswith(("ATOM", "HETATM")))
     return WrittenComplex(path=out, atoms=n_atoms, chain_map=chain_map, notes=notes)
 
@@ -273,5 +273,5 @@ def write_atomset_pdb(atoms, path) -> int:
             f"          {atoms.elements[i].strip()[:2]:>2}"
         )
     lines.append("END")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return serial

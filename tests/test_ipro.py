@@ -20,6 +20,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -5323,9 +5324,7 @@ def test_regression_a_dead_run_does_not_report_itself_as_running():
     assert any("THIS RUN IS NOT RUNNING" in n for n in out["notes"]), out["notes"]
 
     # A live pid is still reported as running.
-    import os as _os
-
-    rd.update_state(status="running", pid=_os.getpid(), host=None)
+    rd.update_state(status="running", pid=os.getpid(), host=None)
     assert rd.as_json()["status"] == "running"
 
     # And the CLI refuses to append to a used run directory.
@@ -5393,3 +5392,228 @@ def test_regression_two_molecules_at_one_place_are_not_an_interaction():
     )
     assert any("not a" in n and "physical interaction" in n
                for n in got.get("notes", [])), (ie, got.get("notes"))
+
+
+def test_regression_the_doctor_gates_on_the_python_floor():
+    """On Python 3.9.6 with numpy, Biopython and PyYAML all installed, the
+    doctor reported ``python 3.9.6 | can_run True | can_design True |
+    missing_required []`` and exited 0 -- and ``--require pymol``, the
+    mandatory gate that AGENTS.md tells agents to trust, also exited 0. On
+    that interpreter ``import ipro_agent`` raises immediately: the package
+    floor is 3.10 and the code uses 3.10 syntax. A green light there is the
+    worst possible answer, because it sends the user into a run instead of
+    into an upgrade.
+
+    The doctor also has to keep working ON such an interpreter, which is why
+    ``scripts/doctor.py`` loads the module by file path instead of importing
+    ``ipro_agent.doctor``: the package's own refusal to import would otherwise
+    take the diagnosis down with it. Measured: ``python3.9 -m
+    ipro_agent.doctor`` prints the upgrade notice and nothing else, while
+    ``python3.9 scripts/doctor.py`` prints the full report."""
+    import ast
+
+    from ipro_agent import doctor as d
+    from ipro_agent import REQUIRES_PYTHON
+
+    assert d.PYTHON_FLOOR == REQUIRES_PYTHON, (
+        d.PYTHON_FLOOR, REQUIRES_PYTHON,
+        "the doctor's hardcoded floor must match the package's",
+    )
+    rep = d.check()
+    assert rep["python_ok"] is True, rep["python"]
+    assert rep["python_floor"] == ".".join(str(n) for n in REQUIRES_PYTHON)
+
+    # The module must import nothing from the package, or the shim cannot
+    # bypass the package guard.
+    src = (REPO / "ipro_agent" / "doctor.py").read_text()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("ipro_agent"), node.module
+            assert node.level == 0, (
+                f"relative import of {node.module!r}: the doctor must stay "
+                f"loadable without the package"
+            )
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                assert not a.name.startswith("ipro_agent"), a.name
+    shim = (REPO / "scripts" / "doctor.py").read_text()
+    assert "spec_from_file_location" in shim, (
+        "the shim must load the module by path, not import the package"
+    )
+
+    # A simulated old interpreter: the floor decides, not what is installed.
+    keep = d.sys.version_info
+    try:
+        d.sys.version_info = (3, 9, 6, "final", 0)        # type: ignore[assignment]
+        old = d.check()
+    finally:
+        d.sys.version_info = keep                          # type: ignore[assignment]
+    assert old["python_ok"] is False
+    assert old["can_run"] is False and old["can_design"] is False
+    assert any("python>=3.10" in m for m in old["missing_required"]), \
+        old["missing_required"]
+
+
+def test_regression_conda_search_covers_the_installer_we_recommend():
+    """The root list had four entries and missed the whole **forge** family --
+    including Miniforge, which docs/INSTALL.md and ``ipro_setup`` tell the user
+    to install and which is the only supported installer on Apple silicon. So
+    a user who followed the instructions exactly got "PyMOL did not resolve"
+    with the environment sitting in ``~/miniforge3/envs/ipro-agent``.
+
+    Worse, the doctor and the rotamer harvester kept SEPARATE lists, and the
+    doctor's had two roots the harvester lacked -- so the doctor reported PyMOL
+    as resolved for a run that then could not find it. One list now."""
+    from ipro_agent.doctor import conda_env_roots, env_interpreter
+    from ipro_agent import rotamers
+
+    src = (REPO / "ipro_agent" / "rotamers.py").read_text()
+    assert "conda_env_roots" in src, (
+        "the harvester must use the doctor's root list, not its own"
+    )
+    assert "miniconda3\" / \"envs\"" not in src, "a second list has grown back"
+
+    # Every forge layout is covered. (is_dir() filters the list on this
+    # machine, so the names are checked in the source of the function.)
+    import inspect
+
+    text = inspect.getsource(conda_env_roots)
+    for needed in ("miniforge3", "mambaforge", "micromamba", "MAMBA_ROOT_PREFIX",
+                   "CONDA_ENVS_PATH", "USERPROFILE", "miniconda3", "anaconda3"):
+        assert needed in text, f"{needed} is not searched"
+
+    # Windows and POSIX interpreter names both resolve.
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "posix" / "bin").mkdir(parents=True)
+    (tmp / "posix" / "bin" / "python").write_text("")
+    (tmp / "win" / "Scripts").mkdir(parents=True)
+    (tmp / "win" / "Scripts" / "python.exe").write_text("")
+    (tmp / "empty").mkdir()
+    assert env_interpreter(tmp / "posix") is not None
+    assert env_interpreter(tmp / "win") is not None
+    assert env_interpreter(tmp / "empty") is None
+
+
+def test_regression_a_pymol_launcher_is_not_an_interpreter():
+    """``shutil.which("pymol")`` was returned unchecked, with the comment "a
+    pymol launcher can run a script too". It cannot run one the way this
+    package invokes it: given ``-c "import pymol"`` the launcher treats the
+    code as a FILE to open, prints "Error: unsupported file type: import
+    pymol" -- and exits 0. So it was accepted as the harvest interpreter, and
+    the run then started a windowless PyMOL waiting for input until the whole
+    job timed out, with no rotamers and no error.
+
+    The probe now requires a sentinel on stdout, which only a real interpreter
+    with pymol importable can print."""
+    from ipro_agent import rotamers
+
+    src = (REPO / "ipro_agent" / "rotamers.py").read_text()
+    assert "IPRO_PYMOL_OK" in src, "the probe must require proof, not exit 0"
+    assert "return exe  # a pymol launcher can run a script too" not in src
+
+    # The first version of this fix tested for the sentinel as a SUBSTRING of
+    # stdout, which the launcher passes: it echoes its own argument back, and
+    # the argument contains the sentinel. This stand-in reproduces exactly
+    # that -- it exits 0 and echoes the command line, sentinel and all.
+    tmp = Path(tempfile.mkdtemp())
+    fake = tmp / "pymol"
+    fake.write_text(
+        "#!/bin/sh\necho \"Error: unsupported file type: $*\"\nexit 0\n"
+    )
+    fake.chmod(0o755)
+    keep = os.environ.get("IPRO_PYMOL_PYTHON")
+    try:
+        os.environ["IPRO_PYMOL_PYTHON"] = str(fake)
+        got = rotamers.find_pymol_python()
+        assert got != str(fake), (
+            "a program that exits 0 and echoes the probe back must be refused"
+        )
+    finally:
+        if keep is None:
+            os.environ.pop("IPRO_PYMOL_PYTHON", None)
+        else:
+            os.environ["IPRO_PYMOL_PYTHON"] = keep
+    assert 'lines[-1] == "IPRO_PYMOL_OK"' in src, (
+        "the sentinel must be the whole last line, or an echo passes"
+    )
+
+
+def test_regression_documents_and_specs_are_utf8_not_locale_encoded():
+    """Under an ASCII locale (``LC_ALL=C``, which is what a cron job, a
+    container and many MCP clients give a child process) every
+    ``read_text()``/``write_text()`` used the locale encoding. Measured: the
+    served ``ipro://skill`` came back with **210 U+FFFD replacement
+    characters** -- the operating manual, corrupted -- and writing an inline
+    spec containing any non-ASCII character failed outright."""
+    import ast
+
+    offenders = []
+    for path in sorted((REPO / "ipro_agent").rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            if fn.attr not in ("read_text", "write_text"):
+                continue
+            if not any(k.arg == "encoding" for k in node.keywords):
+                offenders.append(f"{path.name}:{node.lineno} {fn.attr}")
+    assert not offenders, (
+        "every file this package reads or writes is its own data and must be "
+        f"UTF-8: {offenders}"
+    )
+
+    # And the served manual really is byte-identical under that locale.
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import ipro_agent.mcp_server as m\n"
+        "g = m._resource_read('ipro://skill')['contents'][0]['text']\n"
+        "print(g.count('\\ufffd'))\n" % str(REPO)
+    )
+    env = dict(os.environ, LC_ALL="C", LANG="C", PYTHONUTF8="0",
+               PYTHONCOERCECLOCALE="0")
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, cwd=REPO, env=env, timeout=600)
+    assert p.returncode == 0, p.stderr[-300:]
+    assert p.stdout.strip() == "0", (
+        f"{p.stdout.strip()} replacement characters in the served manual"
+    )
+
+
+def test_regression_zero_is_a_mistake_not_an_unset_value():
+    """``--iterations 0`` and ``--max-minutes 0`` were tested for truthiness,
+    so both were silently dropped: measured, a run asked for 0 iterations ran
+    the spec's full 6. And ``max_minutes: 0`` in a spec meant *no limit* --
+    the opposite of what it says."""
+    from ipro_agent.config import LoopSettings
+
+    for kwargs, fragment in (
+        ({"iterations": 0}, "at least 1"),
+        ({"iterations": -3}, "at least 1"),
+        ({"max_minutes": 0}, "must be positive"),
+        ({"max_minutes": -1.0}, "must be positive"),
+        ({"iterations": "six"}, "whole number"),
+        ({"max_minutes": "soon"}, "number of minutes"),
+        ({"random_seed": "lucky"}, "whole number"),
+    ):
+        try:
+            LoopSettings(**kwargs)
+        except SpecError as exc:
+            assert fragment in str(exc), (kwargs, exc)
+        else:
+            raise AssertionError(f"{kwargs} must be refused")
+
+    assert LoopSettings(max_minutes=None).max_minutes is None
+    assert LoopSettings(iterations=1).iterations == 1
+
+    # Through the CLI, where the truthiness test actually was.
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "run",
+         str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml"),
+         "--run-dir", str(Path(tempfile.mkdtemp()) / "zero"), "--iterations", "0"],
+        capture_output=True, text=True, cwd=REPO, timeout=900,
+    )
+    assert p.returncode == 2, (p.returncode, p.stdout[-200:])
+    assert "at least 1" in p.stderr, p.stderr[-200:]

@@ -174,7 +174,7 @@ def _writable_dir(preferred: "Path | None" = None) -> Path:
         try:
             c.mkdir(parents=True, exist_ok=True)
             probe = c / ".write_probe"
-            probe.write_text("")
+            probe.write_text("", encoding="utf-8")
             probe.unlink()
             return c
         except OSError:
@@ -420,12 +420,23 @@ def tool_run(args: dict) -> dict:
 
     log = run_dir / "launch.log"
     with open(log, "wb") as fh:
+        # Its own session, so the run outlives this server and the client that
+        # asked for it -- the same reason SKILL.md recommends setsid.
+        # `start_new_session` is silently IGNORED on Windows (CPython names the
+        # parameter `unused_start_new_session` there), so the detach needs the
+        # creation flags instead. Untested on Windows -- see README's platform
+        # note -- but wrong-by-omission is worse than untested.
+        detach: dict = {}
+        if os.name == "nt":                                # pragma: no cover
+            detach["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            )
+        else:
+            detach["start_new_session"] = True
         proc = subprocess.Popen(
             cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            cwd=str(REPO_ROOT),
-            # Its own session, so the run outlives this server and the client
-            # that asked for it -- the same reason SKILL.md recommends setsid.
-            start_new_session=True,
+            cwd=str(REPO_ROOT), **detach,
         )
     # Did it survive the first moment? A spec the CLI refuses, or a bad
     # argument, kills the child instantly -- and "launched: true" then sends
@@ -439,7 +450,7 @@ def tool_run(args: dict) -> dict:
     if rc is not None and rc != 0:
         tail = ""
         try:
-            tail = log.read_text(errors="replace").strip()[-600:]
+            tail = log.read_text(encoding="utf-8", errors="replace").strip()[-600:]
         except OSError:
             pass
         raise ToolError(
@@ -1102,7 +1113,7 @@ def _resource_read(uri: str) -> dict:
         "contents": [{
             "uri": uri,
             "mimeType": spec["mimeType"],
-            "text": path.read_text(errors="replace"),
+            "text": path.read_text(encoding="utf-8", errors="replace"),
         }]
     }
 

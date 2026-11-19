@@ -822,7 +822,7 @@ class RotamerMILP:
         if lp_path:
             lp_path = Path(lp_path)
             lp_path.parent.mkdir(parents=True, exist_ok=True)
-            lp_path.write_text(lp_text)
+            lp_path.write_text(lp_text, encoding="utf-8")
 
         # A named solver must actually be tried. Previously any name that was
         # not "pulp" or "binary" fell through to the greedy heuristic, so every
@@ -1039,7 +1039,7 @@ class RotamerMILP:
         with tempfile.TemporaryDirectory(prefix="ipro_milp_") as td:
             lp = Path(td) / "model.lp"
             out = Path(td) / "model.sol"
-            lp.write_text(lp_text)
+            lp.write_text(lp_text, encoding="utf-8")
             if glpsol:
                 cmd = [glpsol, "--lp", str(lp), "-o", str(out)]
                 if time_limit:
@@ -1056,7 +1056,7 @@ class RotamerMILP:
                     f"{name} produced no solution file (rc={proc.returncode}): "
                     f"{(proc.stdout + proc.stderr)[-400:]}"
                 )
-            text = out.read_text()
+            text = out.read_text(encoding="utf-8")
             vals, status = (
                 _parse_glpk_solution(text) if name == "glpsol" else _parse_cbc_solution(text)
             )

@@ -162,7 +162,7 @@ def apply_design(
         json.dumps(
             {"pdb": str(pdb_in.resolve()), "out": str(pdb_out.resolve()), "jobs": jobs}
         )
-    )
+    , encoding="utf-8")
 
     # -I isolates the interpreter: the script must not pick up modules from the
     # current directory (the input PDB's directory is untrusted).
@@ -174,7 +174,7 @@ def apply_design(
             f"command: {' '.join(cmd)}\n"
             f"stderr tail: {(proc.stderr or '')[-800:]}"
         )
-    data = json.loads(res_path.read_text())
+    data = json.loads(res_path.read_text(encoding="utf-8"))
 
     applied = {k: (str(v[0]), int(v[1])) for k, v in data.get("applied", {}).items()}
     errors = dict(data.get("errors", {}))

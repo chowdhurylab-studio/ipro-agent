@@ -63,12 +63,29 @@ def find_pymol_python() -> str | None:
     import sys
 
     def works(py: str) -> bool:
+        """Can this really run our harvest script as a Python interpreter?
+
+        Exit status alone is not the question. A **pymol launcher** given
+        ``-c "import pymol"`` treats the string as a *file to open*, prints
+        "Error: unsupported file type: import pymol", and still exits 0 -- so
+        it was accepted as the harvest interpreter, and the run then started a
+        windowless PyMOL session that waited for input until the whole job
+        timed out, with no rotamers and no error. Require a sentinel on
+        stdout: only a Python interpreter with pymol importable can print it.
+        """
         try:
             p = subprocess.run(
-                [py, "-c", "import pymol"], capture_output=True, timeout=60,
+                [py, "-I", "-c", "import pymol; print('IPRO_PYMOL_OK')"],
+                capture_output=True, timeout=120, text=True,
                 env={**os.environ, "PYTHONNOUSERSITE": "1"},
             )
-            return p.returncode == 0
+            # Exact match on the LAST line, not a substring anywhere: the
+            # launcher echoes its argument back ("Error: unsupported file
+            # type: import pymol; print('IPRO_PYMOL_OK')"), so a substring
+            # test for the sentinel passes on the very program it is meant to
+            # reject. Only a real interpreter prints the sentinel alone.
+            lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+            return p.returncode == 0 and bool(lines) and lines[-1] == "IPRO_PYMOL_OK"
         except (OSError, subprocess.SubprocessError):
             return False
 
@@ -80,25 +97,31 @@ def find_pymol_python() -> str | None:
             return pinned
         log.warning("IPRO_PYMOL_PYTHON=%s cannot import pymol", pinned)
 
-    roots = [
-        Path(os.environ.get("CONDA_PREFIX", "/nonexistent")).parent / "envs",
-        Path.home() / "miniconda3" / "envs",
-        Path.home() / "anaconda3" / "envs",
-        Path("/opt/miniconda3/envs"),
-        Path("/opt/anaconda3/envs"),
-    ]
-    for root in roots:
-        if not root.is_dir():
-            continue
+    # One shared list with the doctor's, in ipro_agent.doctor: two separate
+    # lists had drifted apart, so the doctor searched roots the harvester did
+    # not and reported PyMOL as resolved for a run that could not find it.
+    from .doctor import conda_env_roots, env_interpreter
+
+    for root in conda_env_roots():
         # Prefer an env whose name mentions pymol: much faster than probing all.
-        envs = sorted(root.iterdir(), key=lambda p: (0 if "pymol" in p.name.lower() else 1, p.name))
+        envs = sorted(root.iterdir(),
+                      key=lambda p: (0 if "pymol" in p.name.lower() else 1, p.name))
         for env in envs:
-            py = env / "bin" / "python"
-            if py.exists() and works(str(py)):
+            py = env_interpreter(env)
+            if py is not None and works(str(py)):
                 return str(py)
+    # A `pymol` on PATH is a launcher, not an interpreter: it cannot run the
+    # harvest script the way this package invokes it. Probed, not assumed.
     exe = shutil.which("pymol")
+    if exe and works(exe):
+        return exe
     if exe:
-        return exe  # a pymol launcher can run a script too
+        log.warning(
+            "found a pymol launcher at %s, but it cannot run a Python script "
+            "(`-c` makes it try to OPEN the code as a file). Point "
+            "IPRO_PYMOL_PYTHON at the interpreter inside that installation "
+            "instead -- usually <prefix>/bin/python.", exe,
+        )
     return None
 
 
@@ -146,7 +169,7 @@ def harvest(
     tmp = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="ipro_rot_"))
     tmp.mkdir(parents=True, exist_ok=True)
     job_path, out_path = tmp / "rotamer_jobs.json", tmp / "rotamers.json"
-    job_path.write_text(json.dumps(job))
+    job_path.write_text(json.dumps(job), encoding="utf-8")
     # The loop passes the same workdir every iteration, so a previous
     # iteration's rotamers.json is sitting right there. Reading it when this
     # harvest fails returned the rotamers of the PREVIOUS backbone: measured
@@ -166,7 +189,7 @@ def harvest(
             f"command: {' '.join(cmd)}\n"
             f"stderr tail: {(proc.stderr or '')[-800:]}"
         )
-    data = json.loads(out_path.read_text())
+    data = json.loads(out_path.read_text(encoding="utf-8"))
     described = str(data.get("pdb", ""))
     if described and described != job["pdb"]:
         raise RotamerError(

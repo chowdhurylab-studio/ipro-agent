@@ -230,7 +230,7 @@ def scores_from_pdbqt(path: str | Path) -> list[float]:
     more stable source.
     """
     out: list[float] = []
-    for n, line in enumerate(Path(path).read_text().splitlines(), start=1):
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
         if not line.startswith("REMARK VINA RESULT:"):
             continue
         fields = line[len("REMARK VINA RESULT:"):].split()
@@ -290,7 +290,7 @@ def split_poses(pdbqt: str | Path, out_dir: str | Path, stem: str) -> list[Path]
     pdbqt = Path(pdbqt)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    lines = pdbqt.read_text().splitlines(True)
+    lines = pdbqt.read_text(encoding="utf-8").splitlines(True)
 
     blocks: list[list[str]] = []
     current: list[str] | None = None
@@ -310,7 +310,7 @@ def split_poses(pdbqt: str | Path, out_dir: str | Path, stem: str) -> list[Path]
     paths: list[Path] = []
     for i, block in enumerate(blocks, start=1):
         p = out_dir / f"{stem}_pose{i}.pdbqt"
-        p.write_text("".join(block))
+        p.write_text("".join(block), encoding="utf-8")
         paths.append(p)
     return paths
 

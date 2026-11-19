@@ -65,7 +65,7 @@ class IterationRecord:
 def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` so a concurrent reader sees old or new, never half."""
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    tmp.write_text(text)
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -120,7 +120,7 @@ class RunDir:
         if not self.state_path.exists():
             return {"status": Status.PENDING}
         try:
-            return json.loads(self.state_path.read_text())
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             # A torn read should not crash a status query; report it instead.
             return {"status": "unknown", "error": "state.json unreadable"}
@@ -143,7 +143,7 @@ class RunDir:
     def iterations(self) -> Iterator[IterationRecord]:
         if not self.iterations_path.exists():
             return
-        for line in self.iterations_path.read_text().splitlines():
+        for line in self.iterations_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue

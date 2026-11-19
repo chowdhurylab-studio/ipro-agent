@@ -161,7 +161,7 @@ def _read_pose_coords(path) -> "np.ndarray":
     import pathlib as _pl
 
     coords = []
-    for line in _pl.Path(path).read_text().splitlines():
+    for line in _pl.Path(path).read_text(encoding="utf-8").splitlines():
         if not line.startswith(("ATOM", "HETATM")):
             continue
         el = line[76:78].strip().upper() if len(line) >= 78 else ""
@@ -1866,7 +1866,7 @@ class IPROLoop:
                 )
         ensemble.sort(key=lambda d: d["score"])
         ensemble = ensemble[: spec.loop.ensemble_size]
-        (self.run.path / "ensemble" / "ensemble.json").write_text(json.dumps(ensemble, indent=2))
+        (self.run.path / "ensemble" / "ensemble.json").write_text(json.dumps(ensemble, indent=2), encoding="utf-8")
 
 
         best_mutations = {
@@ -1907,7 +1907,7 @@ class IPROLoop:
             "components": {k: float(v) for k, v in self.goal.components(best_ctx).items()},
             "structures": structure_files,
             "notes": self.notes,
-        }, indent=2))
+        }, indent=2), encoding="utf-8")
 
         self.run.update_state(
             status=Status.DONE,

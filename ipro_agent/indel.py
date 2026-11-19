@@ -163,7 +163,7 @@ def _seqres_span(structure, chain, first, last, numbers) -> str | None:
     if not path:
         return None
     try:
-        text = Path(path).read_text(errors="ignore")
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return None
 

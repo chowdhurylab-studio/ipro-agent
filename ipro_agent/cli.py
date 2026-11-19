@@ -275,7 +275,7 @@ def cmd_milp(args) -> int:
     lp = milp.to_lp()
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(lp)
+    out.write_text(lp, encoding="utf-8")
 
     payload = {
         "lp_file": str(out),
@@ -351,12 +351,21 @@ def cmd_score(args) -> int:
 
 def cmd_run(args) -> int:
     spec = _load(args.spec)
-    if args.iterations:
+    # `is not None`, not truthiness: `--iterations 0` and `--max-minutes 0`
+    # were silently ignored, so a request for a zero-length run quietly became
+    # the spec's full run. Zero is now refused by LoopSettings, which is the
+    # honest answer to a nonsensical budget.
+    if args.iterations is not None:
         spec.loop.iterations = args.iterations
     if args.seed is not None:
         spec.loop.random_seed = args.seed
-    if args.max_minutes:
+    if args.max_minutes is not None:
         spec.loop.max_minutes = args.max_minutes
+    try:
+        spec.loop.__post_init__()      # re-validate the overrides
+    except SpecError as exc:
+        print(f"spec error: {exc}", file=sys.stderr)
+        return 2
 
     from .loop import run_design
 

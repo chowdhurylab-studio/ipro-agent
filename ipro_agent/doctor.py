@@ -79,26 +79,94 @@ def _module_in(python: str, module: str, timeout: float = 120.0) -> tuple[bool, 
     return rc == 0, out.splitlines()[-1] if (rc == 0 and out) else out
 
 
-def find_conda_envs() -> list[Path]:
-    """Interpreters worth probing for PyMOL/PyRosetta, newest-looking first."""
-    cands: list[Path] = []
-    for root in (
-        Path(os.environ.get("CONDA_PREFIX", "")).parent / "envs" if os.environ.get("CONDA_PREFIX") else None,
-        Path.home() / "miniconda3" / "envs",
-        Path.home() / "anaconda3" / "envs",
+def conda_env_roots() -> list[Path]:
+    """Every directory that plausibly holds conda/mamba environments.
+
+    The old list had four entries and missed the **forge** family entirely --
+    including Miniforge, which is what ``docs/INSTALL.md`` and ``ipro_setup``
+    tell the user to install, and which is the only supported installer on
+    Apple silicon. So the tool could not find the environment it had just
+    asked for: a user who followed the instructions exactly got "PyMOL did not
+    resolve" with the env sitting in ``~/miniforge3/envs/ipro-agent``.
+
+    Kept here, in the one module that imports nothing from the package, so the
+    doctor and the rotamer harvester cannot drift apart (they had two separate
+    lists, and the doctor's had two roots the harvester's lacked -- so doctor
+    said OK and the run then failed).
+    """
+    roots: list[Path] = []
+    home = Path.home()
+    for var in ("CONDA_PREFIX", "MAMBA_ROOT_PREFIX"):
+        if os.environ.get(var):
+            base = Path(os.environ[var])
+            roots += [base / "envs", base.parent / "envs"]
+    for var in ("CONDA_ENVS_PATH", "CONDA_ENVS_DIRS"):
+        for part in (os.environ.get(var) or "").split(os.pathsep):
+            if part.strip():
+                roots.append(Path(part.strip()))
+    roots += [
+        home / "miniforge3" / "envs",
+        home / "mambaforge" / "envs",
+        home / "miniforge" / "envs",
+        home / "micromamba" / "envs",
+        home / "miniconda3" / "envs",
+        home / "anaconda3" / "envs",
+        home / "mamba" / "envs",
+        Path("/opt/miniforge3/envs"),
         Path("/opt/miniconda3/envs"),
         Path("/opt/anaconda3/envs"),
         Path("/opt/homebrew/Caskroom/miniconda/base/envs"),
-    ):
-        if root and root.is_dir():
-            for env in sorted(root.iterdir()):
-                py = env / "bin" / "python"
-                if py.exists():
-                    cands.append(py)
-    for base in (Path("/opt/miniconda3/bin/python"), Path("/opt/anaconda3/bin/python")):
+        Path("/opt/homebrew/Caskroom/miniforge/base/envs"),
+        Path("/usr/share/miniconda/envs"),
+        Path("/usr/local/miniconda3/envs"),
+    ]
+    # Windows layouts, for the same reason: cheap to list, and a wrong guess
+    # costs nothing because every root is checked for existence.
+    profile = os.environ.get("USERPROFILE")
+    if profile:
+        for name in ("miniforge3", "mambaforge", "miniconda3", "anaconda3"):
+            roots.append(Path(profile) / name / "envs")
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        if r.is_dir():
+            out.append(r)
+    return out
+
+
+def env_interpreter(env: Path) -> "Path | None":
+    """The python inside one environment directory, POSIX or Windows."""
+    for rel in (("bin", "python"), ("bin", "python3"),
+                ("Scripts", "python.exe"), ("python.exe",)):
+        py = env.joinpath(*rel)
+        if py.exists():
+            return py
+    return None
+
+
+def find_conda_envs() -> list[Path]:
+    """Interpreters worth probing for PyMOL/PyRosetta, newest-looking first."""
+    cands: list[Path] = []
+    for root in conda_env_roots():
+        for env in sorted(root.iterdir()):
+            py = env_interpreter(env)
+            if py is not None:
+                cands.append(py)
+    for base in (Path("/opt/miniconda3/bin/python"),
+                 Path("/opt/anaconda3/bin/python"),
+                 Path.home() / "miniforge3" / "bin" / "python"):
         if base.exists():
             cands.append(base)
     return cands
+
+
+#: Hardcoded, not imported from the package: the doctor must still work when
+#: the package cannot be imported at all, which is the case this check is for.
+PYTHON_FLOOR = (3, 10)
 
 
 def check() -> dict:
@@ -301,6 +369,20 @@ def check() -> dict:
     report["missing_required"] = [
         k.split(":", 1)[1] for k in required_py if not C[k]["available"]
     ]
+    # The interpreter is a requirement too, and it was not checked. On Python
+    # 3.9 with all three modules installed, this reported can_run True,
+    # can_design True, missing_required [] and exited 0 -- and `--require
+    # pymol`, the mandatory gate, also passed -- for an interpreter on which
+    # `import ipro_agent` raises straight away (the package floor is 3.10, and
+    # the code uses 3.10 syntax). The green light was the worst possible
+    # answer there: it sends the user into a run instead of into an upgrade.
+    report["python_ok"] = sys.version_info[:2] >= PYTHON_FLOOR
+    report["python_floor"] = ".".join(str(n) for n in PYTHON_FLOOR)
+    if not report["python_ok"]:
+        report["missing_required"].append(
+            f"python>={report['python_floor']} (this is "
+            f"{'.'.join(str(n) for n in sys.version_info[:3])})"
+        )
     report["can_run"] = not report["missing_required"]
     report["can_design"] = bool(report["can_run"] and pymol["available"])
     report["degraded"] = [
@@ -368,9 +450,28 @@ def main() -> int:
             print("  mutagenesis wizard, so `run` cannot produce a design. validate,")
             print("  positions, milp, score and goals still work.")
             print("  conda env create -f environment.yml   (pymol-open-source is conda-only)")
+        if not rep.get("python_ok", True):
+            print(
+                f"\nPYTHON TOO OLD: this is {rep['python']}, and ipro-agent "
+                f"needs {rep['python_floor']} or newer -- `import ipro_agent` "
+                f"fails on anything older, whatever else is installed. Create "
+                f"the environment (conda env create -f environment.yml) or use "
+                f"a newer interpreter."
+            )
         print(f"\ncan run:    {rep['can_run']}")
-        print(f"can design: {rep['can_design']}"
-              + ("" if rep["can_design"] else "   <- no PyMOL, see above"))
+        # The suffix used to say "no PyMOL" whatever the real cause: with
+        # numpy, Biopython and PyYAML all missing but PyMOL resolved, it still
+        # blamed PyMOL. Name what is actually missing.
+        why = ""
+        if not rep["can_design"]:
+            if not rep.get("python_ok", True):
+                why = "   <- Python too old, see above"
+            elif rep["missing_required"]:
+                why = ("   <- missing required Python module(s): "
+                       + ", ".join(rep["missing_required"]))
+            elif not rep["checks"]["pymol"]["available"]:
+                why = "   <- no PyMOL, see above"
+        print(f"can design: {rep['can_design']}" + why)
 
     missing = [r for r in args.require if not rep["checks"].get(r, {}).get("available")]
     if missing:

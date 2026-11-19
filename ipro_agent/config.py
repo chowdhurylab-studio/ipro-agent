@@ -753,6 +753,45 @@ class LoopSettings:
             lo, hi = getattr(self, attr)
             if lo < 1 or hi < lo:
                 raise SpecError(f"{attr} must be (lo<=hi) with lo>=1; got {(lo, hi)}")
+        # Zero is a mistake, not "unset". `--iterations 0` and
+        # `--max-minutes 0` were both silently dropped (the CLI tested
+        # truthiness), so a user asking for a zero-length run got the spec's
+        # full 6 iterations instead, and `max_minutes: 0` in a spec meant NO
+        # limit -- the opposite of what it says.
+        try:
+            self.iterations = int(self.iterations)
+        except (TypeError, ValueError) as exc:
+            raise SpecError(
+                f"loop.iterations must be a whole number; got "
+                f"{self.iterations!r}"
+            ) from exc
+        if self.iterations < 1:
+            raise SpecError(
+                f"loop.iterations is {self.iterations}; a run needs at least 1. "
+                f"(Zero is not 'unlimited' and not 'default' -- say what you "
+                f"mean, or leave the key out.)"
+            )
+        if self.max_minutes is not None:
+            try:
+                self.max_minutes = float(self.max_minutes)
+            except (TypeError, ValueError) as exc:
+                raise SpecError(
+                    f"loop.max_minutes must be a number of minutes or null; "
+                    f"got {self.max_minutes!r}"
+                ) from exc
+            if self.max_minutes <= 0:
+                raise SpecError(
+                    f"loop.max_minutes is {self.max_minutes}; a budget must be "
+                    f"positive. Use null (or leave the key out) for no limit."
+                )
+        if self.random_seed is not None:
+            try:
+                self.random_seed = int(self.random_seed)
+            except (TypeError, ValueError) as exc:
+                raise SpecError(
+                    f"loop.random_seed must be a whole number or null; got "
+                    f"{self.random_seed!r}"
+                ) from exc
         if self.temperature_k <= 0:
             raise SpecError("temperature_k must be positive")
         if not 0.0 <= self.greedy_fraction <= 1.0:
@@ -1072,7 +1111,7 @@ class DesignSpec:
     def load(cls, path: str | Path) -> "DesignSpec":
         """Load from YAML (preferred) or JSON, chosen by content, not suffix."""
         p = Path(path).expanduser()
-        text = p.read_text()
+        text = p.read_text(encoding="utf-8")
         data: Any
         if p.suffix.lower() in (".json",):
             data = json.loads(text)

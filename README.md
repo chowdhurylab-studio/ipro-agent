@@ -201,7 +201,17 @@ Genuinely optional — each resolved at run time with a documented fallback:
 | **AutoDock Vina** | re-docking partners after mutation | input poses are kept |
 | **MILP solver** (CPLEX, Gurobi, CBC, HiGHS, GLPK) | proving the optimal packing | a heuristic that does not prove optimality |
 
-`scripts/doctor.py` reports what resolved and what a run will actually use.
+`scripts/doctor.py` reports what resolved and what a run will actually use. It
+also refuses an interpreter below the floor: on Python 3.9 with every
+dependency installed it reports `can_run: false` and exits 1, because
+`import ipro_agent` fails there whatever else is present.
+
+**Platforms.** Developed and tested on macOS (Apple silicon) and used on Linux.
+**Windows is untested** — the detached-run path has a Windows branch and the
+interpreter search looks in `Scripts/python.exe` and `%USERPROFILE%`, but
+nothing here has ever run on Windows, PyMOL's conda package is the only
+supported route to it, and a few paths assume a POSIX shell. On Windows use WSL
+2, where the Linux instructions apply unchanged.
 
 ## Status and honesty
 
