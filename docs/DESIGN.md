@@ -1413,3 +1413,30 @@ so a design is not that call); `notifications/cancelled` is accepted and cannot
 interrupt an in-flight subprocess; inline-spec temp directories are not cleaned
 up; `environment.yml` pins nothing, so what a stranger resolves is what
 conda-forge serves that day (§7g measured one such resolution).
+
+---
+
+## 7i. What the machine looks like after this session (2026-11-18)
+
+PyRosetta was removed from this machine after the full-mode verification in
+§7h. `/opt/miniconda3/envs/ipro_rosetta` is in the recoverable batch
+`~/.recoverable-deletes/20261118-205843`, with the receipt and the full audit
+in `~/Documents/storage-audits/ipro-agent-session-cleanup-20261118/`.
+
+So **full mode is unexercised on this machine again**, and reinstating it is
+not free: the install recipe in `docs/INSTALL.md` still works, but it is a
+fresh 1.53 GB download and the `quarterly` find-links window holds only two
+releases — build `2026.29+releasequarterly.80a0635615`, the one §7e and §7h
+measured against, may no longer be served. The measurements stand; a
+re-measurement against that exact build may not be possible.
+
+What survives the removal, and is what a reader should rely on: the §7h numbers
+(mean displacement 1.20 Å, centroid shift 0.83 Å, RMSD after superposition
+0.98 Å, 326 atoms in and out), the two writer defects that run exposed, and the
+regression tests, which use a counting stand-in backend and need no PyRosetta.
+
+The provenance behind the public claims moved into the repository rather than
+staying in a temporary directory — `docs/provenance/` holds both audit reports,
+the independence-check evidence and the `tour.gif` capture, and
+`scripts/measurements/` holds the two scripts behind §7h numbers that have no
+regression test of their own.
