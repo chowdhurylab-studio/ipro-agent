@@ -36,9 +36,11 @@ requirement. Protocol: MCP `tools/list` + `tools/call`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -153,6 +155,66 @@ def _resolve_spec(spec: str, keep: list[Path]) -> str:
     return str(tmp)
 
 
+@contextlib.contextmanager
+def _spec_scratch():
+    """Hold the temp files an inline spec needs, and delete them afterwards.
+
+    Inline specs were written to ``tempfile.mkdtemp()`` and never removed. The
+    list they were collected into was called ``keep`` and nothing ever read it.
+    Measured by driving the server from the official MCP Python SDK under a GUI
+    client's environment, where there is no ``TMPDIR`` and ``gettempdir()`` is
+    therefore the shared ``/tmp``: five ``ipro_validate`` calls with an inline
+    spec took ``/tmp/ipro_mcp_spec_*`` from 7 directories to 12, one per call,
+    each holding a 0o644 ``spec.yaml``. All five of those calls *failed*, which
+    is the part that matters -- an agent iterating on a spec it cannot get right
+    leaks fastest, and the spec's text is the user's unpublished design problem
+    sitting in a world-readable directory.
+
+    Only the synchronous tools can use this: ``ipro_run``'s child reads the
+    spec after the call returns, so it moves the file into the run directory
+    instead (see ``tool_run``).
+    """
+    keep: list[Path] = []
+    try:
+        yield keep
+    finally:
+        for path in keep:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+
+def _client_path(value: Any, what: str, must_exist: bool = False) -> str:
+    """Resolve a path the *client* gave against the *client's* directory.
+
+    A relative path meant two different things depending on which tool received
+    it. ``_resolve_spec`` resolved against ``Path.cwd()`` (the server's working
+    directory, which an MCP config sets to the client's checkout), while
+    ``tool_inspect`` and ``tool_fetch`` handed the string straight to ``_cli``,
+    whose child runs with ``cwd=REPO_ROOT``. Measured with the server started
+    from ``cwd=/``, as Claude Desktop starts one when its config omits ``cwd``:
+    ``ipro_validate {"spec": "examples/ompf_pore/spec_smoke.yaml"}`` refused
+    with "looked for /examples/ompf_pore/spec_smoke.yaml", while
+    ``ipro_inspect_structure {"structure": "examples/ompf_pore/2omf_A.pdb"}``
+    *succeeded* and reported 340 residues -- answering about a file inside this
+    repository that the client had never named. A wrong structure that reports
+    cleanly is the failure mode section 7 is about: every position, native
+    residue and energy downstream of it belongs to the wrong molecule.
+    """
+    text = str(value).strip()
+    if not text:
+        raise ToolError(f"`{what}` is empty")
+    p = Path(text).expanduser()
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
+    if must_exist and not p.exists():
+        raise ToolError(
+            f"{what} not found: {text}\n"
+            f"(looked for {p}; the server's working directory is {Path.cwd()})\n"
+            "Pass an absolute path, or set the server's `cwd` to the directory "
+            "those relative paths belong to."
+        )
+    return str(p)
+
+
 def _writable_dir(preferred: "Path | None" = None) -> Path:
     """A directory this process may actually write to.
 
@@ -184,6 +246,16 @@ def _writable_dir(preferred: "Path | None" = None) -> Path:
 
 class ToolError(RuntimeError):
     """A tool failed in a way the agent should read, not a crash."""
+
+
+def _given(value: Any) -> bool:
+    """Was this argument actually supplied?
+
+    ``None`` is not a value: a client that sends ``{"structure": null}`` has
+    given nothing, and ``str(None)`` is the four-character string "None",
+    which every truthiness test in sight would accept.
+    """
+    return value is not None and str(value).strip() != ""
 
 
 # ---------------------------------------------------------------------------
@@ -320,44 +392,47 @@ def tool_goals(_: dict) -> dict:
 
 
 def tool_validate(args: dict) -> dict:
-    keep: list[Path] = []
-    return _cli(["validate", _resolve_spec(args["spec"], keep)])
+    with _spec_scratch() as keep:
+        return _cli(["validate", _resolve_spec(args["spec"], keep)])
 
 
 def tool_positions(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["positions", _resolve_spec(args["spec"], keep)]
-    if args.get("near"):
-        cmd += ["--near", str(args["near"])]
-    if args.get("cutoff") is not None:
-        cmd += ["--cutoff", str(args["cutoff"])]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["positions", _resolve_spec(args["spec"], keep)]
+        if args.get("near"):
+            cmd += ["--near", str(args["near"])]
+        if args.get("cutoff") is not None:
+            cmd += ["--cutoff", str(args["cutoff"])]
+        return _cli(cmd)
 
 
 def tool_score(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["score", _resolve_spec(args["spec"], keep)]
-    # `score` writes a small run directory for its log. Defaulted under
-    # REPO_ROOT, which is site-packages in a pip-installed copy, that wrote
-    # into the installed package tree -- and failed outright on a read-only
-    # install, with a PermissionError traceback chopped mid-line.
-    cmd += ["--run-dir", str(_writable_dir(args.get("run_dir")) / "score")]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["score", _resolve_spec(args["spec"], keep)]
+        # `score` writes a small run directory for its log. Defaulted under
+        # REPO_ROOT, which is site-packages in a pip-installed copy, that wrote
+        # into the installed package tree -- and failed outright on a read-only
+        # install, with a PermissionError traceback chopped mid-line.
+        cmd += ["--run-dir", str(_writable_dir(args.get("run_dir")) / "score")]
+        return _cli(cmd)
 
 
 def tool_milp(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["milp", _resolve_spec(args["spec"], keep)]
-    out = args.get("out")
-    if out:
-        # Absolute, because the child runs with cwd=REPO_ROOT: a relative
-        # `out` landed inside the installed package and the reported path was
-        # relative, so the agent could not find the file it had just asked for.
-        q = Path(str(out)).expanduser()
-        if not q.is_absolute():
-            q = _writable_dir() / q.name
-        cmd += ["-o", str(q)]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["milp", _resolve_spec(args["spec"], keep)]
+        out = args.get("out")
+        if out:
+            # Absolute, because the child runs with cwd=REPO_ROOT: a relative
+            # `out` landed inside the installed package and the reported path
+            # was relative, so the agent could not find the file it had just
+            # asked for. An output rather than an input, so it goes to a
+            # directory this process is known to be able to write to, not to
+            # wherever the client happens to be standing.
+            q = Path(str(out)).expanduser()
+            if not q.is_absolute():
+                q = _writable_dir() / q.name
+            cmd += ["-o", str(q)]
+        return _cli(cmd)
 
 
 def tool_run(args: dict) -> dict:
@@ -382,16 +457,38 @@ def tool_run(args: dict) -> dict:
 
     keep: list[Path] = []
     spec = _resolve_spec(args["spec"], keep)
-    run_dir = Path(args.get("run_dir") or (_writable_dir() / "runs" / _run_id(spec)))
-    run_dir = run_dir.expanduser()
-    if not run_dir.is_absolute():
-        run_dir = (Path.cwd() / run_dir).resolve()
-    if run_dir.exists() and any(run_dir.iterdir()):
-        raise ToolError(
-            f"run directory is not empty: {run_dir}\n"
-            "Pass a fresh run_dir, or poll the existing one with ipro_status."
-        )
-    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir = Path(args.get("run_dir") or (_writable_dir() / "runs" / _run_id(spec)))
+        run_dir = run_dir.expanduser()
+        if not run_dir.is_absolute():
+            run_dir = (Path.cwd() / run_dir).resolve()
+        if run_dir.exists() and any(run_dir.iterdir()):
+            raise ToolError(
+                f"run directory is not empty: {run_dir}\n"
+                "Pass a fresh run_dir, or poll the existing one with ipro_status."
+            )
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        # A refusal here (a used run directory, an unwritable one) must not
+        # leave the inline spec behind in /tmp either.
+        for path in keep:
+            shutil.rmtree(path.parent, ignore_errors=True)
+        raise
+
+    # An inline spec moves into the run directory rather than staying in a temp
+    # directory nobody owns. The child outlives this call, so the file cannot
+    # simply be deleted on the way out as it is for the synchronous tools
+    # (`_spec_scratch`); keeping it beside the run it produced also means the
+    # run records the spec that made it, which an inline spec otherwise leaves
+    # nowhere. `run` only refuses a directory that already holds state.json,
+    # iterations.jsonl, best or ensemble, so a spec.yaml here is not mistaken
+    # for a previous run -- launch.log has been written here all along.
+    if keep:
+        landed = run_dir / "spec.yaml"
+        shutil.move(str(keep[0]), str(landed))
+        shutil.rmtree(keep[0].parent, ignore_errors=True)
+        keep.clear()
+        spec = str(landed)
 
     cmd = [sys.executable, "-m", "ipro_agent", "run", spec, "--run-dir", str(run_dir)]
     # Coerced, not stringified. The schema says `iterations` is an integer, but
@@ -537,7 +634,7 @@ def tool_inspect(args: dict) -> dict:
     agent guesses, and a guess here designs a different residue without
     anything noticing (docs/DESIGN.md section 7b, defect 14).
     """
-    cmd = ["inspect", str(args["structure"])]
+    cmd = ["inspect", _client_path(args["structure"], "structure", must_exist=True)]
     for ch in args.get("chains") or []:
         cmd += ["--chain", str(ch)]
     if args.get("positions"):
@@ -557,7 +654,12 @@ def tool_fetch(args: dict) -> dict:
     """
     cmd = ["fetch", str(args["pdb_id"])]
     if args.get("out"):
-        cmd += ["-o", str(args["out"])]
+        # The same one policy as `structure`: where the client is standing,
+        # not where this package happens to live. A relative `out` used to be
+        # resolved by the child against REPO_ROOT, so a download the agent
+        # asked for "here" landed in the repository (or in site-packages) and
+        # the path it was told to use next did not exist.
+        cmd += ["-o", _client_path(args["out"], "out")]
     for ch in args.get("chains") or []:
         cmd += ["--chain", str(ch)]
     if args.get("force"):
@@ -692,9 +794,16 @@ def _mcp_config_for_new_env(manager: str) -> dict:
                      candidates[0])
     return {
         "note": (
-            "Put this in the client's MCP config and restart it. `cwd` matters: "
-            "it is how the server finds the documents it serves as resources "
-            "(ipro://skill and the rest), which do not ship inside the package."
+            "Put this in the client's MCP config and restart it. `cwd` matters "
+            "for two reasons, both measured: in a pip-installed copy it is how "
+            "the server finds the documents it serves as resources (ipro://skill "
+            "and the rest), which do not ship inside the package -- started "
+            "from elsewhere, an installed copy lists all 8 and serves none; and "
+            "a relative path in any later call (`spec`, `structure`) is "
+            "resolved against it. Run from a clone rather than an install, "
+            "`-m ipro_agent.mcp_server` additionally needs `cwd` to be that "
+            "clone, or the module cannot be imported at all and the client "
+            "sees only a server that disconnected."
         ),
         "python": str(predicted),
         "config": {
@@ -932,7 +1041,7 @@ _BY_NAME = {t["name"]: t for t in TOOLS}
 # Resources: the documents, so a remote agent is not worse informed
 # ---------------------------------------------------------------------------
 #
-# Eight tool descriptions cannot carry the operating manual -- the degraded
+# Eleven tool descriptions cannot carry the operating manual -- the degraded
 # modes, the reporting rules, the validation checklist. An agent that clones the
 # repo reads SKILL.md and gets all of it; an agent on the other end of this
 # server used to get none of it. Exposing the documents as resources closes that
@@ -1161,11 +1270,39 @@ PROMPTS: list[dict[str, Any]] = [
 ]
 
 _PROMPT_NAMES = {p["name"] for p in PROMPTS}
+_PROMPT_BY_NAME = {p["name"]: p for p in PROMPTS}
 
 
 def _prompt_get(name: str, args: dict) -> dict:
-    if name not in _PROMPT_NAMES:
+    prompt = _PROMPT_BY_NAME.get(name)
+    if prompt is None:
         raise ToolError(f"unknown prompt {name!r}; have {sorted(_PROMPT_NAMES)}")
+
+    # `required: true` was decorative, the same way the tool schemas were before
+    # section 7h. Measured by driving the server from the official MCP Python
+    # SDK and from the MCP Inspector CLI: `prompts/get ipro-redesign` with no
+    # arguments at all returned a complete 2167-character instruction, whose
+    # step 3 told the model to fetch "(structure)" from the RCSB and whose step
+    # 6 told it to put "(goal)" in `goal_statement` "in my own words". A client
+    # that surfaces prompts as slash commands without collecting their
+    # arguments -- which the spec allows, because the server is supposed to
+    # refuse -- therefore starts a design against a placeholder, and the first
+    # thing this repo's own manual insists on is that a position or a goal must
+    # never be invented on the user's behalf.
+    missing = [
+        a["name"] for a in (prompt.get("arguments") or [])
+        if a.get("required") and not _given(args.get(a["name"]))
+    ]
+    if missing:
+        detail = "; ".join(
+            f"{a['name']}: {a.get('description', '')}".strip(": ")
+            for a in (prompt.get("arguments") or []) if a["name"] in missing
+        )
+        raise ToolError(
+            f"prompt {name!r} needs "
+            f"{', '.join(repr(m) for m in missing)}, which "
+            f"{'was' if len(missing) == 1 else 'were'} not given. {detail}"
+        )
 
     if name == "ipro-check-setup":
         text = (

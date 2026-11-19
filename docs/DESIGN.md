@@ -1413,3 +1413,189 @@ so a design is not that call); `notifications/cancelled` is accepted and cannot
 interrupt an in-flight subprocess; inline-spec temp directories are not cleaned
 up; `environment.yml` pins nothing, so what a stranger resolves is what
 conda-forge serves that day (§7g measured one such resolution).
+
+---
+
+## 7i. The MCP server under real clients, and a pass over the prose (2026-11-18)
+
+Two pieces of work, recorded together because they were done together: the MCP
+server was driven by **real MCP clients for the first time**, and the six
+reader-facing documents were copy-edited for voice. No claim or recorded number
+in §7–§7h was altered; this section is where the new measurements live.
+
+### The clients, and what they are worth
+
+Until now the server had only ever been driven by the hand-written JSON-RPC in
+`tests/test_ipro.py`, always with `cwd` set to the repository. Three real
+clients were used:
+
+| client | what it is good for |
+|---|---|
+| the official **MCP Python SDK 2.3.0** (`pip install mcp`) | the reference implementation: every server reply is validated by its pydantic models, so a shape this repo invented would raise rather than be tolerated |
+| the official **MCP Inspector CLI** (`npx -y @modelcontextprotocol/inspector --cli`) | a second, TypeScript implementation; agreement between the two separates "the spec" from "one library's reading of it" |
+| **Claude Desktop's launch conditions**, reproduced | `env -i` with only `HOME` and `PATH=/usr/bin:/bin`, `cwd` at `/` and at a temp directory, SIGTERM and SIGKILL mid-call, stdin closed mid-call, `LC_ALL=C`. This is where stdio servers actually fail, and nothing under `~/Library` was touched |
+
+Cursor is not installed on this machine, so it was not driven. It speaks the
+same stdio shape as the two clients above; that is a reason to expect it to
+work, not a measurement that it does.
+
+**Three defects, each now with a regression test.** All three were measured on
+the previous commit, fixed, and re-measured:
+
+| # | Defect | Measured |
+|---|---|---|
+| 1 | **A prompt's `required: true` was decorative**, exactly as the tool schemas were before §7h. | `prompts/get ipro-redesign` with **no arguments at all** returned a complete **2287-character** design instruction, and rc=0 from both clients. Step 3 of it told the model to fetch `(structure)` from the RCSB and step 6 to put `(goal)` in `goal_statement` "in my own words" — the two things SKILL.md is most insistent must never be invented for the user. A client may surface a prompt without collecting its arguments, because the server is the thing that is supposed to refuse. Now refused, naming the arguments and quoting their own descriptions; an explicit `null` counts as absent, since `str(None)` is the four-character word "None". |
+| 2 | **One relative path meant two different directories, depending on which tool received it.** `_resolve_spec` resolved against `Path.cwd()`, the directory an MCP config gives the server; `tool_inspect` and `tool_fetch` passed the string to a child running with `cwd=REPO_ROOT`. | With the server started from a temp directory, `ipro_validate {"spec": "examples/ompf_pore/spec_smoke.yaml"}` refused ("looked for /…/spec_smoke.yaml"), while `ipro_inspect_structure {"structure": "examples/ompf_pore/2omf_A.pdb"}` **succeeded**: 340 residues of chain A, A18 reported as VAL. That is this repository's own copy of OmpF, answering for a path the client never named — and every position, native residue and energy downstream of it then belongs to the wrong molecule, with nothing in the reply to say so. One policy now (`_client_path`): a relative path belongs to the client's directory, and a missing input says where it looked. |
+| 3 | **An inline spec wrote a temp directory that nothing removed.** The list they were collected into was named `keep`, and no caller read it. | Under a GUI client's environment, which has no `TMPDIR`, `tempfile.gettempdir()` is the shared `/tmp`: three `ipro_validate` calls with an inline spec left **3** `ipro_mcp_spec_*` directories (measured 0 → 3; five calls took a populated `/tmp` from 7 to 12), each holding a 0o644 `spec.yaml`. Every one of those calls returned `isError`, which is the half that matters: an agent iterating on a spec it cannot get right leaks fastest, and the leaked text is the user's unpublished design problem in a world-readable directory. The synchronous tools now delete the directory on the way out, including when they refuse. `ipro_run` cannot — its child reads the spec after the call returns — so the spec **moves into the run directory**, where it also records what the run was asked to do. |
+
+### What the clients could not break
+
+Worth recording, because each was a plausible failure before it was checked. A
+full SDK session (`initialize`, `tools/list`, `resources/list`,
+`resources/templates/list`, `prompts/list`, `prompts/get` ×3, `ping`, eleven
+`tools/call`) produced **no pydantic validation error and no dropped field**:
+protocol `2025-06-18` negotiated, `serverInfo` intact, the 869-character
+`instructions` intact, 11 tools, 8 resources, 0 resource templates, 3 prompts.
+`structuredContent` is absent on every call, which is consistent rather than
+broken: no tool declares an `outputSchema`. All 11 `inputSchema`s pass
+`jsonschema.check_schema` with a generated sample argument object, so a strict
+client would reject none of them. A client announcing a protocol version from
+the future (`2025-11-25`) was answered with this server's newest and the session
+ran. SIGTERM 1.2 s into a call: the server exits (`rc=-15`) with its one child
+and **0 orphans** 3 s later. Stdin closed mid-call: the in-flight call finishes,
+the reply is written into the closed pipe, exit 0. Under `LC_ALL=C` with a
+non-ASCII inline spec: 3 stdout lines, **0 non-JSON lines, 0 stderr bytes**, and
+the served operating manual byte-identical to the file on disk with **0** U+FFFD
+(§7h's encoding fix holds under a real client's environment).
+
+The error channel is split and both clients handled both halves: an unknown
+tool is a JSON-RPC `-32602` (the SDK raises `MCPError`, the Inspector reports
+`tool_not_found` without even reaching the server, since it pre-checks
+`tools/list`), while a missing or wrong-typed argument is `isError` content the
+model can read and correct. That split is deliberate (§7h) and is left as it is.
+
+### The install contract, restated because the server stated it wrongly
+
+A clone that has not been pip-installed, started with no `cwd`, **cannot start
+at all**: `python -m ipro_agent.mcp_server` from `/` fails with
+`ModuleNotFoundError: No module named 'ipro_agent'`, rc=1, **zero bytes on
+stdout**, and a GUI client shows only a server that disconnected. The `-m` form
+works in a checkout because the working directory is on `sys.path`.
+
+`_mcp_config_for_new_env` said `cwd` "is how the server finds the documents it
+serves as resources", which is true only of an installed copy. Measured with
+`pip install --no-deps .` into a fresh virtualenv: started from `/`, all 8
+resources are listed and all 8 are flagged `[NOT in this installation]`, and
+`resources/read ipro://skill` returns the fetch-it-from-GitHub error rather than
+the manual; started from the clone, 8 of 8 are served and `ipro://skill` is
+30 587 characters. Run from a *clone*, `REPO_ROOT` comes from `__file__` and the
+documents resolve wherever the server was started. So `cwd` matters for three
+different reasons, and the note now gives all three: the import in a clone, the
+documents in an install, and every relative path in either.
+
+### Measured and left alone
+
+* **Head-of-line blocking has a number now.** With the SDK's own
+  `read_timeout_seconds=2.0` against `ipro_doctor`, the client raised at 2.0 s
+  and the *next* `ping` took **0.85 s** instead of ~0 ms, because the loop is
+  still finishing the call it is in. The single-threaded loop is deliberate
+  (§7g) and `ipro_run` exists precisely so a design is never that call, but a
+  client's health check waits for whatever is in flight.
+* **A reply to a request the client had already cancelled.** After
+  `notifications/cancelled` for request 2, the server still wrote
+  `{"id": 2, "result": …}`: the notification is sitting in the pipe until the
+  call returns, so nothing could have read it in time. SDK 2.3.0 drops the late
+  reply silently. Fixing this properly means a reader thread, which is the same
+  change as fixing the blocking loop.
+* **`ipro_doctor` costs seconds** (1.8 s warm, 5.5 s on a cold cache) while the
+  server's own `instructions` say to call it first. A client with a sub-6 s
+  tool timeout will fail the server's first instruction.
+* **Absolute paths from the operator's machine reach the client** on ordinary
+  errors: `ipro_status {"run_id": "nope"}` answers "Looked in
+  `/Users/<user>/.local/state/ipro-agent/runs` and `/`". Useful for a local
+  server, and it is what a remote agent sees; recorded rather than changed.
+* `environment.yml` still pins nothing, and the inline-spec question for
+  `ipro_run` is now answered by the run directory rather than by cleanup.
+
+### The suite needs a MILP solver, and the documented pip route no longer supplies one
+
+Found while writing CI, and it affects anyone who installs with pip rather than
+conda. With only `pip install -r requirements.txt`, **six tests fail rather than
+skip** (`test_milp_matches_brute_force_on_real_rotamers`,
+`…_with_shipped_defaults`, `test_min_class_constraint_is_honoured_and_optimal`,
+both integer-cut tests, `test_assembly_does_not_multiply_sequence_budgets`):
+`solve(solver="auto")` falls through to the greedy heuristic, which raises
+`Infeasible` on programs a solver answers.
+
+`pip install 'pulp[cbc]'` — the route `requirements.txt` and `docs/INSTALL.md`
+name — does not fix it on a current PyPI. Measured: pip resolved **PuLP 4.2.0**
+on Python 3.12, where `PULP_CBC_CMD` **no longer exists** ("The solver
+PULP_CBC_CMD does not exist in PuLP"); the extra does install a working `cbc`
+(via `cbcbox` 2.929, `cbc -help` rc=0, and `pulp.listSolvers(onlyAvailable=True)`
+reports `COIN_CMD`), and the same six tests **still** land in the heuristic:
+`route=greedy, status=heuristic, proven_optimal=False`, with
+`min_class` returning **−5.630** where the optimum is **−10.419**. On Python
+3.10 pip resolved PuLP **3.3.2**, which still bundles CBC, and all tests passed.
+With `glpsol` on `PATH` everything passes on both. The greedy fallback says
+plainly that it proves nothing, so this degrades loudly rather than silently —
+but the documented pip route for a solver is not currently a solver, and
+`milp.py`'s own PuLP path was not changed here because the right fix (pin
+PuLP < 4, support `cbcbox`, or document `glpsol` as the route) is a decision
+about the environment rather than a defect fix.
+
+### CI, and an issue template
+
+There was no `.github/` at all. Added:
+
+* `.github/workflows/tests.yml` — the suite on **3.10** (the declared floor)
+  and **3.13**, with `glpk-utils` from apt for the reason above, and a step
+  that writes every `(skipped: …)` line into the job summary so a green tick
+  cannot be read as "the PyMOL, PyRosetta and Vina paths ran" on a runner that
+  cannot have them. A second job starts the MCP server with **nothing
+  installed** and checks the claim that makes the server useful on a broken
+  machine: 11 tools served, `missing_required: ['Bio', 'numpy', 'yaml']`,
+  `can_design: False`, every stdout line valid JSON, plus an import audit that
+  fails if `ipro_agent.mcp_server` ever imports from outside the standard
+  library. Both were run locally in an empty virtualenv first.
+* `.github/ISSUE_TEMPLATE/bug_report.yml` — a form whose first two required
+  fields are the `doctor.py` output and the command with its real output,
+  because those two decide whether a report can be acted on; it also asks what
+  number was expected and where it came from, which is the house standard for
+  a claim.
+
+Nothing was pushed, and no GitHub setting was changed.
+
+### The prose pass
+
+`README.md`, `docs/HANDOFF.md`, `docs/EXAMPLE_PROMPTS.md`, `docs/INSTALL.md`,
+`AGENTS.md` and `.claude/skills/ipro-agent/SKILL.md` were copy-edited to read
+less like an AI wrote them: em-dashes **161 → 15** across the six files (the
+survivors are a bibliography, three quoted example prompts, two table
+placeholder cells and two headings), bolded paragraph and bullet lead-ins
+**231 → 24** spans, and the "not X, it's Y" and rhythmic rule-of-three
+constructions removed where they carried no content and kept where the contrast
+*is* the content. Word count moved by under 1%: this was punctuation and
+sentence shape, not rewriting. Every fenced block, inline code span, number,
+file path and `§` reference was compared token by token against the previous
+commit and is unchanged; `docs/DESIGN.md` was not touched except for this
+section.
+
+Six claims were stale rather than badly worded, and were corrected with a
+measurement each:
+
+| where | said | measured |
+|---|---|---|
+| `README.md`, MCP section | "eight typed tools" | eleven, which its own table on the next line already lists |
+| `README.md`, open-defect section | pointed at §7d for the pore-axis measurements and "three candidate fixes that were tried and rejected" | §7h supersedes it: the first of those three was mismeasured and is the fix |
+| `docs/HANDOFF.md`, maintenance | "§7–§7g recording every defect four rounds of independent review found" | there have been six rounds; it now says "§7 onwards", which cannot rot again |
+| `docs/INSTALL.md`, Vina row | `grep -rn "backends.dock" ipro_agent` "returns nothing", redock "not implemented" | 9 lines across `config.py`, `docking.py` and `loop.py`; §7e records a real redock (62.6984 → −10.0636). The row itself said to re-run that grep, which is the only reason this was caught |
+| `docs/INSTALL.md`, §6 | PyRosetta "deliberately left commented out" | the shipped `environment.yml` says "deliberately absent" and has no such line |
+| `ipro_agent/mcp_server.py`, comment | "Eight tool descriptions cannot carry the operating manual" | eleven |
+
+One pointer was also wrong: `docs/INSTALL.md` §9 referred to Meeko advice
+"below" that is in §4, above it.
+
+The suite is **195 tests**: 192 before, plus one per defect above. Verified at
+195 passed / 0 failed on the development interpreter and, in clean
+virtualenvs with `glpsol` on `PATH`, on Python 3.10 and 3.13, with the four
+PyRosetta and Vina skips §7e describes.

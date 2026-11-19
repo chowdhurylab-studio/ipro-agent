@@ -5948,3 +5948,171 @@ def test_the_tour_gif_exists_and_is_small_enough_to_ship():
     tracked = subprocess.run(["git", "ls-files", "docs/tour.gif"],
                              capture_output=True, text=True, cwd=REPO).stdout
     assert tracked.strip() == "docs/tour.gif", "the gif must be committed"
+
+
+# ---------------------------------------------------------------------------
+# Driving the MCP server with real clients (docs/DESIGN.md section 7i)
+# ---------------------------------------------------------------------------
+
+
+def _mcp_at(messages: list[dict], cwd, env_extra: dict | None = None) -> dict[int, dict]:
+    """Drive the server from a working directory that is NOT the repo.
+
+    Every other MCP test here starts the server with `cwd=REPO`, which is the
+    one case in which the path and import questions below cannot arise.
+    """
+    env = dict(os.environ, PYTHONPATH=str(REPO))
+    env.update(env_extra or {})
+    payload = "\n".join(json.dumps(m) for m in messages) + "\n"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input=payload, capture_output=True, text=True,
+        cwd=str(cwd), env=env, timeout=900,
+    )
+    assert p.returncode == 0, (p.returncode, p.stderr[-600:])
+    out: dict[int, dict] = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            msg = json.loads(line)
+            if msg.get("id") is not None:
+                out[msg["id"]] = msg
+    return out
+
+
+def test_regression_mcp_prompts_refuse_missing_required_arguments():
+    """A prompt's `required: true` was decorative, as the tool schemas were
+    before section 7h.
+
+    Measured with the official MCP Python SDK (2.3.0) and the MCP Inspector
+    CLI, the first real clients this server has had: `prompts/get
+    ipro-redesign` with no arguments at all returned a complete
+    2167-character design instruction and rc=0 from both. Step 3 of it told
+    the model to fetch "(structure)" from the RCSB, and step 6 to put "(goal)"
+    in `goal_statement` "in my own words" -- the two things the operating
+    manual says must never be invented on the user's behalf. A client is
+    allowed to surface a prompt without collecting its arguments, because the
+    server is the thing that is supposed to refuse."""
+    replies = _mcp([
+        _INIT,
+        {"jsonrpc": "2.0", "id": 2, "method": "prompts/get",
+         "params": {"name": "ipro-redesign", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+         "params": {"name": "ipro-redesign",
+                    "arguments": {"structure": "/tmp/p.pdb", "goal": "prefer C12"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "prompts/get",
+         "params": {"name": "ipro-redesign",
+                    "arguments": {"structure": None, "goal": "prefer C12"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "prompts/get",
+         "params": {"name": "ipro-report", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+         "params": {"name": "ipro-check-setup", "arguments": {}}},
+    ])
+    assert "error" in replies[2], replies[2]
+    for word in ("structure", "goal"):
+        assert word in replies[2]["error"]["message"], replies[2]
+
+    text = replies[3]["result"]["messages"][0]["content"]["text"]
+    assert "/tmp/p.pdb" in text and "prefer C12" in text
+    assert "(structure)" not in text and "(goal)" not in text, text[:200]
+
+    # An explicit null is not an argument: `str(None)` is the four-character
+    # word "None", which every truthiness test in sight would have accepted.
+    assert "error" in replies[4], replies[4]
+    assert "error" in replies[5], replies[5]
+    # ipro-check-setup declares no arguments, so it must still answer.
+    assert "result" in replies[6], replies[6]
+
+
+def test_regression_mcp_resolves_a_relative_path_against_the_client():
+    """One relative path meant two different directories depending on the tool.
+
+    `_resolve_spec` resolved against `Path.cwd()` -- the directory an MCP
+    config gives the server -- while `tool_inspect` and `tool_fetch` handed
+    the string to a child running with `cwd=REPO_ROOT`. Measured with the
+    server started from `/`, as Claude Desktop starts one whose config omits
+    `cwd`: `ipro_validate {"spec": "examples/ompf_pore/spec_smoke.yaml"}`
+    refused with "looked for /examples/ompf_pore/spec_smoke.yaml", while
+    `ipro_inspect_structure {"structure": "examples/ompf_pore/2omf_A.pdb"}`
+    SUCCEEDED and reported 340 residues -- answering about a file inside this
+    repository that the client had never named. Every position, native residue
+    and energy downstream of that answer belongs to the wrong molecule, and
+    nothing in the reply says so."""
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+    elsewhere = Path(tempfile.mkdtemp())
+    shutil.copy2(ompf, elsewhere / "mine.pdb")
+
+    replies = _mcp_at([
+        _INIT,
+        _call(2, "ipro_inspect_structure",
+              {"structure": "examples/ompf_pore/2omf_A.pdb", "positions": ["18"]}),
+        _call(3, "ipro_inspect_structure",
+              {"structure": "mine.pdb", "positions": ["18"]}),
+        _call(4, "ipro_validate", {"spec": "examples/ompf_pore/spec_smoke.yaml"}),
+    ], cwd=elsewhere)
+
+    is_error, body = _body(replies[2])
+    assert is_error, f"a path that exists only in the repo must not resolve: {body}"
+    assert "not found" in body.get("error", ""), body
+    assert str(elsewhere) in body["error"], body      # and it says where it looked
+
+    is_error, body = _body(replies[3])
+    assert not is_error, body
+    assert body["positions"][0]["native"] == "VAL", body
+
+    # The spec tool already resolved against the client; the two now agree.
+    is_error, body = _body(replies[4])
+    assert is_error and "not found" in body.get("error", ""), body
+
+
+def test_regression_mcp_inline_specs_do_not_leak_temp_directories():
+    """An inline spec wrote a temp directory that nothing ever removed.
+
+    The list they were collected into was called `keep`, and no caller read
+    it. Measured under a GUI client's environment, which has no `TMPDIR`, so
+    `tempfile.gettempdir()` is the shared `/tmp`: five `ipro_validate` calls
+    with an inline spec took `/tmp/ipro_mcp_spec_*` from 7 directories to 12,
+    one per call, each holding a 0o644 `spec.yaml`. All five of those calls
+    returned isError, which is the half that matters -- an agent iterating on
+    a spec it cannot get right leaks fastest, and the leaked text is the
+    user's unpublished design problem in a world-readable directory."""
+    scratch = Path(tempfile.mkdtemp())
+    inline = ("goal: reshape_channel\n"
+              "goal_statement: inline leak probe\n"
+              "molecules: []\n")
+    messages = [_INIT] + [_call(i + 2, "ipro_validate", {"spec": inline})
+                          for i in range(3)]
+    replies = _mcp_at(messages, cwd=REPO, env_extra={"TMPDIR": str(scratch)})
+    assert all(_body(replies[i])[0] for i in (2, 3, 4)), "this spec is invalid"
+    left = sorted(scratch.glob("ipro_mcp_spec_*"))
+    assert not left, f"{len(left)} temp directories left behind: {left[:3]}"
+
+    # `ipro_run` cannot delete the file on the way out -- its child reads the
+    # spec after the call has returned -- so the spec moves into the run
+    # directory, where it also records what the run was asked to do.
+    from ipro_agent import mcp_server as m
+
+    g = m.tool_run.__globals__
+    keep_doctor, keep_tmp = g["_doctor"], tempfile.tempdir
+    run_dir = scratch / "run"
+    launched = None
+    try:
+        tempfile.tempdir = str(scratch)
+        g["_doctor"] = lambda: {"can_run": True, "can_design": True,
+                                "missing_required": [], "resolved": {},
+                                "degraded": []}
+        try:
+            launched = m.tool_run({"spec": inline, "run_dir": str(run_dir)})
+        except m.ToolError:
+            pass          # the CLI refuses this spec, which is the fast path
+    finally:
+        g["_doctor"], tempfile.tempdir = keep_doctor, keep_tmp
+    if launched and launched.get("pid"):
+        try:
+            os.kill(int(launched["pid"]), 15)
+        except OSError:
+            pass
+    assert (run_dir / "spec.yaml").is_file(), "the run must hold the spec that made it"
+    assert not sorted(scratch.glob("ipro_mcp_spec_*")), "and leave no temp dir"

@@ -1,0 +1,93 @@
+name: Bug report
+description: It would not run, or it ran and gave an answer you do not believe
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is unsupported research code, so a report that can be reproduced is
+        worth far more than a quick one. Two commands make most reports
+        actionable, and they are the first two boxes below: `scripts/doctor.py`
+        says what resolved on your machine, and a run's `mode` and `notes` say
+        what the numbers in it are allowed to mean.
+
+        If the report is about a *number* rather than a crash, say which number,
+        what it should be, and how you measured that. Every claim in this repo is
+        supposed to be backed by a measurement in `docs/DESIGN.md` §7 onwards; if
+        one is not, that is itself the bug.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: What `scripts/doctor.py` says
+      description: "`python3 scripts/doctor.py` (or `python3 -m ipro_agent.doctor`), pasted whole."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: The command, and what it did
+      description: |
+        The exact command and the output, including the traceback if there is
+        one. For a finished run, `python3 -m ipro_agent status <run-dir>` carries
+        the `mode`, the `notes` and whether anything was accepted; a run with
+        `accepted: 0` designed nothing, and that is expected rather than a bug.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: For a wrong number, give the value you expected and where it comes from.
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec
+    attributes:
+      label: The spec, if a spec was involved
+      description: |
+        Trim it to the smallest version that still shows the problem, and remove
+        anything unpublished. `python3 -m ipro_agent validate <spec>` on its own
+        is often enough to reproduce a spec problem.
+      render: yaml
+    validations:
+      required: false
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it was installed
+      options:
+        - bash scripts/bootstrap.sh
+        - conda env create -f environment.yml
+        - pip install (no conda environment)
+        - through an MCP client (Claude Desktop, Claude Code, Cursor, other)
+        - other, or not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Python
+      description: "`uname -sm` and `python3 -V`. Windows is untested; WSL 2 is the supported route."
+      placeholder: Darwin arm64, Python 3.12.7
+    validations:
+      required: true
+
+  - type: textarea
+    id: suite
+    attributes:
+      label: What the test suite says
+      description: |
+        The summary line from `python3 scripts/selftest.py` (the last line is
+        enough). A failing suite on your machine usually points at the
+        environment rather than at the thing you hit, and it tells us which.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,174 @@
+# The test suite is the only gate this repo has: every defect in
+# docs/DESIGN.md §7 onwards carries a regression test, so a red suite means one
+# of them is back. Two jobs, because the repo makes two separate claims.
+#
+# `suite` runs scripts/selftest.py with the three required dependencies plus a
+# MILP solver. A GitHub runner has no conda, so PyMOL, PyRosetta and AutoDock
+# Vina are absent and the tests that need them skip themselves. A green tick
+# here therefore does NOT mean the rotamer harvest or `mode: full` ran, and the
+# last step prints every skip it saw so that is visible rather than assumed.
+#
+# The solver is apt's, not pip's, and that is a measurement rather than a
+# preference. With only `pip install -r requirements.txt`, six tests FAIL
+# rather than skip (the brute-force comparisons, the integer cuts, min_class,
+# the assembly budget), because `solve(solver="auto")` falls through to the
+# greedy heuristic, which raises `Infeasible` on programs a solver answers.
+# `pip install 'pulp[cbc]'` -- the route requirements.txt and docs/INSTALL.md
+# name -- does not fix it on a current PyPI: pip resolves PuLP 4.2.0, where
+# `PULP_CBC_CMD` no longer exists, and although the extra does drop a working
+# `cbc` on PATH the same six tests still land in the heuristic (measured:
+# min_class returned -5.630 where the optimum is -10.419). With `glpsol` on
+# PATH all of them pass, which is also what the development machine and
+# section 7g's fresh-machine record used.
+#
+# `stdlib-mcp` starts the MCP server with nothing installed at all. "Pure
+# standard library" is a claim in README.md and the reason the server can be the
+# thing that reports a broken install, so an import creeping in should fail a
+# build rather than be discovered by a stranger whose machine has nothing on it.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor the package declares and doctor.py enforces; 3.13
+        # is the newest the suite has been run on. Both ends were run before
+        # this file existed, each in a clean virtualenv with glpsol on PATH:
+        # 195 passed, 0 failed on both. The failures this catches are at the
+        # ends rather than in the middle.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: a MILP solver, or six tests fail rather than skip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq glpk-utils
+
+      - name: install the required dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: what resolved on this runner
+        # Not a gate: PyMOL cannot be here, so --require pymol would always
+        # fail. It is in the log because every result below depends on it.
+        run: python scripts/doctor.py || true
+
+      - name: the suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/selftest.py 2>&1 | tee selftest.log
+
+      - name: what this run could not cover
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Python ${{ matrix.python-version }}"
+            tail -n 1 selftest.log || true
+            echo
+            echo "Skipped here, for want of a dependency a runner cannot have:"
+            echo '```'
+            grep -o '(skipped:[^)]*)' selftest.log | sort | uniq -c || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ matrix.python-version }}
+          path: selftest.log
+          if-no-files-found: warn
+
+  stdlib-mcp:
+    name: the MCP server with nothing installed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: it starts, serves its tools, and says what is missing
+        # No pip install, deliberately: numpy, Biopython and PyYAML are all
+        # absent. Measured in an empty virtualenv when the server was written,
+        # and this keeps it true.
+        run: |
+          python - <<'PY'
+          import json, subprocess, sys
+
+          requests = [
+              {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                          "clientInfo": {"name": "ci", "version": "0"}}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+              {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+               "params": {"name": "ipro_doctor", "arguments": {}}},
+          ]
+          p = subprocess.run(
+              [sys.executable, "-m", "ipro_agent.mcp_server"],
+              input="\n".join(json.dumps(r) for r in requests) + "\n",
+              capture_output=True, text=True, timeout=300,
+          )
+          assert p.returncode == 0, p.stderr[-2000:]
+          replies = {}
+          for line in p.stdout.splitlines():
+              if line.strip():
+                  msg = json.loads(line)       # non-JSON on stdout breaks every client
+                  replies[msg.get("id")] = msg
+          assert set(replies) == {1, 2, 3}, sorted(replies)
+
+          tools = [t["name"] for t in replies[2]["result"]["tools"]]
+          assert len(tools) == 11, tools
+          doctor = json.loads(replies[3]["result"]["content"][0]["text"])
+          missing = set(doctor.get("missing_required") or [])
+          assert {"numpy", "Bio", "yaml"} <= missing, doctor
+          assert doctor.get("can_design") is False, doctor
+          print(f"ok: {len(tools)} tools, missing_required={sorted(missing)}")
+          PY
+
+      - name: the module imports nothing beyond the standard library
+        run: |
+          python - <<'PY'
+          import pathlib, sys, sysconfig
+
+          stdlib = pathlib.Path(sysconfig.get_paths()["stdlib"]).resolve()
+          here = pathlib.Path("ipro_agent").resolve()
+          before = set(sys.modules)
+          sys.path.insert(0, ".")
+          import ipro_agent.mcp_server          # noqa: F401
+
+          outside = []
+          for name in set(sys.modules) - before:
+              mod = sys.modules.get(name)
+              path = getattr(mod, "__file__", None)
+              if not path:
+                  continue                      # built-in or frozen
+              resolved = pathlib.Path(path).resolve()
+              if stdlib in resolved.parents or here in resolved.parents:
+                  continue
+              outside.append(f"{name} ({resolved})")
+          assert not outside, "imported from outside the standard library: " + ", ".join(sorted(outside))
+          print("ok: stdlib only")
+          PY
