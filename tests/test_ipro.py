@@ -6116,3 +6116,103 @@ def test_regression_mcp_inline_specs_do_not_leak_temp_directories():
             pass
     assert (run_dir / "spec.yaml").is_file(), "the run must hold the spec that made it"
     assert not sorted(scratch.glob("ipro_mcp_spec_*")), "and leave no temp dir"
+
+
+def test_regression_cheap_checks_run_before_the_doctor_probe():
+    """This repo's first CI run failed three tests, and two shared one cause
+    that was not in the tests. ``tool_run`` called ``_doctor()`` as its very
+    first act, so on a runner with no PyMOL the can_design gate fired ahead of
+    both the argument coercion and the non-empty-run_dir check: a caller who
+    passed ``iterations: 8.5`` was told "cannot design: PyMOL did not resolve",
+    which is true and useless, and so was a caller pointing at a directory that
+    already held a run.
+
+    It also spent a one-to-five-second doctor probe before answering a
+    malformed argument. Measured with _doctor stubbed to can_design False:
+    bad iterations -> "`iterations` must be a whole number", used run_dir ->
+    "run directory is not empty", and only an otherwise-valid call reaches
+    "cannot design". No directory is created by any of the refusals."""
+    from ipro_agent import mcp_server as m
+
+    spec = str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml")
+    tmp = Path(tempfile.mkdtemp())
+    used = tmp / "used"
+    used.mkdir()
+    (used / "state.json").write_text("{}")
+    fresh = tmp / "fresh"
+
+    g = m.tool_run.__globals__
+    keep = g["_doctor"]
+    try:
+        g["_doctor"] = lambda: {"can_run": True, "can_design": False,
+                                "missing_required": [], "degraded": ["pymol"],
+                                "resolved": {}}
+        for kwargs, expected in (
+            ({"spec": spec, "iterations": 8.5}, "iterations"),
+            ({"spec": spec, "seed": "lucky"}, "seed"),
+            ({"spec": spec, "run_dir": str(used)}, "not empty"),
+            ({"spec": spec, "run_dir": str(fresh)}, "cannot design"),
+        ):
+            try:
+                m.tool_run(kwargs)
+            except m.ToolError as exc:
+                assert expected in str(exc), (kwargs, str(exc)[:120])
+            else:
+                raise AssertionError(f"{kwargs} must be refused")
+        assert not fresh.exists(), (
+            "a refused launch must not leave a run directory behind"
+        )
+    finally:
+        g["_doctor"] = keep
+
+
+def test_regression_a_missing_backend_is_a_refusal_not_a_traceback():
+    """``milp`` and ``score`` both build rotamer tables, so both need PyMOL,
+    and on a machine without it both died with a bare ``RotamerError``
+    traceback -- the third of the three CI failures. ``cli.main()`` caught
+    SpecError and StructureError but not this.
+
+    The README was wrong about it too: it listed ``validate``, ``positions``,
+    ``milp``, ``score`` and ``goals`` as working without PyMOL. Measured with
+    PyMOL undiscoverable: validate and goals exit 0, positions works, and milp
+    and score refuse -- so two of the five named were false."""
+    import ipro_agent.cli as cli
+    from ipro_agent.rotamers import RotamerError
+
+    src = (REPO / "ipro_agent" / "cli.py").read_text()
+    assert "except RotamerError as exc:" in src, (
+        "main() must give a missing backend the same contract as a bad spec"
+    )
+
+    # Through a real process, with PyMOL hidden the way CI hides it.
+    harness = Path(tempfile.mkdtemp()) / "nopymol.py"
+    harness.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "import ipro_agent.rotamers as R\n"
+        "R.find_pymol_python = lambda: None\n"
+        "import ipro_agent.cli as cli\n"
+        "sys.exit(cli.main(sys.argv[1:]))\n"
+    )
+    spec = str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml")
+    out = Path(tempfile.mkdtemp())
+    for argv, needs_pymol in (
+        (["goals"], False),
+        (["validate", spec], False),
+        (["milp", spec, "-o", str(out / "m.lp")], True),
+        (["score", spec, "--run-dir", str(out / "s")], True),
+    ):
+        p = subprocess.run([sys.executable, str(harness), *argv],
+                           capture_output=True, text=True, cwd=REPO, timeout=900)
+        both = p.stdout + p.stderr
+        assert "Traceback" not in both, (argv[0], both[-300:])
+        if needs_pymol:
+            assert p.returncode == 2, (argv[0], p.returncode)
+            assert "backend missing" in p.stderr, (argv[0], p.stderr[-200:])
+        else:
+            assert p.returncode == 0, (argv[0], p.returncode, both[-200:])
+
+    # And the README must not claim otherwise.
+    readme = (REPO / "README.md").read_text()
+    assert "`validate`, `positions`, `milp`, `score` and `goals` work" not in readme
+    assert "`milp`, `score` and `run`" in readme

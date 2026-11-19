@@ -197,8 +197,10 @@ will not resolve. `ipro_setup` says so in its result.
 Required: Python ≥ 3.10, numpy, Biopython, PyYAML, and PyMOL, which has
 no fallback. Rotamers come only from its mutagenesis wizard; there is no
 built-in rotamer builder, and `backends.mutate: builtin` is refused by the config.
-Without it `validate`, `positions`, `milp`, `score` and `goals` work and `run`
-cannot produce a design. `conda env create -f environment.yml` installs all
+Without it `validate`, `positions` and `goals` work; `milp`, `score` and `run`
+do not, because all three build rotamer tables and rotamers come only from
+PyMOL. Measured on a machine with no PyMOL discoverable: `validate` and `goals`
+exit 0, `milp` and `score` refuse with "backend missing: no PyMOL available". `conda env create -f environment.yml` installs all
 five.
 
 Genuinely optional, each resolved at run time with a documented fallback:

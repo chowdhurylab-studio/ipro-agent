@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from .config import DesignSpec, Role, SpecError
+from .rotamers import RotamerError
 from .structure import StructureError
 from .goals import GOALS, build_goal, suggest_goal
 from .state import RunDir
@@ -842,6 +843,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except StructureError as exc:
         print(f"structure error: {exc}", file=sys.stderr)
+        return 2
+    except RotamerError as exc:
+        # `milp` and `score` both build rotamer tables, so both need PyMOL --
+        # and both died with a bare RotamerError traceback on a machine without
+        # it. Measured on CI (ubuntu, no conda): two of three failures were
+        # this. The message already says what to install; what was missing was
+        # a handler, so an agent saw 20 frames instead of one sentence.
+        print(f"backend missing: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)

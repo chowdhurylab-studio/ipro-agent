@@ -436,25 +436,49 @@ def tool_milp(args: dict) -> dict:
 
 
 def tool_run(args: dict) -> dict:
-    """Launch a design run detached and return its id immediately."""
-    rep = _doctor()
-    if not rep.get("can_run"):
-        raise ToolError(
-            "required packages are missing: "
-            f"{', '.join(rep.get('missing_required', [])) or 'unknown'}. "
-            "Install with `conda env create -f environment.yml`."
-        )
-    if not rep.get("can_design"):
-        # Refused rather than launched. A run without PyMOL dies at the first
-        # rotamer harvest, minutes in, having written a run directory that
-        # looks like a started job.
-        raise ToolError(
-            "cannot design: PyMOL did not resolve, and it has no fallback -- "
-            "rotamers come only from its mutagenesis wizard. `conda env create "
-            "-f environment.yml` installs it. Use ipro_score or ipro_validate "
-            "to work without it."
-        )
+    """Launch a design run detached and return its id immediately.
 
+    The order of the checks is deliberate, and it is not the order this had.
+    ``_doctor()`` used to be the very first act, so on a machine without PyMOL
+    the can_design gate fired ahead of both the argument coercion and the
+    non-empty-run_dir check: a typo in ``iterations`` was answered with
+    "cannot design: PyMOL did not resolve", which is true and useless. Two of
+    the three failures in this repo's first CI run were exactly that. It also
+    spent a one-to-five-second doctor probe before telling a caller their
+    argument was malformed.
+
+    So: coerce the arguments, resolve the spec, work out the run directory and
+    refuse a used one -- all free -- and only then probe the environment.
+    Nothing is created on disk until every refusal has had its chance.
+    """
+    # 1. Arguments, which cost nothing to check and are what a model gets
+    #    wrong. Coerced, not stringified: the schema says `iterations` is an
+    #    integer, but nothing enforced it, so a JSON float -- which a model
+    #    will happily emit for an integer field -- became `--iterations 8.0`,
+    #    argparse exited 2 within milliseconds, and the reply was still
+    #    `launched: true` with a pid that was already gone. ipro_status then
+    #    answered "pending" for ever.
+    flags: list[str] = []
+    for flag, key, cast in (("--iterations", "iterations", int),
+                            ("--seed", "seed", int),
+                            ("--max-minutes", "max_minutes", float)):
+        if args.get(key) is None:
+            continue
+        raw = args[key]
+        try:
+            value = cast(raw) if not isinstance(raw, bool) else None
+            if value is None:
+                raise TypeError("bool")
+            if cast is int and isinstance(raw, float) and raw != int(raw):
+                raise ValueError("not a whole number")
+        except (TypeError, ValueError):
+            raise ToolError(
+                f"`{key}` must be a {'whole number' if cast is int else 'number'}; "
+                f"got {type(raw).__name__} {raw!r}. Nothing was launched."
+            )
+        flags += [flag, str(value)]
+
+    # 2. The spec, and the run directory it implies.
     keep: list[Path] = []
     spec = _resolve_spec(args["spec"], keep)
     try:
@@ -467,10 +491,31 @@ def tool_run(args: dict) -> dict:
                 f"run directory is not empty: {run_dir}\n"
                 "Pass a fresh run_dir, or poll the existing one with ipro_status."
             )
+
+        # 3. Only now, the environment.
+        rep = _doctor()
+        if not rep.get("can_run"):
+            raise ToolError(
+                "required packages are missing: "
+                f"{', '.join(rep.get('missing_required', [])) or 'unknown'}. "
+                "Install with `conda env create -f environment.yml`."
+            )
+        if not rep.get("can_design"):
+            # Refused rather than launched. A run without PyMOL dies at the
+            # first rotamer harvest, minutes in, having written a run directory
+            # that looks like a started job.
+            raise ToolError(
+                "cannot design: PyMOL did not resolve, and it has no fallback "
+                "-- rotamers come only from its mutagenesis wizard. `conda env "
+                "create -f environment.yml` installs it. Use ipro_validate or "
+                "ipro_positions to work without it."
+            )
+
         run_dir.mkdir(parents=True, exist_ok=True)
     except BaseException:
-        # A refusal here (a used run directory, an unwritable one) must not
-        # leave the inline spec behind in /tmp either.
+        # A refusal here -- a bad argument, a used run directory, an
+        # unwritable one, a missing backend -- must not leave the inline spec
+        # behind in /tmp either.
         for path in keep:
             shutil.rmtree(path.parent, ignore_errors=True)
         raise
@@ -490,30 +535,8 @@ def tool_run(args: dict) -> dict:
         keep.clear()
         spec = str(landed)
 
-    cmd = [sys.executable, "-m", "ipro_agent", "run", spec, "--run-dir", str(run_dir)]
-    # Coerced, not stringified. The schema says `iterations` is an integer, but
-    # nothing enforced it: a JSON float -- which a model will happily emit for
-    # an integer field -- became `--iterations 8.0`, argparse exited 2 within
-    # milliseconds, and the reply was still `launched: true` with a pid that
-    # was already gone. ipro_status then answered "pending" forever.
-    for flag, key, cast in (("--iterations", "iterations", int),
-                            ("--seed", "seed", int),
-                            ("--max-minutes", "max_minutes", float)):
-        if args.get(key) is None:
-            continue
-        raw = args[key]
-        try:
-            value = cast(raw) if not isinstance(raw, bool) else None
-            if value is None:
-                raise TypeError("bool")
-            if cast is int and isinstance(raw, float) and raw != int(raw):
-                raise ValueError("not a whole number")
-        except (TypeError, ValueError):
-            raise ToolError(
-                f"`{key}` must be a {'whole number' if cast is int else 'number'}; "
-                f"got {type(raw).__name__} {raw!r}. Nothing was launched."
-            )
-        cmd += [flag, str(value)]
+    cmd = [sys.executable, "-m", "ipro_agent", "run", spec,
+           "--run-dir", str(run_dir)] + flags
 
     log = run_dir / "launch.log"
     with open(log, "wb") as fh:
