@@ -185,11 +185,12 @@ loop:
                                 #        constraint 5) -- an irreducible
                                 #        reproducibility hole; this is the
                                 #        nearest available knob.
-  perturbation_flank: 5         # [paper] 11-residue window, chosen residue +/- 5
+  perturbation_flank: 5         # NOT IMPLEMENTED (kept so old specs load):
+                                # the flanking window is not repacked -- DESIGN.md 4
   perturbation_sigma_deg: 1.5   # [paper] phi/psi ~ N(0, 1.5 deg)
   perturbation_cap_deg: 5.0     # [ours]  truncation; IPRO's default
 
-  neighbour_cutoff: 4.5         # [paper] repack within 4.5 A of the perturbation
+  neighbour_cutoff: 4.5         # NOT IMPLEMENTED: nothing repacks within 4.5 A
   energy_cutoff: 12.0           # [IPRO]  non-bonded cutoff, A
 
   temperature_k: 3640.0         # [paper] Metropolis temperature

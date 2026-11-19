@@ -235,6 +235,9 @@ class IPROLoop:
         self._axis_clear_cache = None
         self._post_relaxed = 0
         self._post_relax_failed = 0
+        self._moved_this_iteration = False
+        self._last_cb = None
+        self._last_tables = None
         #: Set while a run is in progress; see measure_native.
         self._relax_native = False
         self._partners: dict[str, Structure] = {}
@@ -365,6 +368,22 @@ class IPROLoop:
                 "shared, and every gating assembly must pass acceptance"
             )
 
+        # Two settings that look live and are not. A user who sets them --
+        # both shipped examples annotate them "[paper]" -- believes the
+        # flanking residues and the 4.5 A shell are being repacked, and they
+        # are not: the MILP's variables are exactly the design positions.
+        for name, default in (("perturbation_flank", 5), ("neighbour_cutoff", 4.5)):
+            if getattr(spec.loop, name, default) != default:
+                self.notes.append(
+                    f"loop.{name} is set, but neither flanking-residue "
+                    f"repacking nor the 4.5 A neighbour shell is implemented "
+                    f"here -- the MILP's variables are exactly your design "
+                    f"positions, so the surrounding side chains keep their "
+                    f"input rotamers. The setting has no effect "
+                    f"(docs/DESIGN.md section 4)."
+                )
+                break
+
         self._dock_backend = self._resolve_dock()
         self.run.log(f"placement backend: {self._dock_backend}")
 
@@ -397,8 +416,13 @@ class IPROLoop:
         self.run.log(f"harvested {n} rotamers")
         if n > self.spec.loop.max_rotamers:
             self.notes.append(
-                f"{n} rotamers exceeds max_rotamers={self.spec.loop.max_rotamers}; "
-                "pruning will be tighter than usual"
+                f"{n} rotamers exceeds max_rotamers="
+                f"{self.spec.loop.max_rotamers}. This cap is ADVISORY here: "
+                f"nothing tightens the pruning in response, the program is "
+                f"written at this size and may be slow. (IPRO's own source "
+                f"shrinks its window until the count fits; that loop is not "
+                f"implemented.) Lower goal_options.rotamer_window, or design "
+                f"fewer positions, if the MILP is too slow."
             )
 
     # -- scoring -----------------------------------------------------------
@@ -1307,9 +1331,21 @@ class IPROLoop:
             rots,
             template,
             self.backend,
-            max_self_energy=(
+            # IPRO prunes relative to the best rotamer at each position
+            # (window 40 kcal/mol); an absolute ceiling is optional and off by
+            # default, because as a default of 50 it removed TRP/PHE/TYR from
+            # OmpF A18 and with them the published answer.
+            rotamer_window=(
                 float("inf") if restrict_to is not None
-                else float(self.spec.goal_options.get("max_self_energy", 50.0))
+                else float(self.spec.goal_options.get("rotamer_window", 40.0))
+            ),
+            max_self_energy=(
+                None if restrict_to is not None
+                else (
+                    float(self.spec.goal_options["max_self_energy"])
+                    if self.spec.goal_options.get("max_self_energy") is not None
+                    else None
+                )
             ),
             pair_eps=float(self.spec.goal_options.get("pair_eps", 1e-3)),
             energy_cutoff=self.spec.loop.energy_cutoff,
@@ -1376,6 +1412,9 @@ class IPROLoop:
         molecules are actually in contact.
         """
         tables = self.build_tables()
+        # `score` is where a user looks before spending CPU, so the
+        # unreachable-identity note belongs here too, not only in a run.
+        self._note_dropped_identities(tables)
         choice = self._native_choice(tables)
         # `relax_native` exists because `ipro-agent score` is also used on its
         # own, to report a structure as supplied; there the relaxation would
@@ -1402,6 +1441,7 @@ class IPROLoop:
         cb = self.build_combined()
         tables = cb.tables
         self.run.log(f"MILP tables: {json.dumps({k: int(v) for k, v in tables.stats.items()})}")
+        self._note_dropped_identities(tables)
         if cb.n_assemblies > 1:
             self.run.log(
                 f"assemblies: {cb.n_assemblies}, reference {cb.reference!r}, "
@@ -1537,6 +1577,9 @@ class IPROLoop:
         current_choice = dict(start_choice)
         current_aa = self._identities(current_choice, tables)
         current_score = start_score
+        #: The complex energy of the accepted structure, which the hard-reject
+        #: guard is measured against (see step 6).
+        current_complex = start_ctx.total
         current_asm_energy = {k: v.total for k, v in start_per_asm.items()}
         accepted = 0
         t_start = time.time()
@@ -1675,10 +1718,13 @@ class IPROLoop:
             # puts this between rotamer selection and the energy evaluation, and
             # only every third iteration because it is the expensive step.
             dock_note = ""
+            self._moved_this_iteration = False
+            self._last_cb, self._last_tables = cb, tables
             every = max(0, int(spec.loop.redock_every))
             if self._dock_backend != "none" and every and it % every == 0:
                 moved = self._redock_step(chosen, it)
                 if moved:
+                    self._moved_this_iteration = True
                     # Only self energies depend on where the partners are, so
                     # the O(n^2) pair block is left alone.
                     self._refresh_self_energies(cb)
@@ -1690,12 +1736,29 @@ class IPROLoop:
             delta = score - current_score
 
             # (6) accept / reject
+            #
+            # Two tests on two different quantities, as the released source
+            # has them (`standard_decision`): the Metropolis window applies to
+            # the OBJECTIVE, while the max(40 kcal/mol, 5%) cap applies to the
+            # COMPLEX ENERGY -- `Energies[group]['Complex'] > complex + value`
+            # -- which is what makes it a stability safeguard rather than a
+            # second opinion about the objective. Applied to the objective, as
+            # it was here, a goal that is not an energy (a pore radius, a
+            # specificity difference) got a cap in the wrong units and the
+            # stability guard had no default counterpart at all: a design could
+            # destabilize the protein by any amount as long as the objective
+            # improved.
             hard_cap = max(
                 spec.loop.hard_reject_kcal,
-                spec.loop.hard_reject_fraction * abs(current_score),
+                spec.loop.hard_reject_fraction * abs(current_complex),
             )
-            if delta > hard_cap:
-                ok, reason = False, f"worse by >{hard_cap:.1f} (hard reject)"
+            d_complex = ctx.total - current_complex
+            if d_complex > hard_cap:
+                ok, reason = (
+                    False,
+                    f"complex energy worse by {d_complex:+.1f} > "
+                    f"{hard_cap:.1f} (hard reject)",
+                )
             else:
                 ok, reason = metropolis_accept(
                     delta, spec.loop.kt, self.rng.random(), greedy=greedy
@@ -1705,6 +1768,31 @@ class IPROLoop:
             veto = self.goal.filter_reject(ctx)
             if veto:
                 ok, reason = False, f"filtered: {veto}"
+
+            # A restraint whose atoms are all OUTSIDE the design positions --
+            # the catalytic-distance restraints the ACS Catal 2017 thioesterase
+            # work used, held to +/-0.2 A -- cannot be expressed as a rotamer
+            # veto, so the planner reported "nothing to decide" and nothing
+            # enforced it. But the perturbation moves the enzyme's own atoms
+            # and the redock moves the partner's: measured, translating the
+            # partner 1.0 A (5x the paper's tolerance, far less than the drift
+            # of a few hundred redock moves at sigma 0.2) turned a satisfied
+            # restraint into a violated one with rotamer_vetoes still empty and
+            # is_empty() still True. Re-measured here, where it can still
+            # reject the iteration.
+            broke = self._broken_geometry_restraints(rp)
+            if broke:
+                ok, reason = False, f"restraint violated: {broke[0]}"
+                if "geom_restraint" not in self._once:
+                    self._once.add("geom_restraint")
+                    self.notes.append(
+                        f"a restraint with no design-position atom became "
+                        f"violated during the run and the iteration was "
+                        f"rejected -- {broke[0]}. These cannot be expressed as "
+                        f"rotamer vetoes, so they are enforced by rejection "
+                        f"instead; the perturbation and the redock both move "
+                        f"them."
+                    )
 
             # IPRO: "all BAs must pass the selection criteria for the results of
             # the iteration to be retained." Applied as an extra gate on top of
@@ -1775,6 +1863,7 @@ class IPROLoop:
             if ok:
                 accepted += 1
                 current_choice, current_score = dict(sol.choices), score
+                current_complex = ctx.total
                 current_aa = self._identities(current_choice, tables)
                 current_asm_energy = {k: v.total for k, v in per_asm.items()}
 
@@ -1995,6 +2084,38 @@ class IPROLoop:
 
         return sorted(candidates, key=key)
 
+    def _note_dropped_identities(self, tables) -> None:
+        """Say when the design space is smaller than the spec advertises.
+
+        An identity whose every rotamer is pruned is not reachable, but
+        `validate` still reports the full product of the allowed sets --
+        measured on the shipped smoke spec, 6561 sequences while TRP was
+        absent from A18 entirely. That is the shape of defect this repo exists
+        to avoid: it runs clean and the answer is drawn from a smaller space
+        than the user asked for.
+        """
+        dropped = getattr(tables, "dropped_identities", None) or {}
+        if not dropped or "dropped_ids" in self._once:
+            return
+        self._once.add("dropped_ids")
+        detail = "; ".join(
+            f"{split_vpos(p)[1] or p}: {', '.join(aas)}"
+            for p, aas in sorted(dropped.items())
+        )
+        self.notes.append(
+            f"these allowed residues are NOT reachable, because every rotamer "
+            f"of them clashes with the current template beyond the "
+            f"{self.spec.goal_options.get('rotamer_window', 40.0)} kcal/mol "
+            f"pruning window -- {detail}. The design space is therefore smaller "
+            f"than the spec advertises. This is measured against the side "
+            f"chains that are fixed right now, so a large residue can be "
+            f"excluded at a tight position even when the published design uses "
+            f"it there (OmpF A18/TRP is exactly that case: its best rotamer is "
+            f"51.9 kcal/mol above the best at that position). Raise "
+            f"goal_options.rotamer_window to keep them, and expect the clash to "
+            f"show up in the energy instead."
+        )
+
     def _choose_window(self, ordered: list[str], pert=None) -> list[str]:
         """Which design positions get re-decided this iteration.
 
@@ -2084,6 +2205,26 @@ class IPROLoop:
                 candidates, key=lambda i: tables.self_energy.get((p, i), 0.0)
             )
         return out
+
+    def _broken_geometry_restraints(self, rp) -> list[str]:
+        """Restraints no rotamer can affect, re-measured against *now*.
+
+        The plan is rebuilt after every perturbation, so its
+        ``native_violations`` already reflect the moved backbone; the redock
+        happens afterwards, so this re-plans when a partner has moved this
+        iteration. Returns readable violation lines, newest measurement.
+        """
+        if not self.spec.restraints:
+            return []
+        plan = rp
+        if self._moved_this_iteration:
+            try:
+                plan = self._plan_restraints_for(self._last_cb, self._last_tables)
+            except Exception:
+                return []          # a re-plan failure must not fail the run
+        if not getattr(plan, "geometry_only", None):
+            return []
+        return list(plan.native_violations)
 
     def _plan_restraints_for(self, cb: CombinedTables, tables: EnergyTables):
         """Re-plan the restraint vetoes against rebuilt tables."""

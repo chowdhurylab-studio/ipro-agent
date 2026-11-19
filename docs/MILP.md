@@ -100,13 +100,26 @@ Pair variables grow as `(Σ_i |R_i|)²`, so three prunings run before the progra
 is written. All three counts appear in `EnergyTables.stats` and in
 `ipro-agent milp --json`.
 
-1. **Generalized dead-end elimination.** A rotamer whose self-energy exceeds
-   `max_self_energy` clashes irrecoverably with fixed atoms and cannot appear in
-   an optimal assignment, so it is dropped. This is IPRO's
-   `X_ir = 0 if E_rs(i,r) > δ_i`. Two safeguards the bare rule lacks: a position
-   never loses its **last** rotamer (which would make the program infeasible),
-   and the **native** identity is never pruned, so "do not mutate" stays
-   reachable and a mutation can be rejected.
+1. **Rotamer pruning, relative to the best rotamer at each position.** A
+   rotamer more than `rotamer_window` kcal/mol worse than the best one at the
+   same position is dropped. That relative form is IPRO's published rule
+   (`ROTAMERS.py` keeps `sorted[n][i] <= sorted[n][0] + window`, window
+   40 kcal/mol): it asks which conformers are competitive *there*, which is not
+   a question an absolute threshold can answer. `max_self_energy`, if set, is
+   an additional absolute clash ceiling; it is **off by default**, because an
+   absolute default of 50 kcal/mol pruned TRP, PHE and TYR out of OmpF
+   position A18 and with them the published V18W answer (DESIGN.md §7d,
+   defect 25).
+
+   **This is not dead-end elimination, and the earlier claim that a pruned
+   rotamer "cannot appear in an optimal assignment" was wrong.** A high
+   self-energy can be outweighed by a favourable pair term. Constructed with
+   this repo's own `RotamerMILP` and glpsol: self energies
+   `{A1 r0: 0.0, A1 r1: 51.0}` with a pair term `(A1,r1,A2,r0): -60.0` has
+   optimum **−9.000** choosing r1, while a >50 absolute prune yields
+   **+0.000** choosing r0. A true DEE criterion (Goldstein) bounds against the
+   pair-energy extrema; this filter does not, so it is reported as a heuristic
+   in `EnergyTables.stats`.
 2. **Position-pair pruning.** If the rotamer clouds at `i` and `j` cannot reach
    each other — centroid separation beyond the sum of their bounding radii plus
    the energy cutoff — the pair contributes no variables at all.

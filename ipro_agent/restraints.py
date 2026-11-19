@@ -177,6 +177,13 @@ class RestraintPlan:
     unsupported: list[str] = field(default_factory=list)
     #: Design-position labels whose backbone must be held during relaxation.
     relax_fixed_positions: list[str] = field(default_factory=list)
+    #: Restraints that no rotamer choice can affect, kept live rather than
+    #: dropped. The ACS Catal 2017 thioesterase work preserved catalysis with
+    #: exactly these -- a distance between two non-design atoms, held to
+    #: +/-0.2 A -- and they were reported as "nothing to decide" and then
+    #: enforced nowhere, although the perturbation and the redock both move
+    #: them. Each entry is (label, atom refs, lo, hi, unit, strict).
+    geometry_only: list[tuple] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     #: Per-restraint summary, for reporting.
     summary: list[str] = field(default_factory=list)
@@ -414,15 +421,30 @@ def _plan_one(
         coords = [x.fixed for x in resolved]
         value = measure(coords)
         ok = within(value)
+        # Recorded, not discarded. No ROTAMER choice can change this, which is
+        # all the old message said -- but the backbone perturbation and the
+        # rigid-body redock both can, so the run has to keep measuring it.
+        plan.geometry_only.append(
+            (label, [x.ref for x in resolved], lo, hi, r.unit, bool(r.strict),
+             r.kind.value, None if r.target is None else float(r.target),
+             None if r.tolerance is None else float(r.tolerance))
+        )
         plan.summary.append(
             f"{label}: {value:.3f} {r.unit} in the input structure "
-            f"({'satisfied' if ok else 'VIOLATED'}); nothing to decide"
+            f"({'satisfied' if ok else 'VIOLATED'}); no rotamer choice can "
+            f"change it, so it is re-measured after each perturbation and "
+            f"redock instead"
         )
         if not ok:
+            # "the input structure" only on the first plan: the loop re-plans
+            # after each perturbation and each redock, and a violation found
+            # then belongs to the candidate, not to the user's file.
             msg = (
-                f"{label} is violated by the input structure itself: measured "
-                f"{value:.3f} {r.unit}, wanted [{lo:g}, {hi:g}]. No choice of "
-                "rotamer can change it."
+                f"{label} is violated by the coordinates as they stand: "
+                f"measured {value:.3f} {r.unit}, wanted [{lo:g}, {hi:g}]. No "
+                f"choice of rotamer can change it -- only the backbone "
+                f"perturbation or the partner's placement can, so the "
+                f"iteration is rejected rather than repacked."
             )
             if r.strict:
                 raise RestraintError(msg)

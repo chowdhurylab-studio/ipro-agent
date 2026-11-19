@@ -66,13 +66,30 @@ Practical size control
 The pair-variable count grows as (positions x rotamers)^2, so three prunings
 are applied before the program is written, each reported in the result:
 
-* **rotamer pruning (generalized dead-end elimination)** -- a rotamer whose
-  self-energy exceeds ``max_self_energy`` clashes irrecoverably with fixed
-  atoms and can never appear in an optimal assignment, so it is dropped. This
-  is IPRO's ``X_ir = 0 if E_rs(i,r) > delta_i`` condition. Implemented with two
-  safeguards the bare rule lacks: a position never loses its last rotamer
+* **rotamer pruning** -- a rotamer whose self-energy is more than
+  ``rotamer_window`` kcal/mol worse than the **best rotamer at that same
+  position** is dropped. That relative form is IPRO's published rule
+  (``ROTAMERS.py``: keep ``sorted[n][i] <= sorted[n][0] + window`` with a
+  40 kcal/mol window), and the window is why: it is a statement about which
+  conformers are competitive *there*, not an absolute energy.
+
+  **It is not dead-end elimination and the claim has been withdrawn.** A
+  rotamer with a high self-energy can still be optimal, because a favourable
+  pair term can outweigh it: constructed with this package's own MILP and
+  glpsol, with self energies ``{A1 r0: 0.0, A1 r1: 51.0}`` and a pair term
+  ``(A1,r1,A2,r0): -60.0``, the full table's optimum is **-9.000** choosing
+  r1, while an absolute >50 prune gives **+0.000** choosing r0 -- the prune
+  changed the answer. A true DEE criterion (Goldstein) compares against the
+  pair-energy extrema; this does not, so it is a heuristic filter, reported as
+  one in ``EnergyTables.stats``.
+
+  Two safeguards the bare rule lacks: a position never loses its last rotamer
   (which would make the program infeasible), and the native identity is never
   pruned (so "do not mutate" stays reachable and a mutation can be rejected);
+  ``max_self_energy``, if set, is an additional absolute ceiling for genuine
+  clashes, and defaults to off -- as an absolute default of 50 it pruned
+  TRP, PHE and TYR out of OmpF position A18 entirely, which removed the
+  published V18W answer from the design space (docs/DESIGN.md 7d, defect 25);
 * **position-pair pruning** -- two positions whose rotamer clouds cannot reach
   each other (centroid separation beyond the sum of their radii plus the energy
   cutoff) contribute no pair variables at all;
@@ -234,6 +251,14 @@ class EnergyTables:
     #: per position because a restraint that forbids every surviving rotamer
     #: needs to say whether pruning is why.
     pruned_per_position: dict[str, int] = field(default_factory=dict)
+    #: Allowed identities that lost EVERY rotamer at a position, per position.
+    #: Reported because this is the quiet way a design space shrinks: the spec
+    #: offers 9 residues at A18 and `validate` advertises 6561 sequences, while
+    #: TRP is not reachable there at all. Measured on the shipped smoke spec,
+    #: TRP's best rotamer at A18 sits 51.9 kcal/mol above the best rotamer
+    #: (MET, -7.06) on the screening scale -- a real clash with the UNRELAXED
+    #: wild-type pocket, and exactly the residue the published design uses.
+    dropped_identities: dict[str, list[str]] = field(default_factory=dict)
 
     def rot_index(self, pos: str) -> list[int]:
         return list(range(len(self.rotamers[pos])))
@@ -248,7 +273,8 @@ def build_tables(
     backend: EnergyBackend,
     *,
     strain_weight: float = 0.0,
-    max_self_energy: float = 50.0,
+    max_self_energy: float | None = None,
+    rotamer_window: float = 40.0,
     pair_eps: float = 1e-3,
     energy_cutoff: float = 12.0,
     native: dict[str, str] | None = None,
@@ -323,20 +349,40 @@ def build_tables(
             e += reference_energies.get(rot.aa, 0.0)
             scored.append((e, rot))
 
-        # Keep anything below the clash threshold; always keep at least one
-        # rotamer per position (else the program is infeasible) and always keep
-        # the native identity if it was offered, so "no mutation" stays
-        # reachable -- IPRO must be able to reject a mutation.
+        # IPRO's rule, which is RELATIVE to the best rotamer at this position:
+        # a conformer is competitive or it is not, and that question has no
+        # absolute answer. An absolute threshold measured six rotamers at one
+        # position with self energies 60, 62, 70, 75, 90, 99 -- a 39 kcal/mol
+        # band, well inside IPRO's 40 kcal/mol window -- and kept ONE, the
+        # native, via the safeguard below; IPRO keeps all six.
+        #
+        # Always keep at least one rotamer per position (else the program is
+        # infeasible) and always keep the native identity if it was offered, so
+        # "no mutation" stays reachable -- IPRO must be able to reject a
+        # mutation.
         nat = native.get(pos)
-        best = min(scored, key=lambda t: t[0])[1] if scored else None
+        best_pair = min(scored, key=lambda t: t[0]) if scored else None
+        best = best_pair[1] if best_pair else None
+        floor = best_pair[0] if best_pair else 0.0
         for e, rot in scored:
-            keep = e <= max_self_energy or rot is best or (nat and rot.aa == nat)
+            keep = (
+                e <= floor + rotamer_window
+                or rot is best
+                or (nat and rot.aa == nat)
+            )
+            if keep and max_self_energy is not None:
+                keep = (e <= max_self_energy or rot is best
+                        or (nat and rot.aa == nat))
             if keep:
                 kept.append(rot)
             else:
                 n_pruned += 1
         tab.rotamers[pos] = kept
         tab.pruned_per_position[pos] = len(scored) - len(kept)
+        offered = {r.aa for _e, r in scored}
+        survived = {r.aa for r in kept}
+        if offered - survived:
+            tab.dropped_identities[pos] = sorted(offered - survived)
         # Keyed by object identity, not by (position, aa, state): a library
         # with a duplicate (aa, state) would otherwise collapse two distinct
         # rotamers onto one energy.

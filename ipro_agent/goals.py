@@ -18,7 +18,8 @@ Sign convention
 ---------------
 Every goal returns a ``score`` that the loop **minimizes**. This matters
 because the published work is inconsistent: standard IPRO minimizes an
-interaction energy, while PoreDesigner *maximizes* one (it occludes a pore, so
+interaction energy, while PoreDesigner *maximizes* one (a tighter pore means a worse
+water interaction, so
 a worse water interaction is the aim). Rather than carry that inconsistency
 into the code, each goal is responsible for emitting an already-normalized
 score, and says in its docstring which direction the source paper used.
@@ -49,6 +50,7 @@ SHARED_OPTION_KEYS: frozenset[str] = frozenset({
     "reference_energies",        # milp.build_tables, cli, loop._self_energy_terms
     "strain_weight",             # loop._self_energy_terms
     "max_self_energy",           # loop._tables_for, restraints
+    "rotamer_window",            # loop._tables_for (IPRO's relative prune)
     "pair_eps",                  # loop._tables_for
     "insert_phi", "insert_psi",  # loop, terminal insertions
     "pore_axis", "pore_axis_flatness_warn",   # loop._pore_axis
@@ -405,9 +407,22 @@ class ReshapeChannel(Goal):
     PoreDesigner (Chowdhury et al., Nat Commun 2018) narrowed the OmpF pore by
     lining its lumen with bulky residues, and encoded that by **maximizing**
     the interaction energy with a single-file water probe threaded through the
-    channel -- a worse water interaction means a more occluded lumen -- while a
-    MILP constraint forced at least half the designed positions to take a long
+    channel -- a worse water interaction means a tighter lumen -- while a MILP
+    constraint forced at least half the designed positions to take a long
     residue (W/F/Y/M).
+
+    **Narrowing is not occluding, and the objective alone cannot tell the
+    difference.** The published aim was a selective channel that still passes
+    water single-file: their designs were filtered to a sub-4 A bottleneck and
+    then *verified to conduct*, and the paper's own constraint keeps the lumen
+    open. This objective is monotonic -- the tighter the worse the probe
+    interaction, so a fully blocked pore is its maximum. Measured with
+    `spec_full.yaml`'s own options (direction narrow, `pore_diameter_max` 4.0,
+    `pore_diameter_min` null): a candidate with a 0.8 A bottleneck and the
+    probe clashing at IE +50 passes `filter_reject` and scores -50.0, beating
+    a paper-style compliant design at 3.5 A (+0.200). So **set
+    ``pore_diameter_min``** -- about 2.8 A for water -- or the best-scoring
+    design is a plug. The goal says so in a note when narrowing without one.
 
     Here the direction is a parameter, because the opposite request (widen a
     substrate channel) is just as common:
@@ -460,6 +475,21 @@ class ReshapeChannel(Goal):
         # warning for exactly the spec that states the paper's published filter:
         # a 3.2 A and a 3.8 A candidate both scored -100.0 and the user was told
         # nothing, while a spec with no options at all got the warning.
+        # Narrowing with no floor: the objective's maximum is a blocked pore.
+        if (d == "narrow"
+                and self.options.get("pore_diameter_min") is None
+                and not any("pore_diameter_min" in n for n in self.notes)):
+            self.notes.append(
+                "narrowing with no `goal_options.pore_diameter_min`: this "
+                "objective is monotonic, so a FULLY OCCLUDED pore is its "
+                "best possible score -- measured, a 0.8 A bottleneck with the "
+                "water probe clashing (+50) scores -50.0 and beats a "
+                "paper-style 3.5 A design (+0.200). PoreDesigner's designs "
+                "were required to still conduct water single-file. Set "
+                "pore_diameter_min (about 2.8 A for water) unless you really "
+                "do want a plug, and do not report a sub-4 A bottleneck as a "
+                "selective channel without it."
+            )
         has_objective = self.options.get("target_radius") is not None
         if not self.spec.targets and not has_objective:
             # Constraint-only mode. This is a real situation, not a misuse:
@@ -745,9 +775,10 @@ class ImproveCatalysis(Goal):
 
 
 class Stabilize(Goal):
-    """Minimize the energy of the design molecule itself.
+    """Minimize the energy of the complex.
 
-    score = E(design alone)
+    ``score = E(complex)`` when the spec has partners, and ``E(design alone)``
+    when it does not -- with no partner the two are the same quantity.
 
     Useful on its own, and as the inner objective of IPRO+/-'s constrained
     form: minimize complex energy while holding the interaction energy within a
@@ -756,7 +787,10 @@ class Stabilize(Goal):
     """
 
     kind = GoalKind.STABILIZE
-    objective_text = "minimize the energy of the design molecule"
+    objective_text = (
+        "minimize the energy of the complex (the design molecule alone when "
+        "there is no partner)"
+    )
     source = "IPRO+/- (Chowdhury et al., Structure 2020), constrained formulation"
     OPTION_KEYS = frozenset({"min_interaction_fraction", "reference_interaction"})
 
@@ -808,7 +842,18 @@ class Stabilize(Goal):
         return None
 
     def score(self, ctx: ScoreContext) -> float:
-        s = ctx.design_only if ctx.design_only else ctx.total
+        # The COMPLEX energy when there are partners, which is what both
+        # DESIGN.md and this class's own docstring cite (IPRO+/-: minimize the
+        # complex energy subject to an interaction-energy floor). Scoring the
+        # design molecule alone chose differently: measured with candidates
+        # A (design_only -100.0, IE -20.0, complex -120.0) and B (-103.0,
+        # -15.0, -118.0), the design-only objective picks B while min
+        # E_complex picks A -- and both pass the floor, so nothing else caught
+        # it. With no partner the complex IS the design molecule, which is the
+        # original behaviour.
+        s = ctx.total if self.spec.targets else (
+            ctx.design_only if ctx.design_only else ctx.total
+        )
         floor = self._floor()
         if floor is not None:
             # Kept as a gradient *inside* the feasible region's edge so the

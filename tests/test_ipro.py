@@ -962,8 +962,20 @@ def test_restraint_on_a_missing_atom_is_caught_before_the_run():
     assert problems and "ZZ9" in problems[0], problems
 
 
-def test_restraint_with_no_design_position_is_reported_not_enforced():
-    """If nothing the design controls affects the measurement, say so."""
+def test_restraint_with_no_design_position_is_measured_every_iteration():
+    """No rotamer choice can affect such a restraint -- but the backbone
+    perturbation and the rigid-body redock both can, and the planner's
+    "nothing to decide" meant it was then enforced nowhere.
+
+    That is the paper's own mechanism for preserving catalysis: the ACS Catal
+    2017 thioesterase work held catalytic distances to +/-0.2 A with exactly
+    this kind of restraint, between atoms neither of which is a design
+    position. Measured: translating the partner 1.0 A -- five times that
+    tolerance, and far less than the drift of a few hundred redock moves at
+    sigma 0.2 -- turned a satisfied restraint into a violated one while
+    `rotamer_vetoes` stayed empty and `is_empty()` stayed True, so nothing
+    reached the MILP and nothing rejected the iteration. They are kept on the
+    plan now (`geometry_only`) and the loop rejects on them."""
     from ipro_agent.config import Restraint
     from ipro_agent.restraints import plan_restraints
     from ipro_agent.structure import Structure
@@ -974,7 +986,16 @@ def test_restraint_with_no_design_position_is_reported_not_enforced():
     r = Restraint(kind="distance", atoms=["A30:CA", "A31:CA"], maximum=0.5, label="fixedpair")
     plan = plan_restraints([r], t, st, [])
     assert not plan.rotamer_vetoes and not plan.pair_vetoes
-    assert plan.native_violations and "violated by the input structure" in plan.native_violations[0]
+    assert plan.geometry_only, "it must stay on the plan, not be dropped"
+    assert plan.native_violations, plan.summary
+    assert "violated by the coordinates as they stand" in plan.native_violations[0]
+    assert "iteration is rejected" in plan.native_violations[0]
+    assert "re-measured after each perturbation and redock" in plan.summary[0]
+
+    # And the loop enforces it rather than noting it.
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "_broken_geometry_restraints" in src
+    assert 'reason = False, f"restraint violated: {broke[0]}"' in src
 
 
 def test_dihedral_rejects_one_sided_bounds():
@@ -5617,3 +5638,222 @@ def test_regression_zero_is_a_mistake_not_an_unset_value():
     )
     assert p.returncode == 2, (p.returncode, p.stdout[-200:])
     assert "at least 1" in p.stderr, p.stderr[-200:]
+
+
+def test_regression_the_rotamer_prune_is_relative_as_the_paper_is():
+    """Two findings in one place. The prune used a single global 50 kcal/mol
+    threshold, and the docs called it generalized dead-end elimination with
+    the claim that a pruned rotamer "cannot appear in an optimal assignment".
+
+    It can. Constructed with this repo's own MILP and glpsol: self energies
+    ``{A1 r0: 0.0, A1 r1: 51.0}`` with a pair term ``(A1,r1,A2,r0): -60.0``
+    has optimum **-9.000** choosing r1, where a >50 prune gives **+0.000**
+    choosing r0 -- the prune changed the answer, so the claim is withdrawn.
+
+    And IPRO's actual rule is RELATIVE to the best rotamer at each position
+    (``ROTAMERS.py``: ``sorted[n][i] <= sorted[n][0] + window``, 40 kcal/mol).
+    Measured: six rotamers at one position with self energies 60, 62, 70, 75,
+    90, 99 -- a 39 kcal/mol band, inside IPRO's window -- kept **1 of 6** under
+    the absolute threshold (the native, via the safeguard) where IPRO keeps all
+    six. On the shipped OmpF smoke spec the absolute default also deleted TRP,
+    PHE and TYR from A18 outright, taking the published V18W answer out of the
+    design space (DESIGN.md §7d defect 25)."""
+    import numpy as _np
+
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.milp import EnergyTables, Rotamer, RotamerMILP, build_tables
+
+    def rot(pos, aa, state):
+        return Rotamer(position=pos, aa=aa, state=state,
+                       atoms=AtomSet(names=["CB"], coords=_np.zeros((1, 3)),
+                                     resnames=[aa]))
+
+    # The counterexample to the DEE claim.
+    tab = EnergyTables(
+        positions=["A1", "A2"],
+        rotamers={"A1": [rot("A1", "ALA", 0), rot("A1", "TRP", 1)],
+                  "A2": [rot("A2", "ALA", 0)]},
+        stats={})
+    tab.self_energy = {("A1", 0): 0.0, ("A1", 1): 51.0, ("A2", 0): 0.0}
+    tab.pair_energy = {("A1", 1, "A2", 0): -60.0}
+    sol = RotamerMILP(tab).solve()
+    assert abs(sol.objective - (-9.0)) < 1e-6, sol.objective
+    assert sol.choices["A1"] == 1, sol.choices
+    for doc in ("docs/MILP.md", "docs/DESIGN.md"):
+        text = (REPO / doc).read_text()
+        assert "cannot appear in\n   an optimal assignment" not in text
+        assert "cannot appear in an optimal assignment" not in text or \
+            "was wrong" in text, doc
+
+    # The relative window, measured on a band inside IPRO's 40 kcal/mol.
+    class _Flat:
+        can_relax = False
+        name = "flat"
+        units = "test"
+        screening_pairwise = True
+
+        def __init__(self, energies):
+            self.energies = energies
+
+        def interaction(self, a, b):
+            # One atom per rotamer, named for its energy.
+            return self.energies[a.names[0]]
+
+        def internal(self, a):
+            return 0.0
+
+    energies = {"r0": 60.0, "r1": 62.0, "r2": 70.0,
+                "r3": 75.0, "r4": 90.0, "r5": 99.0}
+    rots = {"A1": []}
+    for i, (name, _e) in enumerate(sorted(energies.items())):
+        aa = "ALA" if name == "r0" else "TRP"
+        rots["A1"].append(
+            Rotamer(position="A1", aa=aa, state=i,
+                    atoms=AtomSet(names=[name], coords=_np.zeros((1, 3)),
+                                  resnames=[aa])))
+    template = AtomSet(names=["N"], coords=_np.zeros((1, 3)), resnames=["GLY"])
+
+    relative = build_tables(rots, template, _Flat(energies),
+                            native={"A1": "ALA"}, rotamer_window=40.0)
+    assert len(relative.rotamers["A1"]) == 6, (
+        f"IPRO's 40 kcal/mol window keeps all six; kept "
+        f"{len(relative.rotamers['A1'])}"
+    )
+    absolute = build_tables(rots, template, _Flat(energies),
+                            native={"A1": "ALA"}, rotamer_window=1e9,
+                            max_self_energy=50.0)
+    assert len(absolute.rotamers["A1"]) == 1, (
+        f"the old absolute threshold kept {len(absolute.rotamers['A1'])}"
+    )
+    # And the default is off, so the absolute ceiling cannot bite unasked.
+    import inspect
+
+    sig = inspect.signature(build_tables)
+    assert sig.parameters["max_self_energy"].default is None
+    assert sig.parameters["rotamer_window"].default == 40.0
+
+
+def test_regression_an_unreachable_identity_is_reported():
+    """An identity whose every rotamer is pruned is not reachable, but
+    ``validate`` still advertises the full product of the allowed sets.
+    Measured on the shipped smoke spec: 6561 sequences reported while TRP was
+    absent from A18 entirely -- its best rotamer sits 51.9 kcal/mol above the
+    best at that position (MET, -7.06) on the screening scale, a real clash
+    with the UNRELAXED wild-type pocket, and TRP is exactly the residue the
+    published design puts there. The run says so now."""
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (skipped: needs the ompf example and PyMOL)")
+        return
+    from ipro_agent.loop import IPROLoop
+
+    spec = DesignSpec.load(ompf / "spec_smoke.yaml")
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run",
+                    backend=resolve("builtin"))
+    cb = loop.build_combined()
+    dropped = cb.tables.dropped_identities
+    assert "A18" in dropped and "TRP" in dropped["A18"], dropped
+    loop._note_dropped_identities(cb.tables)
+    note = [n for n in loop.notes if "NOT reachable" in n]
+    assert note, loop.notes
+    assert "A18: TRP" in note[0], note[0]
+    assert "rotamer_window" in note[0]
+
+
+def test_regression_stabilize_minimizes_the_complex_energy():
+    """``Stabilize`` scored the design molecule's own energy where DESIGN.md
+    and its own docstring cite ``min E_complex`` (IPRO+/-: minimize the complex
+    energy subject to an interaction-energy floor). Measured with candidates
+    A (design_only -100.0, IE -20.0, complex -120.0) and B (-103.0, -15.0,
+    -118.0), both passing the floor: the design-only objective picks B, the
+    paper's picks A."""
+    from ipro_agent.goals import ScoreContext, build_goal
+
+    lig = Path(tempfile.mkdtemp()) / "lig.pdb"
+    lig.write_text(
+        "HETATM    1  C1  LIG B   1      20.000  20.000  20.000  1.00  0.00           C\nEND\n"
+    )
+    spec = DesignSpec.from_dict({
+        "goal": "stabilize", "goal_statement": "stabilize it",
+        "molecules": [
+            {"name": "p", "path": str(CRN), "role": "design",
+             "kind": "protein", "chains": ["A"]},
+            {"name": "t", "path": str(lig), "role": "target", "kind": "ligand"},
+        ],
+        "positions": ["A16"],
+        "goal_options": {"min_interaction_fraction": 0.75,
+                         "reference_interaction": -20.0},
+    })
+    goal = build_goal(spec)
+    a = ScoreContext(design_only=-100.0, interaction={"t": -20.0}, total=-120.0)
+    b = ScoreContext(design_only=-103.0, interaction={"t": -15.0}, total=-118.0)
+    assert goal.filter_reject(a) is None and goal.filter_reject(b) is None
+    assert abs(goal.score(a) - (-120.0)) < 1e-9, goal.score(a)
+    assert goal.score(a) < goal.score(b), (
+        "min E_complex must pick the lower complex energy"
+    )
+
+    # With no partner the complex IS the design molecule.
+    spec2 = DesignSpec.from_dict({
+        "goal": "stabilize", "goal_statement": "stabilize it",
+        "molecules": [{"name": "p", "path": str(CRN), "role": "design",
+                       "kind": "protein", "chains": ["A"]}],
+        "positions": ["A16"],
+    })
+    alone = build_goal(spec2)
+    assert abs(alone.score(ScoreContext(design_only=-50.0, total=-50.0))
+               - (-50.0)) < 1e-9
+
+
+def test_regression_narrowing_without_a_floor_says_a_plug_would_win():
+    """PoreDesigner's designs had to still conduct water single-file; this
+    objective is monotonic, so a blocked pore is its maximum. Measured with
+    ``spec_full.yaml``'s own options (direction narrow, pore_diameter_max 4.0,
+    pore_diameter_min null): a candidate with a 0.8 A bottleneck and the probe
+    clashing at IE +50 passes ``filter_reject`` and scores -50.0, beating a
+    paper-style 3.5 A design at +0.200. The docs also described the objective
+    as occluding the lumen, which is the opposite of the paper."""
+    from ipro_agent.goals import ScoreContext, build_goal
+
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "spec_full.yaml").exists():
+        print("    (skipped: no example)")
+        return
+    goal = build_goal(DesignSpec.load(ompf / "spec_full.yaml"))
+    assert any("FULLY OCCLUDED" in n for n in goal.notes), goal.notes
+    assert any("2.8" in n for n in goal.notes), "the note must give a floor"
+
+    plug = ScoreContext(interaction={"water_wire": 50.0},
+                        geometry={"min_pore_diameter": 0.8})
+    assert goal.filter_reject(plug) is None, (
+        "the published filter alone does not stop a plug -- which is the point"
+    )
+
+    # With a floor, it does.
+    spec = DesignSpec.load(ompf / "spec_full.yaml")
+    spec.goal_options["pore_diameter_min"] = 2.8
+    floored = build_goal(spec)
+    assert floored.filter_reject(plug), "a floor must reject a blocked pore"
+    assert not any("FULLY OCCLUDED" in n for n in floored.notes)
+
+    for text in ((REPO / "ipro_agent" / "goals.py").read_text(),
+                 (REPO / "docs" / "DESIGN.md").read_text()):
+        assert "to occlude the lumen" not in text
+
+
+def test_regression_the_hard_reject_guard_watches_the_complex_energy():
+    """The released source applies its two tests to two different quantities
+    (``standard_decision``): the Metropolis window to the interaction energy,
+    and the max(40 kcal/mol, 5%) cap to ``Energies[group]['Complex']``. That
+    cap is the stability safeguard. Applied to the objective instead -- as it
+    was here -- a goal that is not an energy at all (a pore radius, a
+    specificity difference) got a cap in the wrong units, and a design could
+    destabilize the protein by any amount so long as the objective improved."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "d_complex = ctx.total - current_complex" in src
+    assert "hard_reject_fraction * abs(current_complex)" in src, (
+        "the 5% is 5% of the complex energy, not of the objective"
+    )
+    assert "complex energy worse by" in src
+    # And the accepted structure's complex energy is what it is measured from.
+    assert "current_complex = ctx.total" in src

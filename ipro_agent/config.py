@@ -637,13 +637,23 @@ class LoopSettings:
     #: Stop early once this many designs have been accepted (IPRO's other
     #: termination condition). None means "run to the iteration cap".
     stop_after_accepted: int | None = None
-    #: Hard cap on rotamers per MILP, as IPRO caps at 1300. Exceeding it
-    #: triggers tighter pruning rather than an unsolvable program.
+    #: Advisory cap on rotamers per MILP. IPRO's released source caps at 1300
+    #: (the Suite paper says 1400) and **shrinks its pruning window until the
+    #: count fits** -- ``ROTAMERS.py``: ``while total > MAX``, window *= 0.95,
+    #: then N -= 1 once the window falls below 15% of its start, raising only
+    #: after 300 s of failing to shrink. Nothing here tightens anything: the
+    #: run reports the overrun and carries on. The comment used to claim the
+    #: tightening, which is worse than no comment at all.
     max_rotamers: int = 1300
 
-    #: Residues within this distance (A) of a perturbed/mutated position are
-    #: repacked alongside it, even if not design positions. IPRO uses a 4.5 A
-    #: shell around the perturbation window.
+    #: **NOT IMPLEMENTED, and kept only so an old spec still loads.** IPRO
+    #: repacks a 4.5 A shell around the perturbation window, and the 2006
+    #: paper's step iii additionally lets the five flanking residues either
+    #: side change rotamer (not identity). Neither exists here: the MILP's
+    #: variables are exactly the user's design positions, so the surrounding
+    #: native side chains keep their input rotamers and cannot relieve the
+    #: strain a perturbation introduces. Setting this changes nothing, and the
+    #: run says so. See docs/DESIGN.md section 4.
     neighbour_cutoff: float = 4.5
     #: Non-bonded energy cutoff (A). IPRO: 12 A vdW.
     energy_cutoff: float = 12.0
@@ -668,8 +678,8 @@ class LoopSettings:
     #: the 2006 paper reports sigma = 1.65 deg.
     perturbation_sigma_deg: float = 1.5
     perturbation_cap_deg: float = 5.0
-    #: Half-width (residues) of the perturbation window either side of the
-    #: chosen segment.
+    #: **NOT IMPLEMENTED** -- see :attr:`neighbour_cutoff`. Kept so an old
+    #: spec still loads; setting it changes nothing.
     perturbation_flank: int = 5
 
     #: Rigid-body redocking of target molecules every Nth iteration.

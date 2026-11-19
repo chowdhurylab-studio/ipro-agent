@@ -17,7 +17,7 @@ from this tool as an IPRO result.
 |---|---|---|
 | Iteration loop: perturb → optimal rotamers → redock → relax → score → accept/reject → cut | `loop.py` | IPRO Suite (JCC 2015), §Methods; order confirmed against the released source's `Start → Backbone_Perturbation → Optimal_Rotamers → Docking → Relaxation → Calculate_Energy → End_Iteration` |
 | Rotamer-selection MILP: objective, assignment constraint, bilinear linearization | `milp.py` | Saraf et al. (Biophys J 2006) Eqs 3–10; reproduced in full in the PoreDesigner SI (CC-BY); variable declarations confirmed in `ROTAMERS.py`/`GAMS.py` |
-| Generalized dead-end elimination (self-energy pruning) | `milp.build_tables` | Biophys J 2006, `X_ir = 0 if E_rs(i,r) > δ_i` |
+| Rotamer pruning, relative to each position's best (window 40 kcal/mol) — **a heuristic filter, not dead-end elimination**; §7h | `milp.build_tables` | Released source `ROTAMERS.py` (`sorted[n][i] <= sorted[n][0] + window`); the 2006 paper's `X_ir = 0 if E_rs(i,r) > δ_i` is per-position δ_i, not a global constant |
 | Integer ("no good") cuts — never revisit a design | `milp.RotamerMILP.visited` | IPRO Suite constraint (10); `≤ len−1` cut form in the source |
 | Mutation-count limit | `Constraint("max_mutations")` | IPRO Suite constraint (5) |
 | Permitted-amino-acid enforcement per position | `Constraint("require"/"forbid")`, and `DesignPosition.allowed` | IPRO Suite constraint (7) |
@@ -30,7 +30,7 @@ from this tool as an IPRO result.
 | Design ensemble rather than a single answer | `RunResult.ensemble` | IPRO Suite; source default of 10 ensembles |
 | **Goal: affinity** — minimize `IE(target)` | `goals.BindTighter` | IPRO (Biophys J 2006); IPRO+/− (Structure 2020) |
 | **Goal: specificity** — minimize `IE(target) − w·IE(anti-target)` | `goals.SwitchSpecificity` | ACS Catal 2017's ranking metric `ΔIE = IE_short − IE_long`; the 2006 AraC case's decoy ligand (D- vs L-arabinose) |
-| **Goal: channel** — probe interaction, direction as a parameter | `goals.ReshapeChannel` | PoreDesigner (Nat Commun 2018), which *maximized* `IE` with a single-file water wire to occlude the lumen |
+| **Goal: channel** — probe interaction, direction as a parameter | `goals.ReshapeChannel` | PoreDesigner (Nat Commun 2018), which *maximized* `IE` with a single-file water wire to **tighten** the lumen — the designs still had to conduct water, so narrowing is not occluding; §7h |
 | **Goal: catalysis** — `K_M`, `k_cat/K_M`, `k_cat` | `goals.ImproveCatalysis` | OptZyme (PLoS ONE 2013) Eq 7 (`IE_S = RT ln K_M`), Eq 17 (`ΔIE_TSA = −RT[ln(k_cat/K_M) − ln(k_cat^WT/K_M^WT)]`), Eq 18 |
 | **Goal: stability**, optionally constrained by interaction | `goals.Stabilize` | IPRO+/− (Structure 2020): `min E_complex s.t. IE ≥ 0.75·IE_WT` |
 | Design positions proposed by distance to a partner | `cli.cmd_positions` | the distance-cutoff rule used throughout the case studies |
@@ -59,13 +59,14 @@ following holds:
 | forms the oxyanion hole | no |
 | shown important for function by mutagenesis | no |
 | within 4.5 Å of the reactive atom (the thioester sulfur) | **yes**, given the atom |
-| Cα more than 0.75 Å closer than Cβ to the ligand's discriminating atom (side chain points away) | **yes**, given the atom |
+| Cα more than 0.75 Å closer than Cβ to the ligand's discriminating atom (side chain points away; glycines not considered, having no Cβ) | **yes**, given the atom |
 | ≥40% conservation in the family | no — needs an alignment |
 | the family alignment has a gap at that position | no |
 | in one of the protein's flexible loops | no |
 | an earlier round showed mutating it abolished activity | no |
+| **proline** (the SI's footnote e: legacy IPRO could not mutate *from* PRO) | n/a here — PyMOL's wizard mutates from proline, so this exclusion does not apply to this implementation. It matters for reading the paper: P110 is excluded in rounds 1–2 and is the **top-ranked design position in rounds 3–4**. |
 
-Two of the nine are geometric and computable; the rest require knowledge this
+Two of the ten are geometric and computable; the rest require knowledge this
 tool does not have. That is why `positions` is documented as a *proposal* and
 why `.claude/skills/ipro-agent/SKILL.md` makes the agent walk the user through the list rather than
 accepting a distance cutoff as the answer. Note also that the sorting metric
@@ -124,8 +125,11 @@ accepts:
 
 Two consequences worth stating plainly. First, IPRO supports **multiple binding
 assemblies** and requires that *all* of them pass the acceptance criterion for
-an iteration to be retained; this tool models one assembly, so a design that
-must satisfy several binding topologies at once cannot be expressed. Second,
+an iteration to be retained; **that is implemented here** — see §1d,
+`docs/MILP.md` and `assemblies.py` — with the one limit §1d states, that every
+assembly shares a single design backbone. (An earlier version of this section
+said the tool models one assembly, which contradicted §1d on the same page.)
+Second,
 IPRO offers **four kinds of atom-position restraint, "rigorously enforced
 throughout all functions"** — atoms fixed in place, atoms held near their input
 positions, a distance restraint between two atoms, and a dihedral restraint on
@@ -495,7 +499,7 @@ stated.
 | `redock_every` | 3 | IPRO Suite | Every third iteration. |
 | `redock_moves` / sigmas | 500 / 0.2 Å / 2.0° | IPRO Suite | Rigid-body Monte-Carlo sub-moves. |
 | `iterations` | 100 | **this repo's choice** | IPRO's coded default is 3000; the Suite paper quotes a 10,000 cap; the 2006 paper used 200–10,000. A small default makes a long run a deliberate act. |
-| `max_rotamers` | 1300 | source | |
+| `max_rotamers` | 1300 | source | The Suite paper states **1400**; the released source uses 1300 and that is the value taken. Advisory here either way: nothing tightens the pruning when it is exceeded, the run only reports it (§7h). |
 | `ensemble_size` | 10 | source | |
 | `greedy_fraction` | 0.10 | source | Annealing disabled for the first 10% of iterations. |
 | `hard_reject_kcal` / `_fraction` | 40 / 0.05 | source | |
@@ -534,6 +538,8 @@ specified, and this table is the record of what that changes.
 | **Internal** insertions and deletions | Not implemented; refused with the specific reason. | Changing chain length *in the middle* needs loop closure. Protein-InDelMaker uses PyRosetta's GeneralizedKIC over a 6-residue window then Cartesian FastRelax (`repeats=5`); IPRO+/− reports an 11-residue CCD loop, ≤20 iterations, 3000 runs. **Terminal** indels need no closure and are implemented — see §1i. |
 | **Rosetta-scored MILP pair tables** | `exact_pairs=True` raises. | Rosetta scores poses, not atom sets; a pose per rotamer pair is prohibitive. The screening terms build the table, as IPRO likewise uses a cheap evaluation for its combinatorial inner problem. |
 | **Reference energies** | Mechanism provided, no values. | **Correction to an earlier claim in this document.** Two previous versions said IPRO carries a hardcoded 20-entry amino-acid reference-energy table and that its absence here was the tool's biggest practical limitation. Reading the released source directly, that is wrong on both counts. `SHARING.load_reference_Energies` loads *the best result so far* for the Metropolis comparison — run bookkeeping, not a residue table. The 20-entry tables in `STANDARDS.py` are naming and classification maps. What IPRO actually adds per rotamer is `-ln(p)` from `.prob` files in its rotamer library (`ROTAMERS.py:407`), a rotamer-probability penalty that is **0 for GLY and ALA** and therefore pushes *toward* small residues. So no per-residue-type unfolded-state term exists in IPRO at all. The `reference_energies` hook here is a **Rosetta-style** correction (ref2015 has a `ref` term), which the PyRosetta backend brings for free. The packing bias toward small residues is real, but it bites hardest when the objective is the packing itself (`stabilize`); IPRO optimizes an interaction energy with a target, where it bites far less. |
+| **Flanking-residue repacking and the 4.5 Å neighbour shell** | **Not implemented.** `loop.perturbation_flank` and `loop.neighbour_cutoff` are kept so an old spec still loads, are declared NOT IMPLEMENTED in `config.py`, and the run says so when either is set. | The 2006 paper's step iii optimizes a 10–15 residue window: design positions inside the perturbed region may change identity, and the five flanking residues either side "can only change rotamers but not the residue type". The Suite adds a 4.5 Å repack shell. Here the MILP's variables are exactly the user's design positions, so the surrounding native side chains keep their input rotamers and cannot relieve the strain a perturbation introduces. Implementing it means harvesting rotamers at the flanking positions each iteration (PyMOL, per iteration) and adding them to the program with identity pinned to native — which the existing `require` constraint already expresses. §7h records why it was not done rather than done badly. |
+| **Hybrid-library design (2006 Eqs 11–21)** | Not implemented. | Only the single-sequence formulation (Eqs 3–10) is here. The hybrid-library problem — choosing a *library* of sequences with its own binary variables and its structure-generation steps — is a different optimization and is out of scope; §1 cites the single-sequence equations accordingly. |
 | Separate H-bond (3 Å) and solvation (9 Å) cutoffs | Single 12 Å cutoff. | Minor; recorded for completeness. |
 | **Desolvation** | **Absent from the built-in energy.** | Correction to an earlier claim in this document, which described the built-in model as having a "solvation treatment" and mapped the paper's 9 Å solvation cutoff onto its 12 Å one. There is no such term: the built-in function is LJ + a bounded pair term + formal-charge Coulomb with a distance-dependent dielectric + a distance-only H-bond well, and nothing else. A buried polar or charged group therefore pays **no penalty for being buried**, which is the largest single omission relative to the CHARMM + Lazaridis–Karplus energy IPRO used, and it compounds the charge bookkeeping noted in §5. PyRosetta's ref2015 includes solvation — but only reaches the design through `exact_pairs=True`, which raises, so in practice the pair tables never have it (§7e). |
 
@@ -1119,3 +1125,256 @@ MILP resolved to **`COIN_CMD` via PuLP** rather than the `glpk` the development
 machine uses -- the environment file installs `pulp[cbc]`, which PuLP prefers.
 Same formulation, same optimum, different solver; `doctor.py` reports which one,
 which is the reason it reports it at all. The environment is 1.4 GB.
+
+---
+
+## 7h. Fifth and sixth audits: the papers, and the edge cases (2026-11-18)
+
+Two independent multi-agent audits, run over the whole repository after §7g:
+one checking the implementation against the **papers themselves** (41 agents:
+the 2006 procedure, the 2015 MILP, OptZyme kinetics, PoreDesigner, IPRO+/−),
+one over the **edge cases a stranger hits** (51 agents: MCP protocol
+robustness, the Python/dependency floor, fresh-machine paths, hostile input).
+They confirmed **19** and **32** findings. Every one below was re-measured here
+before being touched, and every fix carries a regression test whose docstring
+holds the measurement. The suite went 170 → 190 tests.
+
+Three of these corrected *this document*, which is the point of recording them.
+
+### The ones that changed what a design is
+
+**The perturbation was not coupled to the redesign.** IPRO builds the perturbed
+region **around a randomly chosen design position** (Suite step 1, "begins by
+randomly selecting a DP"; the 2006 paper's Fig. 5 says only design positions
+*within* the perturbed region may change identity), and the released source
+does exactly that — a uniform DP choice, then `randint(0,4)` split into
+residues before and after. Here `choose_segment` picked a proline-free run
+anywhere in the chain and `_choose_window` drew 1–3 design positions
+independently of it. Measured over 20,000 draws on `spec_full.yaml`'s 25
+positions: **P(the region touches any design position) = 0.1244**, where IPRO's
+is 1 by construction. So ~88% of moves changed the energy in a region the MILP
+had no variables for, and the Metropolis test then ruled on that change.
+`docs/MILP.md` called this "comparable locality"; 12.4% is not comparable
+locality. Now anchored — re-measured **1.0000** — and the window is read off
+the perturbed region.
+
+The `design_per_iteration` 1–3 rule was attributed to the Suite paper. **The
+Suite states no such rule** and the released source has no mutation-count draw
+at all; the count is an outcome of where the perturbation landed. It survives
+only as the fallback for `perturb_backbone: false`, labelled as this repo's
+choice.
+
+**Relaxation ran before the MILP instead of after it.** The 2006 paper puts
+backbone relaxation at step iv, *after* the side-chain/sequence optimization,
+and says why: the residues just chosen "may no longer be optimally interacting
+with the previous backbone". The released source runs
+`Backbone_Perturbation → Optimal_Rotamers → Docking → Relaxation →
+Calculate_Energy`, and §1's own table claims that order. The code did not have
+it: `backend.relax` had exactly one call site, inside `_perturb_once`, so the
+backbone was relaxed while it still carried the **old** side chains and then
+never adapted to the mutation — the whole purpose of the published step. The
+module docstring even listed "relax the whole complex and compute its energy"
+as a step that did not exist. Moved. Two consequences worth stating:
+
+* the **starting point is relaxed through the same path**, because relaxing
+  candidates against an unrelaxed reference would credit every candidate with
+  the relaxation's own energy drop and accept nearly everything — a larger
+  defect than the one being fixed;
+* what is relaxed is written straight from the atoms about to be scored
+  (`output.write_atomset_pdb`, which round-trips 327 atoms with zero
+  coordinate drift), so the coordinates and the energy cannot disagree.
+  Partners are not present during the relaxation; the backend's coordinate
+  constraints keep it a bounded local minimization, but the interface is not
+  re-optimized against the partner, and that is recorded in §4.
+
+**OptZyme Eq 18 used one RT where the paper uses two that differ 25-fold.** The
+paper states them outright for GUS/pNP-GLU: `(RT)_TSA = 15.3 kJ/mol`,
+`(RT)_S = 386.7 kJ/mol`, self-consistent with the weights it also gives
+(`1/(RT)_TSA = 0.06`, `1/(RT)_S = 0.002 mol/kJ`), so the substrate term carries
+**4%** of the TSA term's weight. Dividing both by `R·298.15 K` sets that
+relative weight to 1.0, which changes the **argmin**, not the scale. Measured
+on two candidates with both energies favourable — A (IE_TSA −15.0, IE_S −2.0)
+and B (−20.0, −12.0) — Eq 18 gives A −4.080 and B −5.339, so B wins; one RT
+gave A −21.944 and B −13.504, so A won, **rejecting the candidate that binds
+the transition state 5 kcal/mol better**. There was no test for `kcat` at all.
+Fixed with the paper's two constants, overridable per system
+(`rt_tsa_kcal`, `rt_substrate_kcal`); a single `temperature_k` is now refused
+for this parameter, because these are fitted correlating constants, not
+temperatures — the paper says plainly that "experimental and correlating
+temperatures do not match". (Its parenthetical temperatures, 4.65×10⁴ K and
+1840 K, are transposed relative to its own RT values: R·4.65×10⁴ = 386.6
+kJ/mol. The RT pair is the one to trust.)
+
+**`Stabilize` minimized the wrong energy.** It scored the design molecule
+alone where this document and its own docstring cite `min E_complex`
+(IPRO+/−: minimize the complex energy subject to an interaction-energy floor).
+Measured with A (design_only −100.0, IE −20.0, complex −120.0) and B (−103.0,
+−15.0, −118.0), both passing the floor: design-only picks B, `min E_complex`
+picks A. Now the complex when there are partners, the design molecule when
+there are none — with no partner the two are the same quantity.
+
+**The 40 kcal/mol / 5% hard-reject guard watched the objective, not the complex
+energy.** The released source's `standard_decision` applies its two tests to
+two *different* quantities: the Metropolis window to the interaction energy,
+and `max(40, 5%)` to `Energies[group]['Complex']`. That cap is the stability
+safeguard; pointed at the objective it was a second opinion about the
+objective, in the wrong units for a goal that is not an energy (a pore radius,
+a specificity difference), and a design could destabilize the protein by any
+amount so long as the objective improved.
+
+**phi was perturbed at the N-terminal residue, where it is undefined.**
+Measured on 2OMF chain A with a forced +5°: atoms move up to **2.90 Å** while
+the largest change in any internal interatomic distance is **1.4×10⁻¹⁴ Å** — a
+rigid-body rotation of the whole molecule, invisible to the energy but not to
+the docking or to the fitted pore axis. At interior residue 151 the same
+perturbation changes internal distances by up to 3.48 Å, which is the intended
+move. Both terminal torsions are skipped now, as the source does.
+
+**A restraint with no design-position atom was enforced nowhere.** That is the
+paper's own mechanism for preserving catalysis: the ACS Catal 2017 thioesterase
+work held catalytic distances to ±0.2 Å with restraints between atoms neither
+of which is a design position. The planner reported "nothing to decide" and
+returned. True of rotamer selection, false of the run: measured, translating
+the partner **1.0 Å** — five times that tolerance, far less than the drift of a
+few hundred redock moves at σ 0.2 — turned a satisfied restraint into a
+violated one while `rotamer_vetoes` stayed empty and `is_empty()` stayed True.
+They are kept on the plan now and the iteration is rejected on them.
+
+### The rotamer prune, and a claim withdrawn
+
+The prune used a single global 50 kcal/mol threshold, and this document and
+`docs/MILP.md` called it *generalized dead-end elimination*, with the claim
+that a pruned rotamer "cannot appear in an optimal assignment". **It can.**
+Constructed with this repo's own `RotamerMILP` and glpsol: self energies
+`{A1 r0: 0.0, A1 r1: 51.0}` with a pair term `(A1,r1,A2,r0): −60.0` has optimum
+**−9.000** choosing r1, where a >50 prune gives **+0.000** choosing r0. The
+prune changed the answer, so the claim is withdrawn; a true DEE criterion
+(Goldstein) bounds against the pair-energy extrema and this does not.
+
+IPRO's actual rule is **relative to the best rotamer at each position**
+(`ROTAMERS.py`: keep `sorted[n][i] <= sorted[n][0] + window`, window 40
+kcal/mol). Measured: six rotamers at one position with self energies 60, 62,
+70, 75, 90, 99 — a 39 kcal/mol band, *inside* IPRO's window — kept **1 of 6**
+under the absolute threshold (the native, via the keep-native safeguard) where
+IPRO keeps all six. The prune is relative now, `max_self_energy` is an optional
+absolute ceiling defaulting to **off**, and on the shipped smoke spec the kept
+count went from 66/160 to **95/160**.
+
+That did not put tryptophan back at OmpF A18, and the measurement is worth
+having: at A18 the best TRP rotamer sits **51.9 kcal/mol above the best rotamer
+there** (MET, −7.06, on the screening scale), so even a 40 kcal/mol window
+excludes it. That is a real clash with the **unrelaxed wild-type pocket** — the
+published V18W works because all four positions become Trp together and the
+backbone relaxes — but a user cannot see it, because `validate` still advertises
+the full product of the allowed sets. So an identity whose every rotamer is
+pruned is now **named in the run's notes**: "these allowed residues are NOT
+reachable … A18: TRP, TYR; A20: PRO; A38: PHE", with the window to raise. A
+design space smaller than the spec says is exactly the failure mode §7 is about.
+
+### The pore numbers, and an open defect closed
+
+**§1h's 6.24 Å "wild-type eyelet" is not the wild type**, and an earlier
+version of §1h retracted the correct figure to get there. `score` on
+`spec_full.yaml` measures `design_fixed + chosen rotamers`, and that spec's
+9-residue alphabet excludes the native residue at **13 of its 25 positions**,
+so scoring substitutes the best allowed rotamer there — 8 of them tryptophan.
+The run says so in a note; the section misread it. The deposited coordinates
+give **8.07 Å** through the repo's own test path, which is what the retraction
+called irreproducible. Both numbers now say which structure they belong to,
+here and in both specs and `EXPECTED.md`.
+
+**The fitted-axis defect that §7d recorded as unfixable is fixed.** Three
+discriminators had been tried and all three appeared to fail, the first being
+axis-origin clearance: 0.30 Å for the unsound 4-position spec against 1.30 Å
+for the sound 25-position one, both below a water's 1.4 Å. That measurement was
+the mistake. Clearance was computed from the **candidate's** atoms — and the
+25-position candidate carries those 13 substitutions, 8 of them tryptophan,
+which fill the lumen *on purpose*. A narrowing design is supposed to reduce the
+clearance, so the number conflated "the axis is buried in a wall" with "the
+design worked". Measured on the **input structure with its native side
+chains**:
+
+| spec | positions | clearance (input) | bottleneck |
+|---|---|---|---|
+| `spec_full.yaml` | 25, ringing the constriction | **2.80 Å** | 8.07 Å wild type |
+| `spec_smoke.yaml` | 4, all on one wall | **0.30 Å** | 1.53 Å |
+
+An order of magnitude apart, so a water's 1.4 Å is a usable test after all. The
+run now states flatly that such a radius **is not a pore radius**, instead of
+hedging, and names the fix. `ring_flatness` separates them the wrong way
+(0.531 for the good axis, 0.053 for the bad one) and is not used for this.
+
+**Narrowing without a floor rewards a plug.** The objective is monotonic, so a
+blocked pore is its maximum. Measured with `spec_full.yaml`'s own options
+(`direction: narrow`, `pore_diameter_max: 4.0`, `pore_diameter_min: null`): a
+candidate with a 0.8 Å bottleneck and the water probe clashing at IE +50 passes
+`filter_reject` and scores **−50.0**, beating a paper-style 3.5 Å design at
+**+0.200**. PoreDesigner's designs had to still conduct water single-file. The
+goal says so when narrowing without a `pore_diameter_min`, and the description
+of the objective as "occluding the lumen" — the opposite of the paper — is
+corrected.
+
+### Things that looked live and were not
+
+`loop.perturbation_flank` and `loop.neighbour_cutoff` had **no readers at
+all**: `grep` finds each only at its declaration, and `Structure.neighbours()`,
+whose docstring says it decides "which non-design residues must be repacked
+alongside a mutation", has no caller. The 2006 paper's step iii optimizes a
+10–15 residue window in which the five flanking residues either side may change
+rotamer but not identity, and the Suite adds a 4.5 Å repack shell; neither
+exists here, so after a perturbation the surrounding native side chains keep
+their input rotamers and cannot relieve the strain. Both shipped specs annotated
+these "[paper]". They are now declared NOT IMPLEMENTED in `config.py`, in both
+specs and in §4, and the run says so when either is set. Implementing them
+means a PyMOL harvest at the flanking positions every iteration; that is
+recorded as not done rather than done badly.
+
+`max_rotamers` was documented as triggering tighter pruning. Nothing tightens
+anything — IPRO's source shrinks its window (`while total > MAX`, window×0.95,
+then N−1) and that loop is not implemented. The note now says the cap is
+advisory, which is worse than nothing only if it claims otherwise.
+
+### The edge cases: what a stranger hits
+
+The audit's two blockers were the same hole from different angles. **A
+pip-installed copy could not run a design at all**: `_doctor()` executed
+`REPO_ROOT / "scripts" / "doctor.py"`, and the wheel ships only the three
+`ipro_agent*` packages, so in an installed copy `ipro_doctor`, `ipro_setup` and
+`ipro_run` all failed with "can't open file …/site-packages/scripts/doctor.py"
+while the other eight tools worked — the server looked healthy right up to the
+point of designing anything, and `ipro_doctor` is the first tool its own
+`instructions` tell a client to call. That is the install README recommends
+first. The doctor moved into the package; `scripts/doctor.py` is a shim that
+loads it **by file path**, because the package's own version guard would
+otherwise take the diagnosis down on exactly the interpreter that needs it.
+
+| what happened | measured | now |
+|---|---|---|
+| Doctor green-lit Python 3.9 | `can_run True`, `can_design True`, `missing_required []`, exit 0, and `--require pymol` exit 0 — on an interpreter where `import ipro_agent` raises | the floor is a checked requirement; 3.9 reports PYTHON TOO OLD and exits 1 |
+| Conda search missed Miniforge | the installer INSTALL.md tells the user to use, and the only one supported on Apple silicon; the doctor and the harvester also kept *separate* lists, so the doctor could report PyMOL resolved for a run that then could not find it | one list, forge family included, plus `Scripts/python.exe` and `%USERPROFILE%` |
+| A `pymol` launcher was accepted as the harvest interpreter | given `-c` it treats the code as a file to **open**, prints "unsupported file type" and exits 0; the run then started a windowless PyMOL that waited for input until the job timed out, with no rotamers and no error | the probe requires a sentinel as the **whole last line** — the first fix tested for a substring, and the launcher echoes its own argument back, sentinel included |
+| `ipro_run` reported `launched: true` for dead children | a JSON float for `iterations` became `--iterations 8.0`, argparse exited 2 in milliseconds, and `ipro_status` then said `"pending"` for ever | arguments are coerced and refused by name; the child is polled and its log tail returned |
+| Five malformed MCP shapes killed the session | `params` as an array, an unhashable tool name or resource uri, `arguments` as a list or a string | one error reply each, never the session |
+| The declared tool schemas were decorative | a missing `spec` came back as `KeyError: 'spec'`, `spec: 42` as `AttributeError: 'int' object has no attribute 'strip'` | arguments are checked against each tool's own schema and refused in words |
+| A one-line inline spec was treated as a filename | inline content was detected by looking for a newline, so `goal: bind_tighter` became "spec not found: goal: bind_tighter" | detected by shape |
+| Runs, scores and LP files defaulted into the installed package tree | and failed on a read-only install with a PermissionError traceback chopped mid-line | `IPRO_RUN_ROOT` / `XDG_STATE_HOME` / `~/.local/state` |
+| `run_id` was a directory *name* | so the id `ipro_run` returned for an explicit `run_dir` was one `ipro_status` rejected as "no such run" | the absolute path, with the short form still resolving |
+| A traceback reached the agent as an 800-character tail | starting mid-line — one measured message literally began `ile "` — with the exception last | the exception line first, the tail labelled |
+| Eleven classes of malformed spec died with a traceback | a tab for indentation (18 frames of PyYAML), a missing `goal_statement` ("TypeError: DesignSpec.\_\_init\_\_() missing 1 required positional argument"), `positions:` as a mapping | each is a `spec error:` line naming the fix |
+| `positions:` as a mapping silently widened every alphabet | parsed as its KEYS, so a 2-position request became 324 sequences instead of 1 | refused, with the list form shown |
+| `allowed: []` did the same | "absent" and "empty" were one test | empty is an error, absent is the default |
+| `target_radius: "two"` passed `validate` | and killed the run at iteration 0 with ValueError | every numeric goal option is coerced during `validate` |
+| `score`, `milp`, `positions`, `dock` crashed on specs `validate` reported cleanly | only `_load` was guarded, and `build_goal` raises later | one handler in `main()` for every subcommand |
+| A killed run reported `status: running` for ever | measured 4.5 minutes after the process died, "running, 20 of 60 iterations" | pid and host are recorded; status answers `stale` with a note |
+| Re-running into a used directory appended to it | two 6-iteration runs left "12 of 6 iterations" and a `best_score` from the other spec's run | refused unless `--resume` |
+| Two molecules at one file and chain | validated clean and scored an interaction energy of **+149,211 kcal/mol** from atoms at zero distance; a goal filtered on "better than the reference" would have adopted it as the reference | `validate` reports it; the loop reports any interaction above +1000 as what it is |
+| Documents and specs used the locale encoding | under `LC_ALL=C` the served operating manual came back with **210 U+FFFD** characters, and an inline spec with any non-ASCII character failed to write | UTF-8 everywhere, checked by an AST walk |
+| `--iterations 0` and `--max-minutes 0` were dropped | tested for truthiness, so a zero-length request ran the spec's full length; `max_minutes: 0` meant *no* limit | refused, with the reason |
+| Windows runs would have died with their client | `start_new_session` is silently ignored there (CPython names it `unused_start_new_session`) | creation flags on `nt`; README states that Windows is untested and points at WSL 2 |
+
+Unfixed by choice, and stated: one slow tool call blocks the stdio server for
+up to 900 s (it is single-threaded by design, and `ipro_run` exists precisely
+so a design is not that call); `notifications/cancelled` is accepted and cannot
+interrupt an in-flight subprocess; inline-spec temp directories are not cleaned
+up; `environment.yml` pins nothing, so what a stranger resolves is what
+conda-forge serves that day (§7g measured one such resolution).
