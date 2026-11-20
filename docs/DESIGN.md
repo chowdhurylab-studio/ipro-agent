@@ -1820,3 +1820,59 @@ agent that started it.
 
 Fifteen tools now. The count is in README, HANDOFF.md and AGENTS.md, and a
 test fails if any of them stops naming one.
+
+---
+
+## 7m. Running the published case, and not reproducing it (2026-11-20)
+
+Everything above checks the implementation against the papers. This section
+checks the output, which is a different question, and the answer is worse.
+
+The shipped `examples/ompf_pore/spec_full.yaml` is PoreDesigner's own case: the
+25 constriction positions, a 9-residue alphabet, the ≥50% long-side-chain
+constraint (their MILP constraint 4) and their acceptance filter, a bottleneck
+below 4 Å. It was run twice, fixed-backbone, built-in energy, seed 1.
+
+| run | `design_per_iteration` | iterations | accepted | bottleneck seen |
+|---|---|---|---|---|
+| stock | `[1, 3]` | 81 | **0** | 5.65 to 7.12 Å |
+| wide | `[12, 25]` | 21 | **0** | 6.60 to 7.86 Å |
+
+Both started at an objective of 1.2574 and ended there. The filter needs a
+bottleneck below 4.00 Å and no candidate in 102 iterations came within 1.6 Å of
+it. The search touched all 25 positions. In the stock run the objective took
+three distinct values across 81 iterations; the measured bottleneck sat at
+5.71 Å for 53 of them, and when it moved it moved the wrong way.
+
+**The deadlock.** Every candidate is rejected by the geometric filter, so the
+accepted state never advances, so each iteration proposes 1 to 3 substitutions
+measured against the same unchanged baseline. PoreDesigner's sub-4 Å pore needs
+many substitutions at once. Widening the window to 12 to 25 positions per
+iteration was the obvious test of that reading and it failed: the pore got
+*wider*, not narrower, so the limit is not the window size.
+
+**What this does not establish.** Which of these is responsible has not been
+measured, and the candidates are not equally likely:
+
+- the backbone never moves in these runs, and a tryptophan at a constriction
+  position may need it to;
+- the built-in energy has no desolvation term (§4), so burying a polar group
+  costs nothing, and the packing that would follow a real Trp substitution is
+  not being paid for;
+- the bottleneck is measured on an axis fitted through the 25 positions, and
+  the narrowest slice along it need not be the slice the designed side chains
+  occupy.
+
+PyRosetta would answer the first two and was not available for these runs
+(§7j). Until one of them is measured, the honest statement is the one at the
+top of this section: on the single published case where the output can be
+checked against a paper, this implementation does not reproduce the published
+outcome, and it is not yet known why.
+
+**A reporting hazard found in the same runs.** Both report 13 entries in
+`best_mutations` beside `accepted: 0`. Those 13 are the substitutions the
+alphabet forces at the starting point, not a redesign (§1h), and both runs say
+so in their notes, including the `NO DESIGN WAS ACCEPTED` line. A reader who
+looks at `best_mutations` first sees thirteen mutations from a run that
+designed nothing. `ipro_result` reports `designed_nothing` for exactly this
+case; the CLI's own summary does not, and should.

@@ -331,6 +331,16 @@ running. Compare to the design-time constraint, not to the post-MD 3.0–3.6 Å 
 > measured on the candidate's own atoms, where a successful narrowing design
 > lowers it too, so it could not tell a buried axis from a design that worked.
 
+> **Measured 2026-11-20, and it is a negative result.** This spec was run twice
+> (81 and 21 iterations, fixed-backbone, built-in energy, seed 1) and accepted
+> **nothing** either time. No candidate brought the bottleneck below 5.65 Å
+> against a filter that requires under 4.00 Å, and widening
+> `design_per_iteration` from `[1, 3]` to `[12, 25]` made the pore wider rather
+> than narrower. So the design-stage comparisons below have not been
+> demonstrated: this example currently reproduces the wild-type measurement and
+> the bookkeeping, not the designs. `docs/DESIGN.md` §7m has the numbers and
+> what has not been ruled out.
+
 **6. Negative controls — things that must never appear.** No charged or polar residue,
 no Gly and no Cys at any design position: the alphabet forbids them (MILP constraint 7).
 If one appears, the allowed-residue set is not reaching the solver. Likewise, no residue
