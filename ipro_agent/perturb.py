@@ -66,6 +66,21 @@ class Perturbation:
     phi_deg: list[float] = field(default_factory=list)
     psi_deg: list[float] = field(default_factory=list)
     max_atom_shift: float = 0.0
+    #: ``(residue number, insertion code)`` for each entry of ``residues``.
+    #: ``residues`` alone cannot address a structure that uses insertion codes
+    #: -- 52, 52A and 52B all read back as 52 -- and antibody numbering is
+    #: exactly where they live, so the window check matches on these.
+    keys: list[tuple[int, str]] = field(default_factory=list)
+    #: The design position the region was built around, as ``(number, icode)``,
+    #: or None when the caller asked for no anchor.
+    anchor: "tuple[int, str] | None" = None
+    #: True when ``anchor`` is inside ``keys``. False means the region was
+    #: chosen without it -- the anchor was a proline, or it sits alone between
+    #: chain breaks -- and the iteration therefore has an UNCOUPLED
+    #: perturbation, which is the 12.4%-overlap defect §7h fixed. The caller
+    #: must be able to tell those apart, and before this field it could not:
+    #: the record looked identical either way.
+    anchored: "bool | None" = None
 
     def describe(self) -> str:
         if not self.residues:
@@ -116,6 +131,7 @@ def choose_segment(
     rng: random.Random | None = None,
     avoid_proline: bool = True,
     anchor: int | None = None,
+    anchor_icode: str = "",
 ) -> list:
     """A run of consecutive residues to perturb.
 
@@ -142,9 +158,14 @@ def choose_segment(
     want = rng.randint(max(1, lo), max(1, hi))
 
     if anchor is not None:
-        run = _run_containing(residues, anchor, avoid_proline)
+        run = _run_containing(residues, anchor, avoid_proline, anchor_icode)
         if run:
-            at = next(i for i, r in enumerate(run) if int(r.id[1]) == anchor)
+            key = (int(anchor), (anchor_icode or "").strip())
+            at = next((i for i, r in enumerate(run) if residue_key(r) == key),
+                      None)
+            if at is None:
+                at = next(i for i, r in enumerate(run)
+                          if int(r.id[1]) == int(anchor))
             # Size and placement as the source draws them: the extra residues
             # are split before and after the design position.
             extra = min(want - 1, len(run) - 1)
@@ -166,11 +187,10 @@ def choose_segment(
     runs: list[list] = []
     current: list = []
     for res in residues:
-        num = int(res.id[1])
         if avoid_proline and res.get_resname().strip() == "PRO":
             current = []
             continue
-        if current and num != int(current[-1].id[1]) + 1:
+        if current and not _follows(current[-1], res):
             current = []
         current.append(res)
         runs.append(list(current[-want:]))
@@ -185,27 +205,61 @@ def choose_segment(
     return rng.choice(runs)
 
 
-def _run_containing(residues: list, number: int, avoid_proline: bool) -> list:
-    """The maximal numbering-contiguous, proline-free run holding ``number``."""
-    by_num = {int(r.id[1]): r for r in residues}
-    if number not in by_num:
+def residue_key(res) -> tuple[int, str]:
+    """``(number, insertion code)``, which is what actually names a residue.
+
+    Keying by the bare number collapses 52, 52A and 52B onto one entry, and
+    the last one read wins. In the perturbation path that silently dropped the
+    design position from the region while the record still claimed it moved.
+    """
+    return int(res.id[1]), (res.id[2] or "").strip()
+
+
+def _follows(a, b) -> bool:
+    """Does ``b`` come straight after ``a`` in the chain's own numbering?
+
+    Same number means an insertion code steps forward (52 -> 52A -> 52B);
+    otherwise the number must step by exactly one. A larger gap is a chain
+    break, and rotating across one is not a local move.
+    """
+    na, nb = int(a.id[1]), int(b.id[1])
+    return nb == na or nb == na + 1
+
+
+def _run_containing(residues: list, number: int, avoid_proline: bool,
+                    icode: str = "") -> list:
+    """The maximal numbering-contiguous, proline-free run holding the residue.
+
+    Walks the ordered list outward from the anchor rather than indexing a
+    ``{number: residue}`` map, so insertion codes neither collapse nor break
+    contiguity.
+    """
+    icode = (icode or "").strip()
+    want = (int(number), icode)
+    idx = next((i for i, r in enumerate(residues)
+                if residue_key(r) == want), None)
+    if idx is None and not icode:
+        # A caller that knows only the number still gets the first residue
+        # carrying it, rather than nothing.
+        idx = next((i for i, r in enumerate(residues)
+                    if int(r.id[1]) == int(number)), None)
+    if idx is None:
         return []
-    if avoid_proline and by_num[number].get_resname().strip() == "PRO":
+
+    def blocked(res) -> bool:
+        return avoid_proline and res.get_resname().strip() == "PRO"
+
+    if blocked(residues[idx]):
         return []
-    run = [by_num[number]]
-    n = number - 1
-    while n in by_num and not (
-        avoid_proline and by_num[n].get_resname().strip() == "PRO"
-    ):
-        run.insert(0, by_num[n])
-        n -= 1
-    n = number + 1
-    while n in by_num and not (
-        avoid_proline and by_num[n].get_resname().strip() == "PRO"
-    ):
-        run.append(by_num[n])
-        n += 1
-    return run
+    lo = idx
+    while lo > 0 and _follows(residues[lo - 1], residues[lo]) \
+            and not blocked(residues[lo - 1]):
+        lo -= 1
+    hi = idx
+    while hi + 1 < len(residues) and _follows(residues[hi], residues[hi + 1]) \
+            and not blocked(residues[hi + 1]):
+        hi += 1
+    return residues[lo:hi + 1]
 
 
 def perturb_backbone(
@@ -218,6 +272,7 @@ def perturb_backbone(
     rng: random.Random | None = None,
     segment: list | None = None,
     anchor: int | None = None,
+    anchor_icode: str = "",
 ) -> Perturbation:
     """Perturb phi/psi of a short segment **in place**.
 
@@ -226,10 +281,16 @@ def perturb_backbone(
     """
     rng = rng or random.Random(0)
     seg = segment if segment is not None else choose_segment(
-        structure, chain, length_range, rng, anchor=anchor
+        structure, chain, length_range, rng, anchor=anchor,
+        anchor_icode=anchor_icode,
+    )
+    anchor_key = (
+        (int(anchor), (anchor_icode or "").strip()) if anchor is not None
+        else None
     )
     if not seg:
-        return Perturbation(chain=chain)
+        return Perturbation(chain=chain, anchor=anchor_key,
+                            anchored=None if anchor is None else False)
 
     ordered = list(structure.residues(chain))
     index = {id(r): i for i, r in enumerate(ordered)}
@@ -238,7 +299,19 @@ def perturb_backbone(
         for r in ordered for a in r
     }
 
-    out = Perturbation(chain=chain, residues=[int(r.id[1]) for r in seg])
+    keys = [residue_key(r) for r in seg]
+    out = Perturbation(
+        chain=chain,
+        residues=[n for n, _ in keys],
+        keys=keys,
+        anchor=anchor_key,
+        # An anchored region always contains its design position, so a False
+        # here means the anchor was refused (proline, or alone between chain
+        # breaks) and choose_segment fell through to an unanchored draw. The
+        # comment in choose_segment promised to "say so through the
+        # Perturbation record"; this is that.
+        anchored=None if anchor_key is None else (anchor_key in keys),
+    )
 
     for res in seg:
         i = index[id(res)]

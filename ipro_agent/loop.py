@@ -901,7 +901,6 @@ class IPROLoop:
 
         assert self._design_st is not None
         dm = self.spec.design_molecule
-        chain = (dm.chains or self._design_st.chain_ids())[0]
         work = self.run.path / "logs" / "backbone"
         work.mkdir(parents=True, exist_ok=True)
         candidate = work / f"iter{iteration:04d}.pdb"
@@ -911,8 +910,31 @@ class IPROLoop:
         # step 1, "begins by randomly selecting a DP"); without an anchor the
         # region and the redesign are statistically independent. See
         # perturb.choose_segment.
-        on_chain = [p.number for p in self.spec.positions if p.chain == chain]
-        anchor = self.rng.choice(on_chain) if on_chain else None
+        #
+        # So the design position is drawn FIRST and the chain follows from it.
+        # Fixing the chain to `(dm.chains or chain_ids())[0]` and then looking
+        # for design positions on it took both failures at once whenever the
+        # positions were on any other chain: the list was empty every
+        # iteration, so every perturbation was unanchored, AND the only chain
+        # ever moved was one with nothing being designed on it. Nothing in
+        # config.py ties positions to the first chain, so such a spec
+        # validates, and the skill advertises interface affinity and OptCDR,
+        # which is exactly where a second chain shows up.
+        allowed = list(dm.chains or self._design_st.chain_ids())
+        here = [p for p in self.spec.positions if p.chain in allowed]
+        if here:
+            pick = self.rng.choice(here)
+            chain, anchor, anchor_icode = pick.chain, pick.number, pick.insertion_code
+        else:
+            chain, anchor, anchor_icode = allowed[0], None, ""
+            if "perturb_no_positions" not in self._once:
+                self._once.add("perturb_no_positions")
+                self.notes.append(
+                    f"no design position lies on any chain of the design "
+                    f"molecule ({', '.join(allowed)}), so every backbone "
+                    f"perturbation is unanchored and the move is statistically "
+                    f"independent of the redesign."
+                )
         record = perturb_backbone(
             moved, chain,
             sigma_deg=self.spec.loop.perturbation_sigma_deg,
@@ -920,7 +942,21 @@ class IPROLoop:
             length_range=self.spec.loop.perturbation_segment,
             rng=self.rng,
             anchor=anchor,
+            anchor_icode=anchor_icode,
         )
+        # The region can still come back without its anchor: a proline anchor,
+        # or one alone between chain breaks, falls through to an unanchored
+        # draw. That is the 12.4%-overlap case §7h fixed, and until the record
+        # carried `anchored` the two were indistinguishable in state.json.
+        if record.anchored is False and "perturb_unanchored" not in self._once:
+            self._once.add("perturb_unanchored")
+            self.notes.append(
+                f"at least one iteration perturbed a region that does NOT "
+                f"contain its design position (anchor {chain}{anchor}"
+                f"{anchor_icode}: proline, or alone between chain breaks), so "
+                f"that iteration's backbone move was independent of the "
+                f"redesign. `anchored: false` marks them in the record."
+            )
         moved.save(candidate)
         # No relaxation here. The published order relaxes once per iteration,
         # AFTER the rotamer choice and the docking (see
@@ -1854,6 +1890,12 @@ class IPROLoop:
                     candidate, pert = self._perturb_once(it)
                     cb = self._rebuild_for_backbone(candidate)
                     tables = cb.tables
+                    # The note was only ever raised before the loop started,
+                    # so an identity that becomes unreachable once the
+                    # backbone has moved -- the case a perturbing run exists
+                    # to explore -- was never reported at all. `_once` keeps
+                    # it to one note however many iterations rebuild.
+                    self._note_dropped_identities(tables)
                     rp = self._plan_restraints_for(cb, tables)
                     ordered = self._ordered_positions(tables, cb.sequence_positions)
                 except Exception as exc:
@@ -2391,11 +2433,24 @@ class IPROLoop:
         almost always give a window of one.
         """
         if pert is not None and getattr(pert, "residues", None):
-            moved = set(pert.residues)
+            # Match on (number, insertion code), not the bare number. With
+            # insertion codes present -- antibody numbering, which is in the
+            # advertised scope -- a bare number counts A52 as inside a region
+            # that in fact moved A52B. `keys` is absent only on a record from
+            # an older run being resumed, so fall back to numbers then.
             chain = getattr(pert, "chain", None)
+            keys = getattr(pert, "keys", None)
+            if keys:
+                moved = {(int(n), (c or "").strip()) for n, c in keys}
+                def _inside(p) -> bool:
+                    return (p.number, (p.insertion_code or "").strip()) in moved
+            else:
+                numbers = set(pert.residues)
+                def _inside(p) -> bool:
+                    return p.number in numbers
             inside_labels = {
                 p.label for p in self.spec.positions
-                if p.number in moved and (chain is None or p.chain == chain)
+                if _inside(p) and (chain is None or p.chain == chain)
             }
             # `ordered` holds VIRTUAL positions once there is more than one
             # assembly ("a::A16"), while spec.positions hold plain labels

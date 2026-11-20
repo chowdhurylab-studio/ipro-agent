@@ -170,6 +170,14 @@ def combine(
             combined.positions.append(v)
             combined.rotamers[v] = th.rotamers[p]
             combined.pruned_per_position[v] = th.pruned_per_position.get(p, 0)
+            # Carry the identities the prune removed, too. Only the *count*
+            # was copied, so a combined run reported a clean design space
+            # while an identity the spec allows had been deleted from it --
+            # which is precisely the §7k blocker, where the prune removed
+            # PoreDesigner's published V18W and nothing said so.
+            dropped = getattr(th, "dropped_identities", None) or {}
+            if dropped.get(p):
+                combined.dropped_identities[v] = list(dropped[p])
             for i in range(len(th.rotamers[p])):
                 combined.self_energy[(v, i)] = w * th.self_energy.get((p, i), 0.0)
         for (pi, ri, pj, rj), e in th.pair_energy.items():

@@ -21,6 +21,7 @@ import itertools
 import json
 import math
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -7242,3 +7243,188 @@ def test_regression_the_pore_offset_cap_has_one_default_and_is_recorded():
     assert kept_d > tight_d, (tight_d, kept_d)
     assert abs(kept_d - 8.07) < 0.05, (
         f"§4 records 8.07 A for this axis and cap; got {kept_d}")
+
+
+def _backbone_pdb(rows) -> str:
+    """N/CA/C/O lines for (chain, resseq, icode, resname), spaced 3.8 A apart."""
+    out, serial = [], 1
+    for i, (chain, num, icode, name) in enumerate(rows):
+        base = i * 3.8
+        for atom, elem, dx in (("N", "N", 0.0), ("CA", "C", 1.2),
+                               ("C", "C", 2.4), ("O", "O", 2.8)):
+            # Exact PDB columns: 13-16 atom, 17 altLoc, 18-20 resName,
+            # 22 chain, 23-26 resSeq, 27 iCode.
+            out.append(
+                f"ATOM  {serial:>5} {' ' + atom:<4} {name:>3} {chain}"
+                f"{num:>4}{icode or ' '}   {base + dx:>8.3f}{0.0:>8.3f}"
+                f"{0.0:>8.3f}  1.00  0.00          {elem:>2}\n")
+            serial += 1
+    return "".join(out) + "END\n"
+
+
+def test_regression_an_unanchored_perturbation_is_recorded_as_one():
+    """A proline anchor makes `choose_segment` fall through to an unanchored
+    draw, and the comment there promised to "say so through the Perturbation
+    record". It did not: the record came back with a region that does not hold
+    the design position and no field distinguishing it from a correctly
+    anchored one, so `state.json` could not tell them apart.
+
+    It matters because an unanchored region is the 12.4%-overlap defect §7h
+    fixed -- the backbone moves where the MILP has no variables, and the
+    Metropolis test rules on that."""
+    from ipro_agent.perturb import perturb_backbone
+    from ipro_agent.structure import Structure
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "pro.pdb"
+        path.write_text(_backbone_pdb([
+            ("A", 51, "", "ALA"), ("A", 52, "", "PRO"), ("A", 53, "", "VAL")]))
+
+        st = Structure.load(str(path), ["A"])
+        rec = perturb_backbone(st, "A", rng=random.Random(0), anchor=52,
+                               length_range=(1, 1))
+        assert rec.anchored is False, (
+            "a proline anchor falls through to an unanchored region, and the "
+            "record must say so")
+        assert rec.anchor == (52, ""), rec.anchor
+        assert (52, "") not in rec.keys, rec.keys
+
+        # A reachable anchor is marked the other way, so the flag means something.
+        path2 = Path(tmp) / "ok.pdb"
+        path2.write_text(_backbone_pdb([
+            ("A", 51, "", "ALA"), ("A", 52, "", "GLY"), ("A", 53, "", "VAL")]))
+        st2 = Structure.load(str(path2), ["A"])
+        ok = perturb_backbone(st2, "A", rng=random.Random(0), anchor=52,
+                              length_range=(1, 1))
+        assert ok.anchored is True, ok
+        assert (52, "") in ok.keys, ok.keys
+
+
+def test_regression_insertion_codes_are_not_collapsed_when_perturbing():
+    """`_run_containing` keyed by `int(r.id[1])`, so A52, A52A and A52B
+    collapsed onto one entry and the last one read won.
+
+    Reproduced: the design position 52 was dropped from the region entirely
+    while the Perturbation record still reported residues=[51, 52, 53], and
+    `_choose_window` matched on the bare number -- so position 52 was counted
+    as inside a region that had in fact moved 52B. Structure and
+    DesignPosition both carry the insertion code correctly, so it was lost
+    only here, and antibody numbering is where insertion codes live."""
+    from ipro_agent.perturb import perturb_backbone, residue_key
+    from ipro_agent.structure import Structure
+
+    rows = [("A", 51, "", "ALA"), ("A", 52, "", "GLY"), ("A", 52, "A", "SER"),
+            ("A", 52, "B", "THR"), ("A", 53, "", "VAL")]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "icode.pdb"
+        path.write_text(_backbone_pdb(rows))
+        st = Structure.load(str(path), ["A"])
+        assert [residue_key(r) for r in st.residues("A")] == \
+            [(51, ""), (52, ""), (52, "A"), (52, "B"), (53, "")]
+
+        # The anchor is the bare 52, which must be the GLY and not a 52-variant.
+        rec = perturb_backbone(st.copy(), "A", rng=random.Random(0), anchor=52,
+                               length_range=(1, 1))
+        assert rec.anchored is True, rec
+        assert rec.keys == [(52, "")], rec.keys
+
+        # And an insertion-coded anchor must reach its own residue.
+        rec_b = perturb_backbone(st.copy(), "A", rng=random.Random(0), anchor=52,
+                                 anchor_icode="B", length_range=(1, 1))
+        assert rec_b.keys == [(52, "B")], rec_b.keys
+
+        # Both report residues=[52]; only `keys` tells them apart, which is
+        # why the window check reads keys.
+        assert rec.residues == rec_b.residues == [52]
+
+
+def test_regression_the_perturbed_chain_follows_the_design_positions():
+    """`chain = (dm.chains or chain_ids())[0]` fixed one chain for the run's
+    lifetime and then looked for design positions on it. For a design molecule
+    whose positions are on the second chain that took two failures at once and
+    silently: the anchor list was empty every iteration, so every perturbation
+    was unanchored, and the chain being moved was one with nothing designed on
+    it. Nothing in config.py ties positions to the first chain, so the spec
+    validates, and the skill advertises interface work where a second chain is
+    the normal case.
+
+    The draw order now follows the paper: pick the design position, then take
+    its chain."""
+    import types
+
+    from ipro_agent.loop import IPROLoop
+
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "(dm.chains or self._design_st.chain_ids())[0]" not in src, \
+        "the chain must come from the drawn design position, not from index 0"
+
+    picks = []
+    for seed in range(40):
+        o = types.SimpleNamespace(
+            rng=random.Random(seed), _once=set(), notes=[],
+            spec=types.SimpleNamespace(positions=[
+                types.SimpleNamespace(chain="B", number=10, insertion_code=""),
+                types.SimpleNamespace(chain="B", number=11, insertion_code=""),
+            ]),
+        )
+        here = [p for p in o.spec.positions if p.chain in ("A", "B")]
+        picks.append(o.rng.choice(here).chain)
+    assert set(picks) == {"B"}, set(picks)
+    assert "_perturb_once" in dir(IPROLoop)
+
+
+def test_regression_dropped_identities_survive_the_assembly_combine():
+    """`combine()` copied the pruned *count* per position and left the
+    identities behind, so a multi-assembly run reported a clean design space
+    while an identity the spec allows had been deleted from it.
+
+    That is the §7k blocker exactly: the prune removed PoreDesigner's
+    published V18W and nothing said so. This note is the guard against it, and
+    on the combined path the guard was empty by construction."""
+    from ipro_agent.assemblies import combine
+    from ipro_agent.config import Assembly
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.milp import EnergyTables, Rotamer
+
+    def rot(aa, state):
+        return Rotamer(position="A16", aa=aa, state=state,
+                       atoms=AtomSet(names=["CB"], coords=[[0.0, 0.0, 0.0]]))
+
+    def one(dropped):
+        t = EnergyTables(positions=["A16"],
+                         rotamers={"A16": [rot("TRP", 1), rot("PHE", 1)]})
+        t.pruned_per_position["A16"] = 1
+        t.dropped_identities["A16"] = list(dropped)
+        t.self_energy[("A16", 0)] = -1.0
+        t.self_energy[("A16", 1)] = -0.5
+        return t
+
+    combined = combine(
+        {"a": one(["TRP"]), "b": one(["TRP"])},
+        [Assembly(name="a"), Assembly(name="b")],
+    ).tables
+    assert combined.dropped_identities, (
+        "the identities the prune removed must survive the combine, or the "
+        "only report a multi-assembly run gets is a count")
+    assert all("TRP" in v for v in combined.dropped_identities.values()), \
+        combined.dropped_identities
+    # One entry per virtual position, not one shared entry.
+    assert len(combined.dropped_identities) == 2, combined.dropped_identities
+
+
+def test_regression_dropped_identities_are_rechecked_after_the_backbone_moves():
+    """`_note_dropped_identities` was called twice, both before the loop, and
+    never after `_rebuild_for_backbone`.
+
+    So an identity that is reachable on the input backbone and unreachable
+    once the backbone has moved -- the case a perturbing run exists to
+    explore -- was never reported at all."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    rebuild = src.index("cb = self._rebuild_for_backbone(candidate)")
+    after = src[rebuild:rebuild + 1200]
+    assert "_note_dropped_identities" in after, (
+        "a rebuilt table must be checked too, or the note only ever describes "
+        "the input backbone")
+    # and the note stays once-per-run however many iterations rebuild
+    note = src[src.index("def _note_dropped_identities"):]
+    assert "_once" in note[:1200], "the note must not repeat every iteration"
