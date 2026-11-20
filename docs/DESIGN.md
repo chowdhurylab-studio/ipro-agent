@@ -1869,6 +1869,13 @@ top of this section: on the single published case where the output can be
 checked against a paper, this implementation does not reproduce the published
 outcome, and it is not yet known why.
 
+*(Added 2026-11-20, after §7o.* The third candidate above is now largely ruled
+out and the first is weakened: pinning the alphabet to the published OCD-TFTrp
+sequence reads a 3.99 A bottleneck on this same fitted axis, with this same
+fixed backbone. The paragraph above stands as written -- the search still
+accepts nothing -- but "not yet known why" is narrower than it was. See
+§7o, including the three things that measurement does not establish.*)
+
 **A reporting hazard found in the same runs.** Both report 13 entries in
 `best_mutations` beside `accepted: 0`. Those 13 are the substitutions the
 alphabet forces at the starting point, not a redesign (§1h), and both runs say
@@ -1929,3 +1936,64 @@ lists them and says where to fetch them, and rotamers still come only from
 PyMOL's mutagenesis wizard, which pip cannot install (§2). The handshake above
 proves the server starts and answers, not that it can design. Nothing here
 changes §7m: the published case still accepts nothing.
+
+## 7o. Handing the search its answer (2026-11-20)
+
+Section 7m is a negative result with three named candidate causes and no
+measurement separating them. This is the cheapest experiment that separates
+any of them, and it took 0.72 s.
+
+`examples/ompf_pore/spec_trp_control.yaml` is `spec_full.yaml` with every one
+of the 25 alphabets cut to the single identity `[TRP]`, and the loop cut to one
+forced iteration. That is PoreDesigner's own OCD-TFTrp control, the "total
+fill" Trp-only design in `EXPECTED.md`. The filter, the objective, the
+fixed-backbone policy and the built-in energy are untouched. Seed 1:
+
+```
+accepted            1
+min_pore_diameter   3.99464 A      (filter: < 4.00)
+min_pore_radius     1.99732 A
+score               7.1939e-06
+mutation_string     V18W L20W M38W Y40W R42W E62W N64W R82W L83W L109W G110W
+                    D113W M114W L115W E117W F118W G119W G120W D121W A123W
+                    Y124W S125W V130W G131W R132W
+```
+
+The mutation string is byte-identical to the published OCD-TFTrp set at
+`EXPECTED.md:109`, and the run is deterministic: the spec was run twice from
+the scratch copy and once from the shipped file, and all three gave
+`3.99463569993827`.
+
+**What this establishes.** The geometry measurement is not what is broken. The
+third candidate in 7m was that the bottleneck is read on an axis fitted through
+the 25 positions, whose narrowest slice need not be the slice the designed side
+chains occupy; if that were responsible, the published design would not read
+sub-4 A either. It does. The first candidate, that the backbone never moves, is
+weakened in the same stroke: a fixed backbone is enough to *represent* the
+published answer, whatever it costs to *reach* it. The second candidate, the
+missing desolvation term, is untouched by this and remains open.
+
+**What this does not establish, and the order matters.**
+
+- Nothing was reproduced. The alphabet is a singleton at every position, so
+  the sequence is forced before the solver runs. The only new information here
+  is geometric.
+- `target_radius: 2.0` aims the objective at a 4.00 A diameter, which is
+  exactly the filter bound. A score of 7.19e-06 means the radius landed 0.0027
+  A from that target, so 3.99464 sits 0.005 A inside a threshold the objective
+  was pointed at. This is a knife-edge, not an independent pass of the paper's
+  criterion.
+- `pore_diameter_min` is null, so the narrowing objective is monotonic. The
+  run says so itself in its own notes: a fully occluded pore is the best
+  possible score, and a measured 0.8 A bottleneck with the water probe
+  clashing beats a paper-style 3.5 A design. A sub-4 A reading under this
+  objective is therefore not evidence of a conducting channel, which is what
+  PoreDesigner's designs actually had to be.
+
+**So 7m stands.** On the one published case where the output can be checked,
+the search still accepts nothing, and that statement needs no revision. What
+changes is the question. It was "why does this not reproduce the paper", with
+three candidates and no way to choose. It is now "why does the search never
+reach a point its own objective scores at 7e-06, when that point is inside the
+space the spec allows". That is a search question, not a representation
+question, and the next experiment should be aimed there.

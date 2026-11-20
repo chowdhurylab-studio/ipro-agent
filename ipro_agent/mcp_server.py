@@ -55,15 +55,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: ``energy.pyrosetta_backend.UNEXERCISED``: declared rather than left to be
 #: discovered, and checked by a test so the list cannot rot.
 UNEXERCISED: dict[str, str] = {
-    "tool_setup(confirm=True)": (
-        "The dry-run branch, the manager discovery and the refusal are all "
-        "exercised, including in an empty virtualenv. The branch that actually "
-        "launches `conda env create` is not: running it in the test suite would "
-        "create a real multi-hundred-megabyte environment on the machine under "
-        "test. The command it builds was verified by hand "
-        "(`mamba env create -f environment.yml` from a fresh clone), and the "
-        "detached-launch mechanics are the same `start_new_session=True` "
-        "pattern `tool_run` uses and tests."
+    "tool_setup(confirm=True) -- the conda invocation itself": (
+        "The dry run, the manager discovery, the refusal and now the exact "
+        "command handed to the shell are all exercised, the last with Popen "
+        "stubbed, on both the clone path and the pip-installed path where "
+        "there is no environment.yml. What is still not exercised is conda "
+        "actually running: that would create a real multi-hundred-megabyte "
+        "environment on the machine under test. This entry used to claim the "
+        "command had been verified by hand, which is how it hid a defect for "
+        "a while -- the launch ignored the command the plan printed and ran "
+        "`conda env create -f None` on every pip install. A hand-verified "
+        "claim is not a test, and should not be written here as though it "
+        "were."
     ),
 }
 
@@ -784,9 +787,20 @@ def tool_setup(args: dict) -> dict:
         return plan
 
     log = Path(tempfile.mkdtemp(prefix="ipro_setup_")) / "setup.log"
+    # Launch the command the plan advertises, not a second one assembled here.
+    # The two used to differ on every pip install: `_env_file()` returns None
+    # when there is no checkout, so the plan printed the curl-then-create line
+    # while this launched `conda env create -f None` -- `str(None)` is the
+    # four-character string "None" -- which dies immediately, and the reply
+    # still came back launched: true with a pid and a log. That is the same
+    # "reported success for a dead child" shape already fixed for ipro_run.
+    #
+    # shell=True is safe here and nowhere else in this file: `command` is built
+    # from RAW_BASE, a fixed temp path, and `manager` chosen from a three-item
+    # allowlist. No part of it comes from the caller.
     with open(log, "wb") as fh:
         proc = subprocess.Popen(
-            [manager, "env", "create", "-f", str(env_file)],
+            command, shell=True,
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             cwd=str(REPO_ROOT), start_new_session=True,
         )

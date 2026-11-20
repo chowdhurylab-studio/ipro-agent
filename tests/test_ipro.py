@@ -6927,3 +6927,118 @@ def test_regression_the_readme_quickstart_matches_what_pip_alone_can_do():
         said = (p.stdout + p.stderr).lower()
         assert "no pymol available" in said, f"{sub} must say why: {said[:300]}"
         assert "pymol-open-source" in said, f"{sub} must say how to fix it"
+
+
+def test_regression_setup_launches_the_command_it_advertised():
+    """`ipro_setup(confirm=true)` must run the command it just printed.
+
+    It did not. The plan handled the pip-installed case correctly -- with no
+    checkout `_env_file()` is None, so the printed command fetched
+    environment.yml from raw GitHub first -- and then the launch ignored that
+    string and ran `[manager, "env", "create", "-f", str(env_file)]`, where
+    `str(None)` is the four-character word "None". conda died at once, and the
+    reply still came back `launched: true` with a pid and a log, which is the
+    "success for a dead child" shape already fixed once for `ipro_run`.
+
+    It mattered because of where it sits: a `pip install ipro-agent` has no
+    PyMOL, `ipro_doctor` reports `can_design: false`, and `ipro_setup` is
+    exactly where the server sends the agent next. So the one repair path
+    offered to every published user was the broken branch.
+
+    Popen is stubbed, so no environment is created and nothing is downloaded."""
+    prog = (
+        "import json\n"
+        "from pathlib import Path\n"
+        "import ipro_agent.mcp_server as m\n"
+        "m._doctor = lambda: {'can_design': False, 'can_run': True,\n"
+        "                     'missing_required': [], 'resolved': {}, 'degraded': []}\n"
+        "m._which = lambda n: ('/usr/bin/' + n) if n == 'conda' else None\n"
+        "seen = {}\n"
+        "class P:\n"
+        "    pid = 4242\n"
+        "def fake(cmd, **kw):\n"
+        "    seen['cmd'] = cmd\n"
+        "    seen['shell'] = kw.get('shell', False)\n"
+        "    return P()\n"
+        "m.subprocess.Popen = fake\n"
+        "out = {}\n"
+        "for label, ef in (('pip', None), ('clone', Path('/tmp/environment.yml'))):\n"
+        "    m._env_file = (lambda v: (lambda: v))(ef)\n"
+        "    seen.clear()\n"
+        "    plan = m.tool_setup({'confirm': True})\n"
+        "    out[label] = {'advertised': plan['command'], 'launched': seen.get('cmd'),\n"
+        "                  'shell': seen.get('shell'), 'said': plan.get('launched')}\n"
+        "print(json.dumps(out))\n"
+    )
+    p = subprocess.run([sys.executable, "-c", prog],
+                       capture_output=True, text=True, cwd=REPO)
+    assert p.returncode == 0, p.stderr[-2000:]
+    out = json.loads(p.stdout)
+
+    for label in ("pip", "clone"):
+        got = out[label]
+        assert got["said"] is True, label
+        assert got["launched"] == got["advertised"], (
+            f"{label}: launched {got['launched']!r} but advertised "
+            f"{got['advertised']!r} -- the reply would describe a command that "
+            "was never run")
+        assert got["shell"] is True, f"{label}: the advertised line needs a shell"
+
+    # The specific regression: nothing may carry the string None as a path.
+    pip = out["pip"]
+    assert " None" not in pip["launched"] and not pip["launched"].endswith("None"), \
+        pip["launched"]
+    assert "curl" in pip["launched"] and "environment.yml" in pip["launched"], \
+        "a pip install has no environment.yml, so it must fetch one first"
+    assert "/tmp/environment.yml" in out["clone"]["launched"], \
+        "a clone must use the file it already has, not download another"
+
+
+def test_regression_the_trp_control_still_reads_under_the_filter():
+    """Section 7o's measurement, re-run.
+
+    The claim it guards is narrow and load-bearing: handed PoreDesigner's own
+    OCD-TFTrp sequence, this implementation measures a bottleneck under the
+    paper's 4.00 A filter. That is what rules out "the geometry is measured on
+    the wrong slice" as the cause of the 7m negative result, so if the pore
+    measurement, the acceptance filter or the rotamer path drifts, the
+    conclusion in 7o silently stops being supported.
+
+    It is a control, not a reproduction: the alphabet is a singleton at every
+    position, so the sequence is forced. 7o records the three caveats, and the
+    one that matters most here is that `target_radius: 2.0` aims the objective
+    at the filter bound, so the margin is 0.005 A and a real change in the
+    geometry will cross it."""
+    if not _have_pymol():
+        print("    (skipped: no PyMOL)")
+        return
+
+    spec = REPO / "examples" / "ompf_pore" / "spec_trp_control.yaml"
+    assert spec.is_file(), "the control spec must ship, or 7o is not reproducible"
+
+    import yaml
+    d = yaml.safe_load(spec.read_text())
+    assert len(d["positions"]) == 25
+    off = [p["position"] for p in d["positions"] if p["allowed"] != ["TRP"]]
+    assert not off, f"a half-pinned control measures something else: {off}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp) / "trp"
+        p = subprocess.run(
+            [sys.executable, "-m", "ipro_agent", "run", str(spec),
+             "--run-dir", str(run_dir), "--seed", "1", "--json"],
+            capture_output=True, text=True, cwd=REPO)
+        assert p.returncode == 0, p.stderr[-2000:]
+        res = json.loads(p.stdout)
+
+        assert res["accepted"] == 1, res.get("notes")
+        published = (
+            "V18W L20W M38W Y40W R42W E62W N64W R82W L83W L109W G110W D113W "
+            "M114W L115W E117W F118W G119W G120W D121W A123W Y124W S125W "
+            "V130W G131W R132W")
+        assert res["mutation_string"] == published, res["mutation_string"]
+
+        line = json.loads((run_dir / "iterations.jsonl").read_text().splitlines()[0])
+        dia = line["components"]["min_pore_diameter"]
+        assert dia < 4.0, f"7o says the published design reads under the filter; got {dia}"
+        assert abs(dia - 3.99464) < 0.01, f"7o records 3.99464 A; got {dia}"
