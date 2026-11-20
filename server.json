@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.chowdhurylab-studio/ipro-agent",
+  "title": "IPRO protein redesign",
+  "description": "Redesign a protein toward a stated goal using the IPRO procedure: change substrate specificity, narrow or widen a channel, improve interface affinity, tune catalytic activity, or insert and delete terminal residues. Writes the rotamer-selection MILP that encodes the permitted positions and residues, then iterates mutation, docking, relaxation and energy-based accept/reject.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/chowdhurylab-studio/ipro-agent",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/chowdhurylab-studio/ipro-agent",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "ipro-agent",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "IPRO_REPO",
+          "description": "Absolute path to a checkout of this repository. The documents the server offers as resources (ipro://skill, the operating manual, and the rest) ship with the repository rather than inside the package, so without this the server runs designs but serves no documents and tells the agent where to fetch them instead.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IPRO_PYMOL_PYTHON",
+          "description": "Absolute path to an interpreter that can import pymol, if it is not the one running the server. Rotamers come only from PyMOL's mutagenesis wizard and there is no fallback, so without a working PyMOL the server can validate, score positions and emit the integer program but cannot produce a design.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IPRO_RUN_ROOT",
+          "description": "Where detached runs write. Defaults to XDG_STATE_HOME or ~/.local/state/ipro-agent.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

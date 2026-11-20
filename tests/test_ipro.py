@@ -6803,3 +6803,50 @@ def test_regression_the_new_tools_are_reachable_over_the_protocol():
     # Without a run to point at, it refuses in words.
     err = json.loads(replies[4]["result"]["content"][0]["text"])["error"]
     assert "run_dir" in err and "Traceback" not in err, err
+
+
+def test_server_json_matches_the_package_it_points_at():
+    """`server.json` is what the MCP Registry stores, and three things in it
+    have to agree with the package or the publish is rejected: the name's
+    namespace, the PyPI identifier, and the version.
+
+    The ownership check is the easiest to break by accident. The registry
+    proves you own the PyPI package by finding `mcp-name: <server name>` in the
+    project description, which is the README; a README edit that drops the
+    marker makes a release unregisterable, and nothing else would notice."""
+    import re
+
+    spec = json.loads((REPO / "server.json").read_text())
+    pyproject = (REPO / "pyproject.toml").read_text()
+    readme = (REPO / "README.md").read_text()
+
+    name = spec["name"]
+    assert name == "io.github.chowdhurylab-studio/ipro-agent", name
+    assert f"mcp-name: {name}" in readme, (
+        "the README must carry the ownership marker, or the registry cannot "
+        "verify the PyPI package"
+    )
+    # The marker needs a boundary after it; glued to a full stop it does not match.
+    line = next(l for l in readme.splitlines() if "mcp-name:" in l)
+    assert re.search(rf"mcp-name:\s*{re.escape(name)}(\s|-->|$)", line), line
+
+    version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+    assert spec["version"] == version, (spec["version"], version)
+
+    pkg = spec["packages"][0]
+    assert pkg["registryType"] == "pypi"
+    assert pkg["registryBaseUrl"] == "https://pypi.org", pkg["registryBaseUrl"]
+    assert pkg["version"] == version, (pkg["version"], version)
+    assert pkg["transport"]["type"] == "stdio"
+
+    pypi_name = re.search(r'^name = "([^"]+)"', pyproject, re.M).group(1)
+    assert pkg["identifier"] == pypi_name, (pkg["identifier"], pypi_name)
+
+    # Every environment variable it advertises is one the server reads.
+    src = (REPO / "ipro_agent" / "mcp_server.py").read_text()
+    for env in pkg.get("environmentVariables", []):
+        assert env["name"] in src or env["name"] in (
+            REPO / "ipro_agent" / "rotamers.py").read_text(), env["name"]
+        assert env["isSecret"] is False, "this server takes no secrets"
+
+    assert (REPO / "docs" / "RELEASING.md").is_file()

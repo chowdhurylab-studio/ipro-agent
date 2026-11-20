@@ -1,5 +1,7 @@
 # ipro-agent
 
+<!-- mcp-name: io.github.chowdhurylab-studio/ipro-agent -->
+
 An independent, agent-drivable reimplementation of the published **IPRO**
 procedure (Iterative Protein Redesign and Optimization).
 
