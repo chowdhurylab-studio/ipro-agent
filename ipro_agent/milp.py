@@ -275,6 +275,7 @@ def build_tables(
     strain_weight: float = 0.0,
     max_self_energy: float | None = None,
     rotamer_window: float = 40.0,
+    keep_per_identity: int = 3,
     pair_eps: float = 1e-3,
     energy_cutoff: float = 12.0,
     native: dict[str, str] | None = None,
@@ -364,11 +365,35 @@ def build_tables(
         best_pair = min(scored, key=lambda t: t[0]) if scored else None
         best = best_pair[1] if best_pair else None
         floor = best_pair[0] if best_pair else 0.0
+
+        # IPRO's rule is the window AND a per-kind retention floor: its
+        # ROTAMERS.py keeps N=3 of each identity and only lowers N once the
+        # total exceeds the cap. Implementing the window alone made the design
+        # space SMALLER than the absolute threshold it replaced -- measured on
+        # the shipped smoke spec, 115 rotamers kept with nothing dropped
+        # became 95 with TRP and TYR gone from A18, PRO from A20 and PHE from
+        # A38. A18/TRP is the published PoreDesigner answer (V18W), so the
+        # "more faithful" rule deleted the one residue the example exists to
+        # find. Its best rotamer sits 51.88 kcal/mol above the position's best
+        # (MET, -7.06), which is a real clash with the unrelaxed wild-type
+        # pocket -- and exactly why an identity must not be dropped outright
+        # on the strength of a template it has not been relaxed against.
+        by_identity: dict[str, list[float]] = {}
         for e, rot in scored:
+            by_identity.setdefault(rot.aa, []).append(e)
+        kept_floor = {
+            aa: sorted(es)[: max(0, keep_per_identity)][-1:]
+            for aa, es in by_identity.items()
+        }
+        floor_for = {aa: (v[0] if v else None) for aa, v in kept_floor.items()}
+
+        for e, rot in scored:
+            per_kind = floor_for.get(rot.aa)
             keep = (
                 e <= floor + rotamer_window
                 or rot is best
                 or (nat and rot.aa == nat)
+                or (per_kind is not None and e <= per_kind)
             )
             if keep and max_self_energy is not None:
                 keep = (e <= max_self_energy or rot is best

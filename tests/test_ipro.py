@@ -3419,7 +3419,11 @@ def test_regression_full_mode_relaxes_after_the_choice_not_before():
     assert set(before) == set(after), (
         sorted(set(before) ^ set(after))[:5]
     )
-    assert max(float(np.abs(before[k] - after[k]).max()) for k in before) == 0.0
+    # Not bit-identical any more, and deliberately so: the relaxed atoms are
+    # now Kabsch-superposed back onto the frame they were scored in, and
+    # fitting an identical copy onto itself gives the identity to within
+    # floating-point error rather than exactly.
+    assert max(float(np.abs(before[k] - after[k]).max()) for k in before) < 1e-6
 
     # The perturbation must NOT relax any more: one relaxation per iteration,
     # and it happens after the choice.
@@ -5749,14 +5753,24 @@ def test_regression_the_rotamer_prune_is_relative_as_the_paper_is():
     assert sig.parameters["rotamer_window"].default == 40.0
 
 
-def test_regression_an_unreachable_identity_is_reported():
-    """An identity whose every rotamer is pruned is not reachable, but
-    ``validate`` still advertises the full product of the allowed sets.
-    Measured on the shipped smoke spec: 6561 sequences reported while TRP was
-    absent from A18 entirely -- its best rotamer sits 51.9 kcal/mol above the
-    best at that position (MET, -7.06) on the screening scale, a real clash
-    with the UNRELAXED wild-type pocket, and TRP is exactly the residue the
-    published design puts there. The run says so now."""
+def test_regression_the_window_plus_a_per_identity_floor_keeps_the_published_answer():
+    """Replacing the absolute 50 kcal/mol threshold with IPRO's relative
+    40 kcal/mol window made the design space **smaller**, not larger, and
+    deleted the one residue the shipped example exists to find.
+
+    Measured on examples/ompf_pore/spec_smoke.yaml, same input, same backend:
+
+        absolute 50 (the old rule)   115 kept   nothing dropped
+        window 40 alone              95 kept    A18: TRP, TYR; A20: PRO; A38: PHE
+        window 40 + per-identity 3   122 kept   nothing dropped
+
+    A18/TRP is PoreDesigner's published V18W. Its best rotamer sits 51.88
+    kcal/mol above that position's best (MET, -7.06) because it genuinely
+    clashes with the *unrelaxed* wild-type pocket -- which is exactly why an
+    identity must not be deleted outright on the strength of a template it has
+    never been relaxed against. IPRO's own rule is the window AND a per-kind
+    retention floor (ROTAMERS.py keeps N=3 of each identity, lowering N only
+    when the total exceeds the cap); only the window had been implemented."""
     ompf = REPO / "examples" / "ompf_pore"
     if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
         print("    (skipped: needs the ompf example and PyMOL)")
@@ -5766,14 +5780,71 @@ def test_regression_an_unreachable_identity_is_reported():
     spec = DesignSpec.load(ompf / "spec_smoke.yaml")
     loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run",
                     backend=resolve("builtin"))
-    cb = loop.build_combined()
-    dropped = cb.tables.dropped_identities
-    assert "A18" in dropped and "TRP" in dropped["A18"], dropped
-    loop._note_dropped_identities(cb.tables)
+    tables = loop.build_combined().tables
+    kept = {p: len(tables.rotamers[p]) for p in tables.positions}
+    assert sum(kept.values()) >= 115, (
+        f"{kept} -- the prune must not keep fewer than the absolute rule did"
+    )
+    assert not tables.dropped_identities, tables.dropped_identities
+    assert "TRP" in {r.aa for r in tables.rotamers["A18"]}, (
+        "the published V18W answer must be reachable at A18"
+    )
+
+    # The floor is per identity, so it cannot resurrect a whole position's
+    # worth of clashes: each identity keeps at most `keep_per_identity`
+    # rotamers from outside the window.
+    import inspect
+
+    from ipro_agent.milp import build_tables
+
+    assert inspect.signature(build_tables).parameters["keep_per_identity"].default == 3
+
+
+def test_regression_an_unreachable_identity_is_still_reported():
+    """The reporting path itself, which the fix above must not have removed:
+    an identity whose every rotamer is pruned is not reachable, and `validate`
+    still advertises the full product of the allowed sets, so the run has to
+    say so. Exercised with the floor turned off, since the shipped spec no
+    longer drops anything."""
+    import numpy as _np
+
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.milp import Rotamer, build_tables
+
+    class _Flat:
+        can_relax = False
+        name = "flat"
+        units = "test"
+        screening_pairwise = True
+
+        def __init__(self, energies):
+            self.energies = energies
+
+        def interaction(self, a, b):
+            return self.energies[a.names[0]]
+
+        def internal(self, a):
+            return 0.0
+
+    energies = {"a0": 0.0, "b0": 100.0, "b1": 101.0}
+    rots = {"A1": []}
+    for i, (name, aa) in enumerate((("a0", "ALA"), ("b0", "TRP"), ("b1", "TRP"))):
+        rots["A1"].append(Rotamer(
+            position="A1", aa=aa, state=i,
+            atoms=AtomSet(names=[name], coords=_np.zeros((1, 3)), resnames=[aa])))
+    template = AtomSet(names=["N"], coords=_np.zeros((1, 3)), resnames=["GLY"])
+
+    tab = build_tables(rots, template, _Flat(energies), native={"A1": "ALA"},
+                       rotamer_window=40.0, keep_per_identity=0)
+    assert tab.dropped_identities == {"A1": ["TRP"]}, tab.dropped_identities
+
+    from ipro_agent.loop import IPROLoop
+
+    loop = IPROLoop(_spec(), Path(tempfile.mkdtemp()) / "r",
+                    backend=resolve("builtin"))
+    loop._note_dropped_identities(tab)
     note = [n for n in loop.notes if "NOT reachable" in n]
-    assert note, loop.notes
-    assert "A18: TRP" in note[0], note[0]
-    assert "rotamer_window" in note[0]
+    assert note and "A1: TRP" in note[0], loop.notes
 
 
 def test_regression_stabilize_minimizes_the_complex_energy():
@@ -5954,3 +6025,177 @@ def test_the_tour_gif_exists_and_is_small_enough_to_ship():
     tracked = subprocess.run(["git", "ls-files", "docs/tour.gif"],
                              capture_output=True, text=True, cwd=REPO).stdout
     assert tracked.strip() == "docs/tour.gif", "the gif must be committed"
+
+
+def test_regression_relaxation_is_superposed_back_into_the_frame_it_was_scored_in():
+    """`backend.relax` runs FastRelax in torsion space, and the coordinate
+    constraints and MoveMap that would pin the molecule are installed only
+    when ``fixed`` is non-empty -- which it is unless the spec happens to carry
+    a fix/tether restraint. So the whole design molecule swings through space
+    while every partner keeps its docked coordinates, and
+    ``ctx.interaction[...]`` becomes a cross-term between a displaced design
+    and an undisplaced partner.
+
+    Measured with PyRosetta 2026.29 on the shipped OmpF structure, with a
+    3-atom probe grid-placed in a genuine pocket (115 protein atoms within
+    8 A, nearest 3.64 A):
+
+        unrelaxed                        IE   -5.739
+        relaxed, as the code returned it IE  +81.351   (lab move 9.91 A)
+        relaxed, second draw             IE +205.740   (lab move 6.59 A)
+        superposed, first draw           IE   -3.435
+        superposed, second draw          IE   -3.250
+
+    Two draws of ONE structure disagreed by **124.39 kcal/mol** and both had
+    the wrong sign; superposed they agree to 0.18 and keep it. At the shipped
+    temperature kT is 7.23 kcal/mol, so the error was seventeen kT.
+
+    The fit is on backbone atoms only, so a large rotamer change at a design
+    position cannot drag the placement, and it is energy-neutral for
+    `internal()` by construction -- which this test asserts, because that is
+    what makes it safe to apply unconditionally."""
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.loop import _atoms_of, _superpose_onto
+    from ipro_agent.structure import Structure
+
+    atoms = _atoms_of(Structure.load(CRN), set())
+    coords = np.asarray(atoms.coords, dtype=float)
+
+    # A rigid motion: 7 A translation plus a rotation about z.
+    ang = np.radians(35.0)
+    rot = np.array([[np.cos(ang), -np.sin(ang), 0.0],
+                    [np.sin(ang), np.cos(ang), 0.0],
+                    [0.0, 0.0, 1.0]])
+    moved_coords = coords @ rot.T + np.array([7.0, -3.0, 2.0])
+    # ... and a small conformational change on top of it, as a relax makes.
+    rng = np.random.default_rng(0)
+    moved_coords = moved_coords + rng.normal(0.0, 0.25, size=moved_coords.shape)
+    moved = AtomSet(names=list(atoms.names), coords=moved_coords,
+                    resnames=list(atoms.resnames), reskeys=list(atoms.reskeys),
+                    elements=list(atoms.elements))
+
+    before = float(np.linalg.norm(moved_coords - coords, axis=1).mean())
+    fitted, drift, centroid = _superpose_onto(moved, atoms)
+    after = float(np.linalg.norm(np.asarray(fitted.coords) - coords, axis=1).mean())
+
+    assert before > 4.0, before
+    assert after < 0.6, (before, after, "the rigid-body component must be gone")
+    assert after < before / 5.0, (before, after)
+    assert drift > 4.0 and centroid > 1.0, (drift, centroid)
+
+    # Exact on a pure rigid motion, which is the property the fix rests on.
+    pure = AtomSet(names=list(atoms.names), coords=coords @ rot.T + [7.0, -3.0, 2.0],
+                   resnames=list(atoms.resnames), reskeys=list(atoms.reskeys),
+                   elements=list(atoms.elements))
+    exact, _d, _c = _superpose_onto(pure, atoms)
+    assert float(np.abs(np.asarray(exact.coords) - coords).max()) < 1e-6
+
+    # Energy-neutral for the internal term: a rigid motion preserves every
+    # internal distance, so superposing one cannot change it.
+    be = resolve("builtin")
+    assert abs(be.internal(moved) - be.internal(fitted)) < 1e-6, (
+        be.internal(moved), be.internal(fitted)
+    )
+    # And it repairs the cross-term, which is the whole point.
+    probe = AtomSet(names=["C1"], coords=coords[:1] + np.array([4.0, 0.0, 0.0]),
+                    resnames=["LIG"], reskeys=[("L", 1, "")], elements=["C"])
+    assert abs(be.interaction(fitted, probe) - be.interaction(atoms, probe)) \
+        < abs(be.interaction(moved, probe) - be.interaction(atoms, probe))
+
+    # The loop applies it, and says so when the motion was large.
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "_superpose_onto(atoms, design_all)" in src, (
+        "the relaxed atoms must be returned in the frame they were scored in"
+    )
+    assert "relax_drift" in src, "a large rigid-body component must be reported"
+
+
+def test_regression_the_relaxation_basis_is_latched_before_the_baseline():
+    """Relaxation failures are per-candidate (PyRosetta's hold-tolerance raise
+    fires for one geometry, not for the backend), and the loop used to score
+    the failing candidate unrelaxed anyway -- against a baseline that HAD been
+    relaxed. Measured with real PyRosetta over three iterations of
+    bind_tighter: start_score +76.5872 against candidate interaction energies
+    of -2.2466, -2.2673 and -2.2682, all three "accepted: improved", so the
+    design accounted for 0.0216 kcal/mol of a reported 78.86 kcal/mol
+    improvement. The mirror case (only the first relax fails) rejected
+    everything and still claimed it was the candidates that went unrelaxed.
+
+    The basis is now chosen once, before the baseline is scored, and never
+    changes: if the baseline cannot be relaxed the whole run goes unrelaxed
+    and says so; afterwards a candidate that cannot be relaxed is rejected,
+    because it is not measurable on the run's basis."""
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+
+    assert "self._relax_disabled" in src
+    assert 'ok, reason = False, "relaxation failed; not comparable"' in src, (
+        "a candidate that could not be relaxed must be rejected, not re-based"
+    )
+    # The latch is before the first score, and re-scores the baseline.
+    body = src[src.index("self._relax_native = True"):]
+    body = body[:body.index("start_score = self.goal.score(start_ctx)")]
+    assert "self._relax_disabled = True" in body
+    assert 'relax_tag=None' in body, "the baseline must be re-scored unrelaxed"
+    assert body.index("self._relax_disabled = True") < body.index("relax_tag=None")
+
+    # And the helper refuses once the run is on the unrelaxed basis, so a
+    # later success cannot switch it back.
+    helper = src[src.index("def _relaxed_design_atoms"):]
+    helper = helper[:helper.index("    # -- writing structures")]
+    assert "if self._relax_disabled:" in helper
+    assert helper.index("if self._relax_disabled:") < helper.index("write_atomset_pdb")
+
+    from ipro_agent.loop import IPROLoop
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.structure import Structure
+
+    class _Broken(_CountingRelaxBackend):
+        def relax(self, pdb_in, pdb_out, fixed=()):
+            raise RuntimeError("no params for LIG")
+
+    loop = IPROLoop(_spec(loop={"perturb_backbone": True}),
+                    Path(tempfile.mkdtemp()) / "run", backend=_Broken())
+    atoms = _atoms_of(Structure.load(CRN), set())
+    assert loop._relaxed_design_atoms(atoms, "t") is None
+    assert loop._relax_failed_now is True, "the failure must be visible to the loop"
+    loop._relax_disabled = True
+    loop._relax_failed_now = False
+    assert loop._relaxed_design_atoms(atoms, "t2") is None
+    assert loop._relax_failed_now is False, (
+        "once the run is on the unrelaxed basis, a skipped relax is not a failure"
+    )
+
+
+def test_regression_the_derived_window_works_with_several_assemblies():
+    """`ordered` holds VIRTUAL positions once there is more than one assembly
+    ("a::A16"), while `spec.positions` hold plain labels ("A16"), so the
+    intersection that derives the redesign window from the perturbed region
+    was always empty -- and the loop fell back to the independent draw
+    silently, in exactly the case assemblies exist for. Measured on a
+    two-assembly spec: ordered ['a::A16', 'a::A17'], a perturbed region
+    holding BOTH design positions, derived window []."""
+    from ipro_agent.loop import IPROLoop
+
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "(split_vpos(p)[1] or p) in inside_labels" in src, (
+        "the window must compare plain labels against plain labels"
+    )
+
+    class _Pert:
+        chain = "A"
+        residues = [16, 17]
+
+    loop = IPROLoop(_spec(positions=["A16", "A17"]),
+                    Path(tempfile.mkdtemp()) / "run", backend=resolve("builtin"))
+    # Virtual labels, as a multi-assembly build produces.
+    ordered = ["a::A16", "a::A17"]
+    window = loop._choose_window(ordered, _Pert())
+    assert window == ordered, (
+        f"both design positions are inside the perturbed region; got {window}"
+    )
+    # A region holding neither still falls back rather than returning nothing.
+    class _Elsewhere:
+        chain = "A"
+        residues = [40, 41]
+
+    assert loop._choose_window(ordered, _Elsewhere()), "must fall back, not empty"
