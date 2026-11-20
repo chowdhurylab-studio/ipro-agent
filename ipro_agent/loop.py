@@ -297,7 +297,7 @@ class IPROLoop:
         #: source of truth for both harvesting and writing structures.
         self._design_pdb = None
         self._input_pdb = None
-        self._axis_clear_cache = None
+        self._axis_clear_cache: dict = {}
         self._post_relaxed = 0
         self._post_relax_failed = 0
         #: The starting point's relaxation, counted apart from the iterations
@@ -785,12 +785,25 @@ class IPROLoop:
                 f"two atoms spanning the channel, or by adding positions on the "
                 f"opposite wall."
             )
+        # How far the narrowest slice's circle sits from the fitted axis. The
+        # cap on this (`pore_max_centre_offset`) is a real parameter, and when
+        # it binds the reported radius is the cap's answer rather than the
+        # pore's -- on OmpF a cap of 4.0 pins the centre at exactly 4.000 and
+        # reads 7.68 A, where a non-binding 6.0 reads 8.07 A. Nothing in the
+        # record said which had happened, so a reader could not tell a lumen
+        # width from a clamped one.
+        narrowest = int(np.argmin(prof.radii))
+        centre_offset = float(np.linalg.norm(np.cross(
+            np.asarray(prof.centres[narrowest]) - np.asarray(prof.axis_origin),
+            np.asarray(prof.axis_direction))))
         out = {
             "min_pore_radius": prof.min_radius,
             "min_pore_diameter": prof.min_diameter,
             "max_pore_radius": float(max(prof.radii)),
             "pore_axis_flatness": flatness,
             "pore_axis_clearance": clearance,
+            "pore_centre_offset": centre_offset,
+            "pore_max_centre_offset": float(opts.get("pore_max_centre_offset", 6.0)),
         }
         if axis_ok is not None:
             out["pore_axis_clearance_input"] = axis_ok
@@ -803,9 +816,21 @@ class IPROLoop:
         the reason given above: on a candidate this number also moves when the
         design works, so it cannot tell a bad axis from a good design.
         """
-        if getattr(self, "_axis_clear_cache", None) is not None:
-            return self._axis_clear_cache
         from .pore import vdw_radii
+
+        # Keyed by the origin rather than global. The axis is refitted whenever
+        # the backbone moves -- `_design_st` is replaced below and `_pore_axis`
+        # refits from it -- and a cache that returned before reading `origin`
+        # answered every later iteration with iteration 0's axis, so a run with
+        # perturb_backbone: true reported `pore_axis_clearance_input` for an
+        # axis it had stopped using.
+        key = tuple(np.round(np.asarray(origin, dtype=float), 3))
+        cache = getattr(self, "_axis_clear_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._axis_clear_cache = cache
+        if key in cache:
+            return cache[key]
 
         path = getattr(self, "_input_pdb", None) or self._design_pdb
         if path is None:
@@ -821,9 +846,24 @@ class IPROLoop:
                 np.sqrt(((coords - origin) ** 2).sum(-1))
                 - vdw_radii(names, elements)
             ))
-        except Exception:
+        except Exception as exc:
+            # This file's convention is that a silent degradation gets a note.
+            # This returned None on any failure, which skipped the "THE PORE
+            # RADIUS HERE IS NOT A PORE RADIUS" warning above with no note, no
+            # log line and no trace of why -- and §7m names the fitted axis as
+            # one of three suspects for the shipped case accepting nothing, so
+            # it is the diagnostic least affordable to lose quietly.
+            if "pore_clearance_failed" not in self._once:
+                self._once.add("pore_clearance_failed")
+                self.notes.append(
+                    f"could not check whether the fitted pore axis origin lies "
+                    f"in the lumen ({type(exc).__name__}: {exc}). Every pore "
+                    f"radius below is reported without that check, so it may be "
+                    f"the gap beside a wall rather than a channel width, and any "
+                    f"pore_diameter filter is being applied to that gap."
+                )
             return None
-        self._axis_clear_cache = value
+        cache[key] = value
         return value
 
     # -- moving the backbone -------------------------------------------------

@@ -424,18 +424,24 @@ def tool_score(args: dict) -> dict:
 def tool_milp(args: dict) -> dict:
     with _spec_scratch() as keep:
         cmd = ["milp", _resolve_spec(args["spec"], keep)]
+        # Absolute, because the child runs with cwd=REPO_ROOT: a relative
+        # `out` landed inside the installed package and the reported path was
+        # relative, so the agent could not find the file it had just asked
+        # for. An output rather than an input, so it goes to a directory this
+        # process is known to be able to write to, not to wherever the client
+        # happens to be standing.
+        #
+        # `-o` goes on unconditionally. Omitting it did not mean "no file": it
+        # handed the child argparse's default, the bare name `model.lp`, which
+        # it then resolved against the same REPO_ROOT -- so the no-`out` call,
+        # the common one, kept exactly the behaviour the `out` branch existed
+        # to prevent, and reported `{"lp_file": "model.lp"}` relative to a
+        # directory the caller never named.
         out = args.get("out")
-        if out:
-            # Absolute, because the child runs with cwd=REPO_ROOT: a relative
-            # `out` landed inside the installed package and the reported path
-            # was relative, so the agent could not find the file it had just
-            # asked for. An output rather than an input, so it goes to a
-            # directory this process is known to be able to write to, not to
-            # wherever the client happens to be standing.
-            q = Path(str(out)).expanduser()
-            if not q.is_absolute():
-                q = _writable_dir() / q.name
-            cmd += ["-o", str(q)]
+        q = Path(str(out)).expanduser() if out else Path("model.lp")
+        if not q.is_absolute():
+            q = _writable_dir() / q.name
+        cmd += ["-o", str(q)]
         return _cli(cmd)
 
 

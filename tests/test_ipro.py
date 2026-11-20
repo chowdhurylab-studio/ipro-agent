@@ -7083,3 +7083,162 @@ def test_regression_the_trp_control_still_reads_under_the_filter():
         dia = line["components"]["min_pore_diameter"]
         assert dia < 4.0, f"7o says the published design reads under the filter; got {dia}"
         assert abs(dia - 3.99464) < 0.01, f"7o records 3.99464 A; got {dia}"
+
+
+def test_regression_milp_never_writes_into_the_installed_package():
+    """`ipro_milp` with no `out` wrote its LP file into the package tree.
+
+    The `out` branch already knew the rule -- the child runs with
+    `cwd=REPO_ROOT`, which is site-packages in a pip install, so a relative
+    path lands inside the installed package -- and then the no-`out` call, the
+    common one, skipped `-o` entirely and handed the child argparse's default
+    `model.lp`, resolved against that same cwd. On a writable install that
+    drops a 419 KB LP file into site-packages; on a read-only one it is the
+    PermissionError traceback §7h already fixed for runs. Either way the reply
+    said `lp_file: model.lp`, a path relative to a directory the caller never
+    named.
+
+    Checked at the argv the tool builds, so no solver and no PyMOL run."""
+    prog = (
+        "import json\n"
+        "import ipro_agent.mcp_server as m\n"
+        "seen = []\n"
+        "m._cli = lambda cmd: seen.append(list(cmd)) or {'ok': True}\n"
+        "m._resolve_spec = lambda s, keep: '/tmp/spec.yaml'\n"
+        "out = {}\n"
+        "for label, args in (('default', {'spec': 's'}),\n"
+        "                    ('relative', {'spec': 's', 'out': 'mine.lp'}),\n"
+        "                    ('absolute', {'spec': 's', 'out': '/tmp/abs.lp'})):\n"
+        "    seen.clear()\n"
+        "    m.tool_milp(dict(args))\n"
+        "    cmd = seen[0]\n"
+        "    out[label] = cmd[cmd.index('-o') + 1] if '-o' in cmd else None\n"
+        "print(json.dumps({'paths': out, 'repo_root': str(m.REPO_ROOT)}))\n"
+    )
+    p = subprocess.run([sys.executable, "-c", prog],
+                       capture_output=True, text=True, cwd=REPO)
+    assert p.returncode == 0, p.stderr[-2000:]
+    got = json.loads(p.stdout)
+    paths, root = got["paths"], got["repo_root"]
+
+    for label, path in paths.items():
+        assert path is not None, f"{label}: -o must always be passed"
+        assert Path(path).is_absolute(), f"{label}: {path} is relative"
+        assert not path.startswith(root + "/"), (
+            f"{label}: {path} is inside the package tree at {root}")
+
+    assert paths["absolute"] == "/tmp/abs.lp", paths["absolute"]
+    assert Path(paths["relative"]).name == "mine.lp", paths["relative"]
+    assert Path(paths["default"]).name == "model.lp", paths["default"]
+
+
+def test_regression_a_pore_axis_check_that_fails_says_so():
+    """`_axis_clearance` returned None on any exception, which skipped the
+    "THE PORE RADIUS HERE IS NOT A PORE RADIUS" warning with no note and no
+    log line -- in a file whose rule is that every silent degradation gets a
+    note. §7m names the fitted axis as one of three suspects for the shipped
+    case accepting nothing, so that warning is the diagnostic least affordable
+    to lose quietly.
+
+    The cache was the second half of it: it returned before `origin` was read,
+    so once the backbone moved and the axis was refitted, every later
+    iteration was answered with iteration 0's axis."""
+    import types
+
+    from ipro_agent.loop import IPROLoop
+
+    def bare(input_pdb):
+        o = types.SimpleNamespace()
+        o._once = set()
+        o.notes = []
+        o._input_pdb = input_pdb
+        o._design_pdb = None
+        o._axis_clear_cache = {}
+        o.spec = types.SimpleNamespace(
+            design_molecule=types.SimpleNamespace(chains=["A"]))
+        return o
+
+    # A failure must leave a note rather than nothing.
+    o = bare("/nonexistent/no-such-structure.pdb")
+    got = IPROLoop._axis_clearance(o, np.zeros(3))
+    assert got is None
+    assert o.notes, "a swallowed failure must still be reported"
+    note = o.notes[0].lower()
+    assert "pore axis" in note and "lumen" in note, o.notes[0]
+    # and only once, however many iterations ask
+    IPROLoop._axis_clearance(o, np.zeros(3))
+    assert len(o.notes) == 1, o.notes
+
+    # Two different origins must not share one answer.
+    pdb = str(REPO / "examples" / "ompf_pore" / "2omf_A.pdb")
+    o = bare(pdb)
+    a = IPROLoop._axis_clearance(o, np.array([-3.07, 49.31, 35.36]))
+    b = IPROLoop._axis_clearance(o, np.array([-13.1, 57.65, 34.82]))
+    assert a is not None and b is not None
+    assert a != b, (
+        f"both origins returned {a}: the cache is answering for the wrong axis")
+    assert len(o._axis_clear_cache) == 2, o._axis_clear_cache
+    # and a repeat of the first origin is served from the cache, unchanged
+    assert IPROLoop._axis_clearance(o, np.array([-3.07, 49.31, 35.36])) == a
+
+
+def test_regression_the_pore_offset_cap_has_one_default_and_is_recorded():
+    """`pore_max_centre_offset` had two different defaults -- 6.0 where the
+    loop calls it, 4.0 in `pore_profile` itself -- and no spec in the repo sets
+    the key, so the same structure measured differently depending on which
+    entry point you used.
+
+    6.0 is the one to keep, and the reason is measurable rather than a
+    preference: the cap still *binds* at 4.0 on OmpF, pinning the winning
+    circle's centre at exactly the cap and reading 7.68 A, where at 6.0 the
+    centre settles at 3.14 A on its own and the reading is the 8.07 A that §4
+    records against the published 11 x 7 A eyelet. A cap low enough to bind is
+    measuring the setting, not the pore -- so the geometry record now carries
+    the winning centre's offset, and a reader can see when the two are equal."""
+    import inspect
+    import re
+
+    from ipro_agent.pore import axis_from_lining, pore_profile
+    from ipro_agent.structure import Structure, is_hydrogen
+
+    sig = inspect.signature(pore_profile)
+    module_default = sig.parameters["max_centre_offset"].default
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    loop_defaults = set(re.findall(
+        r'opts\.get\("pore_max_centre_offset",\s*([0-9.]+)\)', src))
+    assert loop_defaults, "the loop must still read the key"
+    assert loop_defaults == {str(module_default)}, (
+        f"pore_profile defaults to {module_default} and the loop to "
+        f"{loop_defaults}: the same structure measures differently depending "
+        "on which one you call")
+
+    st = Structure.load(str(REPO / "examples" / "ompf_pore" / "2omf_A.pdb"), ["A"])
+    want = {18, 20, 38, 40, 42, 62, 64, 82, 83, 109, 110, 113, 114, 115, 117,
+            118, 119, 120, 121, 123, 124, 125, 130, 131, 132}
+    cas = np.array([a.coord for r in st.residues("A") if int(r.id[1]) in want
+                    for a in r if a.get_name().strip() == "CA"])
+    assert len(cas) == 25, len(cas)
+    origin, direction = axis_from_lining(cas)
+    atoms = [a for a in st.all_atoms() if not is_hydrogen(a)]
+    coords = np.array([a.coord for a in atoms])
+    names = [a.get_name() for a in atoms]
+    els = [(a.element or "").strip() or None for a in atoms]
+
+    def read(cap):
+        p = pore_profile(coords, names, axis_origin=origin,
+                         axis_direction=direction, spacing=0.5,
+                         max_centre_offset=cap, elements=els)
+        i = int(np.argmin(p.radii))
+        off = float(np.linalg.norm(np.cross(
+            np.asarray(p.centres[i]) - p.axis_origin, p.axis_direction)))
+        return p.min_diameter, off
+
+    tight_d, tight_off = read(4.0)
+    kept_d, kept_off = read(module_default)
+    assert abs(tight_off - 4.0) < 1e-6, (
+        f"4.0 is expected to bind here; centre sat at {tight_off}")
+    assert kept_off < module_default - 0.5, (
+        f"the kept default must not bind; centre sat at {kept_off}")
+    assert kept_d > tight_d, (tight_d, kept_d)
+    assert abs(kept_d - 8.07) < 0.05, (
+        f"§4 records 8.07 A for this axis and cap; got {kept_d}")

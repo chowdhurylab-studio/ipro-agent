@@ -172,7 +172,7 @@ def pore_profile(
     *,
     spacing: float = 0.5,
     window: tuple[float, float] | None = None,
-    max_centre_offset: float = 4.0,
+    max_centre_offset: float = 6.0,
     elements: list[str] | None = None,
 ) -> PoreProfile:
     """Radius of the largest inscribed circle, slice by slice along the axis.
@@ -186,6 +186,19 @@ def pore_profile(
     the axis. It is a real parameter, not a tolerance: it is what makes the
     question "how wide is the lumen" rather than "how far is the nearest atom",
     and a value much larger than the pore lets the search escape into solvent.
+
+    The default is 6.0 and used to be 4.0 here while ``loop._measure_geometry``
+    passed 6.0, so the same structure measured differently depending on which
+    one you called, and no spec in the repo sets the key. 6.0 is the one to
+    keep, which is not obvious: on OmpF (2OMF chain A, the 25 published
+    positions) the cap is still *binding* at 4.0 -- the winning circle's centre
+    sits at exactly 4.000 A, i.e. clamped -- and the reading is 7.68 A. It
+    stops binding between 5.0 and 6.0, where the centre settles at 3.14 A of
+    its own accord and the reading is 8.07 A, which is the figure §4 records
+    against the published 11 x 7 A eyelet. A cap low enough to bind is
+    measuring the parameter rather than the pore, so the geometry record now
+    reports the winning centre's offset alongside the radius: when that number
+    equals the cap, the reading is an artefact of this setting.
 
     Each slice is a true cross-section: an atom obstructs it only if its vdW
     sphere actually reaches that plane, and then by the radius of the circle
