@@ -6862,4 +6862,11 @@ def test_server_json_matches_the_package_it_points_at():
             REPO / "ipro_agent" / "rotamers.py").read_text(), env["name"]
         assert env["isSecret"] is False, "this server takes no secrets"
 
+    # The registry caps these, and the published JSON Schema does not say so:
+    # only `mcp-publisher validate` rejects them. A 400-character description
+    # passed every local check and failed at the registry with
+    # "expected length <= 100".
+    assert len(spec["description"]) <= 100, len(spec["description"])
+    assert len(spec.get("title", "")) <= 100, len(spec.get("title", ""))
+
     assert (REPO / "docs" / "RELEASING.md").is_file()

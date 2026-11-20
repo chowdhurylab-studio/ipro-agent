@@ -52,7 +52,13 @@ release whose description lost it cannot be registered.
 the official schema. Its `version` and its `packages[0].version` must both
 match the version just uploaded to PyPI.
 
+Validate first. It checks against the live registry, needs no credentials, and
+catches limits the published JSON Schema does not carry: `description` is
+capped at 100 characters, and a 400-character one passed every local check
+before failing here.
+
 ```bash
+mcp-publisher validate
 mcp-publisher login github
 mcp-publisher publish
 ```
