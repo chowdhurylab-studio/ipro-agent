@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.chowdhurylab-studio/ipro-agent",
   "title": "IPRO protein redesign",
-  "description": "Redesign a protein toward a stated goal: IPRO, with rotamer selection as a MILP",
+  "description": "Protein redesign by IPRO, rotamer selection as a MILP. Designing needs PyMOL via conda.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/chowdhurylab-studio/ipro-agent",
