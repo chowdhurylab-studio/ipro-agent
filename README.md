@@ -109,7 +109,7 @@ at all, there is an MCP server. It presents the tool as fifteen typed tools
 rather than a manual to read:
 
 ```bash
-pip install git+https://github.com/chowdhurylab-studio/ipro-agent
+pip install ipro-agent
 ```
 
 ```json
@@ -121,6 +121,10 @@ That block goes in your client's MCP config (Claude Desktop's config file,
 `.mcp.json` for Claude Code, Cursor's settings; the shape is shared).
 `bash scripts/bootstrap.sh` prints it with your own paths already filled in,
 which is the easier route.
+
+The MCP Registry lists the server as
+`io.github.chowdhurylab-studio/ipro-agent`, which is the name to give a
+client that installs from the registry instead of from a config block.
 
 Set `cwd` to a checkout even when you installed with pip. The documents served
 as resources (`ipro://skill` and the rest) ship with the repository rather than

@@ -1876,3 +1876,56 @@ so in their notes, including the `NO DESIGN WAS ACCEPTED` line. A reader who
 looks at `best_mutations` first sees thirteen mutations from a run that
 designed nothing. `ipro_result` reports `designed_nothing` for exactly this
 case; the CLI's own summary does not, and should.
+
+## 7n. Publishing it, and checking the published thing (2026-11-20)
+
+`v0.1.0` was tagged and pushed. The first release run failed:
+
+```
+invalid-publisher: valid token, but no corresponding publisher
+  sub: repo:chowdhurylab-studio/ipro-agent:environment:pypi
+```
+
+The `check` job passed and the `pypi` job failed, so `registry` never ran and
+nothing was published. There was no half-release to undo.
+
+The cause was that linking GitHub to a PyPI account as a sign-in method is not
+the same thing as registering a trusted publisher, and only the second one
+creates something for the OIDC token to match. A pending publisher was added
+with the five values taken from the claims the failed run printed:
+
+| Field | Value |
+|---|---|
+| PyPI project name | `ipro-agent` |
+| Owner | `chowdhurylab-studio` |
+| Repository | `ipro-agent` |
+| Workflow | `release.yml` |
+| Environment | `pypi` |
+
+The re-run was green on all three jobs.
+
+**What was checked afterwards, from outside the repository.** A clean venv on
+Python 3.12 in `/private/tmp`, `pip install ipro-agent`, nothing on the path
+from this checkout:
+
+- the import resolves to `site-packages/ipro_agent`, not to the source tree;
+- `python -m ipro_agent.doctor --json` resolves PyMOL through the conda
+  environment (`subprocess-env`, `/opt/miniconda3/envs/ipro-agent/bin/python`),
+  finds `glpsol` and `obabel`, and reports `pyrosetta` absent, which is the
+  state §7j recorded for this machine;
+- an MCP stdio handshake run with `cwd=/` returns protocol `2025-06-18`,
+  `serverInfo` `ipro-agent 0.1.0`, 15 tools, 8 resources, 3 prompts, and
+  `ipro_doctor` answers with `isError: false`;
+- both console scripts are installed, and `ipro-agent-mcp` starts and completes
+  `initialize` with no repository anywhere near it.
+
+The registry entry is `active`, `isLatest`, and points at `pypi/ipro-agent`
+`0.1.0`.
+
+**What this does not establish.** A PyPI install on its own is not a working
+design pipeline. The documents the server offers as resources ship with the
+repository rather than inside the package, so without `IPRO_REPO` the server
+lists them and says where to fetch them, and rotamers still come only from
+PyMOL's mutagenesis wizard, which pip cannot install (§2). The handshake above
+proves the server starts and answers, not that it can design. Nothing here
+changes §7m: the published case still accepts nothing.
