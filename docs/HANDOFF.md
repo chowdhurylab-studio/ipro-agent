@@ -13,11 +13,10 @@ https://github.com/chowdhurylab-studio/ipro-agent
 git clone https://github.com/chowdhurylab-studio/ipro-agent && cd ipro-agent && bash scripts/bootstrap.sh
 ```
 
-![inspect, validate, run](tour.gif)
+![A conversation with the agent](demo-chat.png)
 
-*Real output from the three commands above, on the shipped OmpF example. Note
-how it ends: a run that changed nothing says so, and the two notes are the
-result as much as the score is.*
+*What you are handing them. Point them at [the prompt page](index.html) rather
+than at a command line: the three commands exist, but nobody starts there.*
 
 `scripts/bootstrap.sh` creates the conda environment, prints what resolved,
 runs the whole test suite, runs the shipped example end to end, and finishes by

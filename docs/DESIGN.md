@@ -417,9 +417,12 @@ positions whose native residue the alphabet excludes.
 "Axis clearance" is how far the fitted axis origin sits from the nearest van der
 Waals surface. A water needs 1.4 A. The smoke spec's four positions put that
 origin **inside the wall**, so its "1.53 A bottleneck" is the sliver beside the
-wall — and it silently *passes* the published sub-4 A filter. §7d records this as
-a confirmed defect left unfixed, with the attempted fix and why it was reverted.
-Give `goal_options.pore_axis` explicitly whenever the design positions do not
+wall — and it silently *passes* the published sub-4 A filter. **§7h fixed this**: the clearance is measured on the input structure rather
+than on the candidate, which separates the two shipped specs by an order of
+magnitude (2.80 A against 0.30 A), and a run whose axis fails that test says so
+outright instead of printing the radius bare. §7d's record of the attempted fix
+stands as the history of how it was got wrong first. Give
+`goal_options.pore_axis` explicitly whenever the design positions do not
 surround the channel.
 
 **Cost.** 127 ms per measurement over an 8 A constriction window on a
@@ -1599,3 +1602,193 @@ The suite is **195 tests**: 192 before, plus one per defect above. Verified at
 195 passed / 0 failed on the development interpreter and, in clean
 virtualenvs with `glpsol` on `PATH`, on Python 3.10 and 3.13, with the four
 PyRosetta and Vina skips §7e describes.
+## 7j. What the machine looks like after this session (2026-11-18)
+
+PyRosetta was removed from this machine after the full-mode verification in
+§7h. `/opt/miniconda3/envs/ipro_rosetta` is in the recoverable batch
+`~/.recoverable-deletes/20261118-205843`, with the receipt and the full audit
+in `~/Documents/storage-audits/ipro-agent-session-cleanup-20261118/`.
+
+So **full mode is unexercised on this machine again**, and reinstating it is
+not free: the install recipe in `docs/INSTALL.md` still works, but it is a
+fresh 1.53 GB download and the `quarterly` find-links window holds only two
+releases — build `2026.29+releasequarterly.80a0635615`, the one §7e and §7h
+measured against, may no longer be served. The measurements stand; a
+re-measurement against that exact build may not be possible.
+
+What survives the removal, and is what a reader should rely on: the §7h numbers
+(mean displacement 1.20 Å, centroid shift 0.83 Å, RMSD after superposition
+0.98 Å, 326 atoms in and out), the two writer defects that run exposed, and the
+regression tests, which use a counting stand-in backend and need no PyRosetta.
+
+The provenance behind the public claims moved into the repository rather than
+staying in a temporary directory — `docs/provenance/` holds both audit reports,
+the independence-check evidence and the `tour.gif` capture, and
+`scripts/measurements/` holds the two scripts behind §7h numbers that have no
+regression test of their own.
+
+---
+
+## 7k. Attacking this session's own code (2026-11-20)
+
+§7h was written in one session, fast, and its tests were written by the same
+agent in the same session — so a shared misunderstanding would be invisible in
+both. A 60-agent adversarial review was run over those seven commits, each
+finding then put to a refuter that defaulted to rejecting it. **37 survived, 7
+of them blockers**, and three of the seven were in code §7h describes as a fix.
+That is the point of the exercise: the measurements below were taken against
+real PyRosetta, not stand-ins, which is what a stand-in cannot do.
+
+### The relaxation was measuring the wrong thing entirely
+
+`backend.relax` runs FastRelax in torsion space, and the coordinate constraints
+and MoveMap that would pin the molecule are installed **only when `fixed` is
+non-empty** — which it is, unless the spec happens to carry a fix or tether
+restraint. So nothing held the design molecule in the lab frame. It swung
+several ångström while every partner kept its docked coordinates, and
+`ctx.interaction[...]` became a cross-term between a displaced design and an
+undisplaced partner.
+
+Measured on the shipped OmpF structure (2627 heavy atoms) with a 3-atom probe
+grid-placed in a genuine pocket (115 protein atoms within 8 Å, nearest 3.64 Å):
+
+| | interaction energy | lab-frame move |
+|---|---|---|
+| unrelaxed | −5.739 | — |
+| relaxed, as the code returned it | **+81.351** | 9.91 Å |
+| the same structure, second draw | **+205.740** | 6.59 Å |
+| superposed back, first draw | −3.435 | 0.84 Å |
+| superposed back, second draw | −3.250 | 0.86 Å |
+
+Two draws of **one** structure disagreed by **124.39 kcal/mol** — seventeen kT
+at the shipped temperature — and both had the wrong sign. The conformational
+change was never the problem: the superposed RMSD was 1.19–1.23 Å throughout.
+It is the placement that moved.
+
+The fix is a Kabsch fit back onto the frame the atoms were scored in, on
+backbone atoms only so a large rotamer change cannot drag the placement. It is
+energy-neutral for `internal()` by construction, it repairs `interaction()`,
+and one frame then serves the axis, the profile, the clearance, the partners,
+the geometry restraints and the written PDB — so the separate finding that the
+pore axis was fitted on the unrelaxed candidate and applied to the relaxed
+atoms needed no separate fix.
+
+A large rigid-body component is now reported rather than silently removed: it
+means the backbone is being relaxed with nothing holding it, and a `fix`
+restraint is the real answer.
+
+### Three more ways the loop measured against the wrong basis
+
+**A mid-run relax failure switched the basis under the walk.** Relax failures
+are per-candidate (PyRosetta's hold-tolerance raise fires for one geometry,
+not for the backend), and the loop scored the failing candidate unrelaxed
+against a baseline that had been relaxed. Measured over three iterations of
+`bind_tighter`: `start_score` +76.5872 against candidate interaction energies
+of −2.2466, −2.2673 and −2.2682, all three accepted as improvements. **The
+design accounted for 0.0216 kcal/mol of a reported 78.86.** The mirror case
+rejected everything. The basis is now latched before the baseline is scored and
+never changes; a candidate that cannot be relaxed is rejected, because it is
+not measurable on the run's basis.
+
+**The structure delivered was not the structure scored.** `_write_design`
+rebuilt the output through PyMOL from the *unrelaxed* input plus the chosen
+rotamers. Measured on the smoke spec: `best/design.json` reported
+`min_pore_radius` 1.999994 beside a `design.pdb` that measures 0.760, a factor
+of 2.6 on the headline number in the artifact a user actually opens, and in
+`full` mode the relaxed structure behind every reported energy existed only
+under `logs/relax`. The scored atoms are written directly now — they already
+carry the chosen rotamer, which is what made them the candidate — and the JSON
+and the PDB agree to the fourth decimal.
+
+**`fixed-backbone` mode was relaxing.** The run's own note promises that the
+backbone never moves there. Measured with the PyRosetta backend on the
+unmodified smoke spec: the starting point's relaxed output differed from its
+input by a mean of 15.7 Å over CA atoms while the loop's state never moved
+between iterations, so the only structure that moved was the one being scored,
+beside a note saying the opposite.
+
+### The remedy the docs recommend turned the measurement off
+
+`goal_options.pore_axis` is what README, SKILL.md and §1h all name as the fix
+for a fitted axis that misses the lumen. `_pore_axis` returned the **raw**
+difference between the two atoms on that branch, and `_measure_geometry` builds
+its window by projecting onto that vector: with |direction| = 17.43 Å for the
+repo's own example pair `["A18:CA", "A119:CA"]`, the window came out seventeen
+times too large and landed hundreds of ångström off the molecule.
+`pore_profile` returned zero slices, `_measure_geometry` returned `{}`,
+`filter_reject` read `None` for the bottleneck and passed everything, and
+`_axis_clearance` was never reached. **PoreDesigner's published sub-4 Å filter
+was simply off, with no note**, on exactly the input the documentation
+recommends. The fitted branch always returned a unit vector, which is why this
+never showed.
+
+### The prune "fix" deleted the published answer
+
+§7h replaced an absolute 50 kcal/mol threshold with IPRO's relative 40 kcal/mol
+window and reported it as more faithful. Measured on the shipped spec, same
+input, same backend:
+
+| rule | rotamers kept | identities dropped |
+|---|---|---|
+| absolute 50 (what §7h replaced) | 115 | none |
+| window 40 alone (what §7h shipped) | **95** | A18: TRP, TYR; A20: PRO; A38: PHE |
+| window 40 + per-identity floor 3 | **122** | none |
+
+A18/TRP is PoreDesigner's published **V18W**. The "more faithful" rule deleted
+the one residue the shipped example exists to find, and §7h's own note about
+unreachable identities was reporting that deletion as though it were a property
+of the problem. IPRO's rule is the window **and** a per-kind retention floor
+(`ROTAMERS.py` keeps N=3 of each identity, lowering N only when the total
+exceeds the cap); only the window had been implemented. TRP's best rotamer at
+A18 sits 51.88 kcal/mol above that position's best because it genuinely clashes
+with the *unrelaxed* wild-type pocket, which is exactly why an identity must not
+be deleted outright on the strength of a template it has never been relaxed
+against.
+
+### And one that only multi-assembly runs could see
+
+With more than one binding assembly the derived redesign window was **always
+empty**: `ordered` holds virtual positions (`a::A16`) while `spec.positions`
+hold plain labels, so the intersection never matched and every iteration fell
+back to the independent draw — silently, in exactly the case assemblies exist
+for.
+
+### Also fixed in this pass
+
+- `write_atomset_pdb` overflowed `resSeq` past 9999 and coordinates past four
+  digits, shifting every column after them (Bio.PDB refuses the result). Every
+  delivered structure goes through this writer now, so it refuses rather than
+  writes a file that is misaligned but still parses somewhere.
+- The relaxation count read "4 of 2 iteration(s)" with two assemblies, because
+  it counted relax calls rather than iterations.
+- `rt_tsa_kcal` and `rt_substrate_kcal` passed `validate` at zero and at
+  negative values; a negative inverts Eq 18's TSA term, so a worse
+  transition-state interaction scored better.
+- `design_per_iteration` is not read while the backbone is perturbed (the
+  window comes from the perturbed region), and the run now says so when it is
+  set; `config.py` says it too.
+- The restraint failure message still called the prune "dead-end elimination"
+  and told the user to raise `max_self_energy`, a knob that is now off by
+  default and no longer the one that matters.
+- §1h still described the fitted-axis defect as unfixed, four paragraphs after
+  §7h fixed it.
+
+### Confirmed and not fixed here
+
+Recorded rather than quietly left: the clearance cache is keyed on nothing, so
+with `perturb_backbone: true` the reported clearance belongs to the first axis
+rather than the current one; `_axis_clearance` swallows every exception and
+returns `None`, which drops the warning entirely rather than reporting why; the
+1.4 Å threshold tests how wide the native lumen is rather than whether the axis
+sits in it, and one-wall position sets exist on OmpF that clear more than
+1.4 Å; `dropped_identities` is discarded on the multi-assembly path and is
+reported from iteration 0's tables although the tables are rebuilt every
+iteration; a proline design position silently reverts an iteration to the
+unanchored behaviour; insertion codes are collapsed to the bare residue number
+when the region is built; the second chain of a two-chain design molecule is
+never perturbed; `Stabilize`'s complex energy rewards binding the anti-target;
+`ipro_run`'s 2-second poll ends before the slowest real failure; `ipro_milp`
+without `out` still writes into the installed package tree; `ipro_setup` with
+`confirm` on a pip-installed copy launches `mamba env create -f None`; a deeply
+nested JSON line still ends the MCP session through `RecursionError`; and a
+package imported from a zip fails every tool with a raw `NotADirectoryError`.

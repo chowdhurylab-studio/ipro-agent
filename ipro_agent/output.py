@@ -300,6 +300,28 @@ def write_atomset_pdb(atoms, path) -> int:
             number = int(key[1])
             icode = (str(key[2])[:1] if len(key) > 2 and key[2] else " ")
         serial += 1
+        # Columns, checked rather than hoped for. A residue number past 9999
+        # or a coordinate needing more than four digits before the point
+        # overflows its field and shifts every column after it, which Bio.PDB
+        # rejects outright ("Invalid or missing coordinate(s)") -- measured
+        # with resSeq 10000 and with x = 1234.567, where the y field ate the
+        # sign and the z field started mid-number. This file is what the user
+        # is handed, so a structure that cannot be written is reported, never
+        # written wrong.
+        x, y, z = atoms.coords[i]
+        if not (-999 <= number <= 9999):
+            raise ValueError(
+                f"residue number {number} does not fit a PDB resSeq field "
+                f"(-999 to 9999). This structure cannot be written as PDB; "
+                f"renumber it, or split it into chains."
+            )
+        for axis, value in (("x", x), ("y", y), ("z", z)):
+            if not (-999.999 <= float(value) <= 9999.999):
+                raise ValueError(
+                    f"{axis} = {value:.3f} does not fit a PDB coordinate field "
+                    f"(-999.999 to 9999.999). Centre the coordinates before "
+                    f"writing, or the file will be silently misaligned."
+                )
         name = atoms.names[i][:4]
         # Atom names are columns 13-16, and the convention is that a
         # one-letter element starts in column 14. A left-justified "CA" reads
@@ -309,7 +331,6 @@ def write_atomset_pdb(atoms, path) -> int:
             name = f" {name:<3}"
         else:
             name = f"{name:<4}"
-        x, y, z = atoms.coords[i]
         resname = resname_for.get(sort_key(i)[:3], atoms.resnames[i])
         lines.append(
             f"ATOM  {serial:5d} {name}{resname[:3]:>4}{chain:>2}"

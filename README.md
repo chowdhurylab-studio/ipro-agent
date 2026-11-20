@@ -40,12 +40,18 @@ That creates the environment, reports what resolved, runs the test suite and the
 shipped example, and prints the exact commands and MCP config with your own
 paths filled in. Safe to re-run; deletes nothing.
 
-![inspect, validate, run](docs/tour.gif)
+![A conversation: you ask in plain language, the agent resolves the positions, runs, and reports what it cannot stand behind](docs/demo-chat.png)
 
+<<<<<<< HEAD
 *The three commands you will actually use, on the shipped OmpF example; real
 output. `inspect` comes first because a bare residue number does not say which
 chain it is in, and the run ends on its notes because they are the result as
 much as the score is.*
+=======
+*How it is actually used. The caveat in that last message is the output: the
+run found nothing, and the number it printed is labelled rather than left to be
+quoted. [More worked prompts](docs/index.html), with what each one produces.*
+>>>>>>> origin/main
 
 By hand instead. The install step is not optional: rotamers come only from
 PyMOL's mutagenesis wizard, and `pymol-open-source` is conda-only, so

@@ -1,0 +1,35 @@
+FINDING: docs/DESIGN.md 576/577/582 + docs/INSTALL.md:117 "leak" private notes
+VERDICT: real=false (not-a-problem as a leaks finding)
+
+Lines reproduce verbatim. Harm claims refuted:
+
+1 NO NON-PUBLIC FACT DISCLOSED (kills the "leak")
+  LICENSE:3           Copyright (c) 2026 Supantha Dey
+  pyproject.toml:17   authors = [{ name = "Supantha Dey" }]
+  pyproject.toml:52   Repository = github.com/chowdhurylab-studio/ipro-agent
+  Owner identity + lab org are INTENTIONALLY in the publication set.
+  "ISU" adds no private fact: lab institution already implied by org name.
+
+2 FINDING CONCEDES NO WRONGDOING
+  "reading a subscribed paper is licensed use, and refs/ is gitignored".
+  Residual = speculative publisher complaint. Institutional VPN access to
+  subscribed content IS the product, not circumvention.
+  DESIGN.md:577 even says ACS SI is "free of charge even off campus" (not paywalled).
+
+3 PYROSETTA LICENCE ALREADY HANDLED, CORRECTLY, FOR READERS
+  INSTALL.md:22   "licensed, not vendored"
+  INSTALL.md:146  "**Licence first.**" + full non-commercial licence URL
+  INSTALL.md:401  "(c) Full, with PyRosetta (academic licence required)"
+  INSTALL.md:408  "read and accept the non-commercial licence first... Do not redistribute"
+  INSTALL.md:426  "licensed per user"
+  INSTALL.md:451-452 "not redistributable. Install it yourself, under your own licence"
+  :117 "under their own licence" is the responsible disclosure, not exposure.
+  Nothing vendored -> no licence tied to the artifact.
+
+4 PROPOSED FIX IS PURE WORDING -> excluded by task scope ("not style")
+
+SEPARATE, GENUINE, COSMETIC (not the finding as framed):
+  DESIGN.md:576-577 are ~~struck~~ + "**Obtained 2026-11-18**" + "Closed."
+  DESIGN.md:582 still says "Two routes remain open ... for the Wiley PDF and
+  the ACS SI" -> stale, contradicts the two rows directly above it.
+  Doc-consistency nit, not a leak, not a release risk.

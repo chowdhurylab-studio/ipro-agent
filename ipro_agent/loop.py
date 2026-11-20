@@ -105,6 +105,71 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 
+#: Atoms the rigid-body fit is computed from. Backbone only, deliberately: a
+#: large rotamer change at a design position must not drag the placement with
+#: it, and the backbone is the part that is comparable between the candidate
+#: and its relaxed self.
+_FIT_ATOMS = frozenset({"N", "CA", "C", "O"})
+
+
+def _superpose_onto(mobile: AtomSet, reference: AtomSet) -> tuple[AtomSet, float, float]:
+    """Kabsch-fit ``mobile`` onto ``reference`` and return it in that frame.
+
+    **Why this exists.** ``backend.relax`` runs FastRelax in torsion space with
+    nothing pinning the molecule in the lab frame -- the coordinate
+    constraints and the MoveMap are installed only when ``fixed`` is non-empty,
+    which it is unless the spec happens to carry a fix/tether restraint. So the
+    whole design molecule swings several angstroms while every partner keeps
+    its docked coordinates, and ``ctx.interaction[...]`` becomes a cross-term
+    between a displaced design and an undisplaced partner.
+
+    Measured with PyRosetta 2026.29 on ``examples/ompf_pore/2omf_A.pdb`` (2627
+    heavy atoms), two draws of the SAME structure: mean lab-frame displacement
+    11.599 and 6.411 A, centroid shift 10.221 and 5.701 A, while the superposed
+    RMSD was only 1.228 and 1.192 A. The conformational change is small; the
+    placement is what moved. On a ligand in a buried pocket the interaction
+    energy went from -8.588 (unrelaxed) to +5.849 and +4.606 -- two draws of
+    one structure disagreeing by 1.24 kcal/mol and carrying the wrong sign.
+    Superposed, the same two draws give -0.969 and -1.188, agreeing to 0.22.
+
+    The fit is energy-neutral for :meth:`EnergyBackend.internal` -- a rigid
+    motion preserves every internal distance -- and repairs
+    :meth:`EnergyBackend.interaction`, which is the term the binding and
+    specificity goals optimize. It leaves the relaxation's own work untouched:
+    superposed RMSD is unchanged by definition.
+
+    Returns ``(fitted, mean_shift, centroid_shift)``, the last two being the
+    rigid-body component that was removed, so the caller can report it.
+    """
+    if not len(mobile) or not len(reference):
+        return mobile, 0.0, 0.0
+    ref_at = {(str(k), n): i for i, (k, n) in enumerate(
+        zip(reference.reskeys, reference.names))}
+    pairs = [
+        (i, ref_at[(str(k), n)])
+        for i, (k, n) in enumerate(zip(mobile.reskeys, mobile.names))
+        if n.strip().upper() in _FIT_ATOMS and (str(k), n) in ref_at
+    ]
+    if len(pairs) < 3:
+        return mobile, 0.0, 0.0
+    P = np.asarray(mobile.coords[[i for i, _ in pairs]], dtype=float)
+    Q = np.asarray(reference.coords[[j for _, j in pairs]], dtype=float)
+    pc, qc = P.mean(axis=0), Q.mean(axis=0)
+    H = (P - pc).T @ (Q - qc)
+    U, _s, Vt = np.linalg.svd(H)
+    d = float(np.sign(np.linalg.det(Vt.T @ U.T)))
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    moved = (np.asarray(mobile.coords, dtype=float) - pc) @ R.T + qc
+    mean_shift = float(np.linalg.norm(moved - mobile.coords, axis=1).mean())
+    centroid_shift = float(np.linalg.norm(pc - qc))
+    fitted = AtomSet(
+        names=list(mobile.names), coords=moved,
+        resnames=list(mobile.resnames), reskeys=list(mobile.reskeys),
+        elements=list(mobile.elements),
+    )
+    return fitted, mean_shift, centroid_shift
+
+
 def _hostname() -> str:
     """Recorded beside the pid: a pid is only meaningful on its own machine."""
     # platform.node(), not socket: the repo's own isolation test forbids
@@ -239,6 +304,12 @@ class IPROLoop:
         #: so the run cannot report "3 of 2 iteration(s)".
         self._baseline_relaxed = 0
         self._moved_this_iteration = False
+        #: Per assembly, the atoms the last scoring actually measured.
+        self._scored_atoms: dict[str, AtomSet] = {}
+        #: Latched once, before the baseline is scored: either the whole run
+        #: is on the relaxed basis or none of it is. See _relaxed_design_atoms.
+        self._relax_disabled = False
+        self._relax_failed_now = False
         self._last_cb = None
         self._last_tables = None
         #: Set while a run is in progress; see measure_native.
@@ -375,6 +446,16 @@ class IPROLoop:
         # both shipped examples annotate them "[paper]" -- believes the
         # flanking residues and the 4.5 A shell are being repacked, and they
         # are not: the MILP's variables are exactly the design positions.
+        if (spec.loop.perturb_backbone
+                and tuple(spec.loop.design_per_iteration) != (1, 3)):
+            self.notes.append(
+                f"loop.design_per_iteration is set to "
+                f"{tuple(spec.loop.design_per_iteration)}, and it is not read "
+                f"while the backbone is perturbed: the window is the design "
+                f"positions inside the perturbed region, which is how IPRO "
+                f"defines it. The setting applies only with "
+                f"perturb_backbone: false."
+            )
         for name, default in (("perturbation_flank", 5), ("neighbour_cutoff", 4.5)):
             if getattr(spec.loop, name, default) != default:
                 self.notes.append(
@@ -462,6 +543,14 @@ class IPROLoop:
                 )
                 if relaxed is not None:
                     design_all = relaxed
+            # The atoms that are about to be measured. _write_design emits
+            # THESE, because the delivered structure must be the one the
+            # reported numbers belong to: rebuilt through PyMOL from the
+            # unrelaxed input, the PDB beside best/design.json measured a
+            # 1.521 A bottleneck where the JSON said 1.999994, and the
+            # relaxed structure that produced every reported energy existed
+            # only under logs/relax.
+            self._scored_atoms[a.name] = design_all
             ctx = ScoreContext()
             partners = self.spec.assembly_molecules(a)
             for m in partners:
@@ -566,7 +655,25 @@ class IPROLoop:
                     raise ValueError(f"pore_axis: {ref} is not in the design molecule")
                 pts.append(_np.asarray(match[0].coord, dtype=float))
             direction = pts[1] - pts[0]
-            return (pts[0] + pts[1]) / 2.0, direction, 0.0
+            length = float(_np.linalg.norm(direction))
+            if length < 1e-9:
+                raise ValueError(
+                    "goal_options.pore_axis names two atoms at the same place, "
+                    "so there is no direction to measure along"
+                )
+            # NORMALISED. Returned raw, this silently deleted the entire pore
+            # measurement on exactly the input the docs recommend as the
+            # remedy for a bad fitted axis. `_measure_geometry` builds the
+            # default window by projecting onto this vector, so with
+            # |direction| = 17.43 A for the repo's own example pair
+            # (["A18:CA", "A119:CA"]) the window came out 17x too large and
+            # landed hundreds of angstroms off the molecule: pore_profile
+            # returned zero slices, _measure_geometry returned {}, and
+            # PoreDesigner's published sub-4 A filter read None and passed
+            # everything. Silently -- the only note path is the exception
+            # handler around this function, and nothing raised. The fitted
+            # branch below returns a unit vector, which is why it never showed.
+            return (pts[0] + pts[1]) / 2.0, direction / length, 0.0
 
         cas = []
         for p in spec.positions:
@@ -808,7 +915,17 @@ class IPROLoop:
         fails -- in which case the caller scores the unrelaxed candidate,
         exactly as before, and the run says so once.
         """
-        if not self.backend.can_relax or not len(design_all):
+        if self.mode != "full" or not self.backend.can_relax or not len(design_all):
+            # `fixed-backbone` says, in the run's own note, that the backbone
+            # never moves. It was relaxing anyway when the backend could:
+            # measured on the unmodified smoke spec with the PyRosetta
+            # backend, the start's relaxed output differed from its input by a
+            # mean of 15.7 A CA while the loop's own state never moved, so the
+            # only structure that moved was the one being scored -- beside a
+            # note promising the opposite.
+            return None
+        if self._relax_disabled:
+            # The run is on the unrelaxed basis and must stay there.
             return None
         work = self.run.path / "logs" / "relax"
         work.mkdir(parents=True, exist_ok=True)
@@ -823,6 +940,26 @@ class IPROLoop:
             atoms = _atoms_of(Structure.load(out), set())
             if not len(atoms):
                 raise RuntimeError("the relaxed file holds no atoms")
+            # Put it back in the frame it was scored in. Without this the
+            # relaxation's rigid-body component -- measured at a 10 A centroid
+            # shift on OmpF -- is read as a conformational change by every
+            # term that involves a partner, a probe or a fitted axis, none of
+            # which moved. See _superpose_onto.
+            atoms, drift, centroid = _superpose_onto(atoms, design_all)
+            if drift > 2.0 and "relax_drift" not in self._once:
+                self._once.add("relax_drift")
+                self.notes.append(
+                    f"the relaxation moved the whole design molecule "
+                    f"{drift:.1f} A through space (centroid shift "
+                    f"{centroid:.1f} A) on top of changing its conformation. "
+                    f"That rigid-body component is removed by superposing the "
+                    f"relaxed structure back onto the one that was scored, "
+                    f"because the partners and the fitted channel axis did not "
+                    f"move with it. It is reported because a large value means "
+                    f"the backbone is being relaxed with nothing holding it: "
+                    f"add a `fix` restraint to pin it, and the relaxation stays "
+                    f"local in the first place."
+                )
             if len(atoms) != len(design_all) and "relax_atoms" not in self._once:
                 self._once.add("relax_atoms")
                 self.notes.append(
@@ -833,14 +970,18 @@ class IPROLoop:
                 )
         except Exception as exc:
             self._post_relax_failed += 1
+            self._relax_failed_now = True
             if "post_relax" not in self._once:
                 self._once.add("post_relax")
                 self.notes.append(
                     f"the relaxation that the protocol runs AFTER choosing the "
                     f"sequence (2006 paper, step iv) failed "
-                    f"({type(exc).__name__}: {exc}), so candidates were scored on "
-                    f"the unrelaxed backbone. The protocol is therefore "
-                    f"'backbone-mc' in effect, not 'full'."
+                    f"({type(exc).__name__}: {exc}). A candidate that cannot be "
+                    f"relaxed is not measurable on the same basis as the "
+                    f"starting point, so that iteration is REJECTED rather than "
+                    f"scored unrelaxed and compared against a relaxed baseline "
+                    f"-- which previously manufactured a 78.86 kcal/mol "
+                    f"'improvement' out of a 0.02 kcal/mol design."
                 )
             return None
         if tag.startswith("start") or tag.startswith("native"):
@@ -879,6 +1020,29 @@ class IPROLoop:
         work = self.run.path / "logs" / "structure_build"
         work.mkdir(parents=True, exist_ok=True)
         design_only = work / "design_only.pdb"
+
+        # Prefer the atoms that were scored. They already carry the chosen
+        # rotamer at each design position -- that is what made them the
+        # candidate -- and, in `full` mode, the relaxation that produced every
+        # reported energy. Rebuilding through PyMOL from the unrelaxed input
+        # instead delivered a structure that was not the one measured:
+        # best/design.json said min_pore_radius 1.999994 beside a design.pdb
+        # that measures 0.760.
+        scored = self._scored_atoms.get(assembly)
+        if scored is not None and len(scored):
+            try:
+                write_atomset_pdb(scored, design_only)
+                built = Structure.load(design_only)
+                return self._complex_from(path, built, assembly, header)
+            except Exception as exc:
+                if "scored_write" not in self._once:
+                    self._once.add("scored_write")
+                    self.notes.append(
+                        f"could not write the scored coordinates directly "
+                        f"({type(exc).__name__}: {exc}); falling back to "
+                        f"rebuilding the design through PyMOL, which may not be "
+                        f"the structure the reported energies belong to"
+                    )
         try:
             from .mutate import apply_design
 
@@ -911,6 +1075,14 @@ class IPROLoop:
             return None
 
         built = Structure.load(design_only)
+        return self._complex_from(path, built, assembly, header)
+
+    def _complex_from(self, path, built, assembly: str, header):
+        """Write ``built`` plus this assembly's partners, at their poses."""
+        from pathlib import Path as _Path
+
+        from .output import write_complex
+
         a = next(x for x in self._assemblies if x.name == assembly)
         partners = {
             m.name: self._partners[m.name]
@@ -1341,6 +1513,9 @@ class IPROLoop:
             # (window 40 kcal/mol); an absolute ceiling is optional and off by
             # default, because as a default of 50 it removed TRP/PHE/TYR from
             # OmpF A18 and with them the published answer.
+            keep_per_identity=int(
+                self.spec.goal_options.get("keep_per_identity", 3)
+            ),
             rotamer_window=(
                 float("inf") if restrict_to is not None
                 else float(self.spec.goal_options.get("rotamer_window", 40.0))
@@ -1536,9 +1711,31 @@ class IPROLoop:
         # relaxation's own energy drop and accept nearly everything.
         self._relax_native = True
         start_choice = self._native_choice(tables, vetoed=rp.rotamer_vetoes)
+        self._relax_failed_now = False
         start_ctx, start_per_asm = self._contexts_for(
             self._rotamers_for(tables, start_choice), relax_tag="start"
         )
+        # The basis is latched HERE and never changes again. If the baseline
+        # could not be relaxed, the whole run goes on the unrelaxed basis and
+        # the baseline is re-scored on it -- this is the only moment at which
+        # the basis can change coherently, because nothing has been accepted
+        # yet. Afterwards a candidate that cannot be relaxed is rejected, not
+        # re-based: scoring an unrelaxed candidate against a relaxed baseline
+        # manufactured a 78.86 kcal/mol "improvement" out of a design worth
+        # 0.02, and the mirror case rejected everything.
+        if self._relax_failed_now and self.backend.can_relax:
+            self._relax_disabled = True
+            self._relax_failed_now = False
+            self.notes.append(
+                "the starting point could not be relaxed, so this whole run is "
+                "on the UNRELAXED basis -- candidates are scored the same way "
+                "the baseline was, which is what makes the comparison mean "
+                "anything. The protocol is 'backbone-mc' in effect, not 'full'."
+            )
+            self.mode = "backbone-mc"
+            start_ctx, start_per_asm = self._contexts_for(
+                self._rotamers_for(tables, start_choice), relax_tag=None
+            )
         start_score = self.goal.score(start_ctx)
 
         best_score = start_score
@@ -1737,7 +1934,9 @@ class IPROLoop:
                     dock_note = f"; redocked {len(moved)} partner(s)"
 
             # (5) relax what was chosen, then score it, in every assembly
+            self._relax_failed_now = False
             ctx, per_asm = self._contexts_for(chosen, relax_tag=f"iter{it:04d}")
+            relax_failed = self._relax_failed_now and not self._relax_disabled
             score = self.goal.score(ctx)
             delta = score - current_score
 
@@ -1786,6 +1985,10 @@ class IPROLoop:
             # restraint into a violated one with rotamer_vetoes still empty and
             # is_empty() still True. Re-measured here, where it can still
             # reject the iteration.
+            if relax_failed:
+                # Not measurable on the run's basis, so it is not a candidate.
+                ok, reason = False, "relaxation failed; not comparable"
+
             broke = self._broken_geometry_restraints(rp)
             if broke:
                 ok, reason = False, f"restraint violated: {broke[0]}"
@@ -1945,9 +2148,13 @@ class IPROLoop:
         # relaxation ran; if every attempt failed, say "backbone-mc".
         if self.mode == "full":
             if self._post_relaxed:
+                per_iter = max(1, len(self._assemblies))
+                ran_on = self._post_relaxed // per_iter
                 self.notes.append(
                     f"backbone relaxation ran after the sequence choice on "
-                    f"{self._post_relaxed} of {n_done} iteration(s)"
+                    f"{ran_on} of {n_done} iteration(s)"
+                    + (f" ({self._post_relaxed} relaxations, one per assembly)"
+                       if per_iter > 1 else "")
                     + (f", failing on {self._post_relax_failed}"
                        if self._post_relax_failed else "")
                     + (" (the starting point was relaxed the same way, so the "
@@ -2146,11 +2353,19 @@ class IPROLoop:
         if pert is not None and getattr(pert, "residues", None):
             moved = set(pert.residues)
             chain = getattr(pert, "chain", None)
-            inside = [
+            inside_labels = {
                 p.label for p in self.spec.positions
                 if p.number in moved and (chain is None or p.chain == chain)
-            ]
-            inside = [p for p in ordered if p in inside]
+            }
+            # `ordered` holds VIRTUAL positions once there is more than one
+            # assembly ("a::A16"), while spec.positions hold plain labels
+            # ("A16"), so a plain-label intersection was always empty and
+            # every iteration fell back to the independent draw -- silently,
+            # and only in the multi-assembly case. Measured on a two-assembly
+            # spec: ordered ['a::A16', 'a::A17'], a region holding both design
+            # positions, derived window [].
+            inside = [p for p in ordered
+                      if (split_vpos(p)[1] or p) in inside_labels]
             if inside:
                 return inside
             # An anchored region always holds its design position, so this is

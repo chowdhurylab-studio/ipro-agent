@@ -1,0 +1,42 @@
+@@CMD python3 -m ipro_agent inspect 2omf_A.pdb --positions 18,20,38,40
+structure: 2omf_A.pdb
+  chain A: 340 residues, A1..A340
+  18 -> A18 is VAL
+      - {position: A18, allowed: [standard]}
+  20 -> A20 is LEU
+      - {position: A20, allowed: [standard]}
+  38 -> A38 is MET
+      - {position: A38, allowed: [standard]}
+  40 -> A40 is TYR
+      - {position: A40, allowed: [standard]}
+
+@@CMD python3 -m ipro_agent validate my_case.yaml
+spec: ompf_pore_smoke
+goal: reshape_channel  -- "Smoke test of the PoreDesigner redesign of OmpF: shrink the porin eyelet below 4 A by lining it with long hydrophobic side chains, using only four of the paper's 25 pore-constriction positions so the run finishes in minutes on a laptop.\n"
+design molecule: ompf (2omf_A.pdb)
+design positions (4):
+  A18: VAL->9 allowed (A,I,L,M,F,P,W,Y,V)
+  A20: LEU->9 allowed (A,I,L,M,F,P,W,Y,V)
+  A38: MET->9 allowed (A,I,L,M,F,P,W,Y,V)
+  A40: TYR->9 allowed (A,I,L,M,F,P,W,Y,V)
+design space: 6561 sequences
+iterations: 8
+
+design_chains: ['A']
+design_residues: 340
+goal: reshape_channel: narrow or widen a lumen via a probe interaction energy and/or its measured radius  [PoreDesigner (Chowdhury et al., Nat Commun 2018)]
+@@CMD python3 -m ipro_agent run my_case.yaml --run-dir runs/case1 --iterations 2
+mode: fixed-backbone
+iterations: 2 (accepted 2)
+score: 1.5283 -> 1.5283 (change +0.0000)
+mutations (0): (none -- native retained)
+
+sequence:
+AEIYNKDGNKVDLYGKAVGLHYFSKGNGENSYGGNGDMTYARLGFKGETQINSDLTGYGQWEYNFQGNNSEGADAQTGNKTRLAFAGLKYADVGSFDYGRNYGVVYDALGYTDMLPEFGGDTAYSDDFFVGRVGGVATYRNSNFFGLVDGLNFAVQYLGKNERDTARRSNGDGVGGSISYEYEGFGIVGAYGAADRTNLQEAQPLGNGKKAEQWATGLKYDANNIYLAANYGETRNATPITNKFTNTSGFANKTQDVLLVAQYQFDFGLRPSIAYTKSKAKDVEGIGDVDLVNYFEVGATYYFNKNMSTYVDYIINQIDSDNKLGVGSDDTVAVGIVYQF
+
+notes:
+  - narrowing with no `goal_options.pore_diameter_min`: this objective is monotonic, so a FULLY OCCLUDED pore is its best possible score -- measured, a 0.8 A bottleneck with the water probe clashing (+50) scores -50.0 and beats a paper-style 3.5 A design (+0.200). PoreDesigner's designs were required to still conduct water single-file. Set pore_diameter_min (about 2.8 A for water) unless you really do want a plug, and do not report a sub-4 A bottleneck as a selective channel without it.
+  - the backbone never moves (loop.perturb_backbone is false), so the search is over sequence and side-chain packing only. That is a legitimate and much cheaper protocol, but it is not IPRO's: set loop.perturb_backbone: true to perturb the backbone each iteration.
+  - these allowed residues are NOT reachable, because every rotamer of them clashes with the current template beyond the 40.0 kcal/mol pruning window -- A18: TRP, TYR; A20: PRO; A38: PHE. The design space is therefore smaller than the spec advertises. This is measured against the side chains that are fixed right now, so a large residue can be excluded at a tight position even when the published design uses it there (OmpF A18/TRP is exactly that case: its best rotamer is 51.9 kcal/mol above the best at that position). Raise goal_options.rotamer_window to keep them, and expect the clash to show up in the energy instead.
+  - no amino-acid reference energies were supplied and the backend has no built-in reference term, so nothing corrects for unfolded-state propensity and identities are decided by packing alone -- which on a fixed backbone disfavours large side chains at buried positions. This matters most when the objective IS the packing; it matters less when optimizing an interaction energy with a target. Set goal_options.reference_energies, or use the PyRosetta backend (ref2015 includes the term).
+  - THE PORE RADIUS HERE IS NOT A PORE RADIUS. It is measured along an axis fitted through the centroid of the 4 design position(s), and in the input structure that axis origin clears the nearest van der Waals surface by only 0.30 A -- less than the 1.40 A a water molecule needs, so the origin is inside the protein, not in the lumen. The reported 0.76 A is the gap beside a wall, and any pore_diameter filter is applied to that gap. This happens when the design positions do not surround the channel: 4 positions along one wall of OmpF read 1.53 A, which passes a 4 A filter, where the 25-position set reads 8.07 A at a clearance of 2.80 A. Fix it by giving goal_options.pore_axis as two atoms spanning the channel, or by adding positions on the opposite wall.

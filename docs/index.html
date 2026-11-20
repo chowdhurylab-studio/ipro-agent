@@ -1,0 +1,259 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>IPRO Agent Prompts</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  /* Layout: a single reading column; prompts sit in monospace slabs that run
+     slightly wider than the prose, so the thing you copy is the thing that
+     stands out. */
+  :root {
+    --bg: #f7f8f9;
+    --surface: #ffffff;
+    --surface-2: #eef1f3;
+    --ink: #16202a;
+    --ink-soft: #4a5a68;
+    --ink-faint: #71818e;
+    --line: #dde3e8;
+    --accent: #0f6b68;
+    --accent-soft: #e2f0ef;
+    --warn: #8a5a12;
+    --warn-soft: #fbf1e0;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1418;
+      --surface: #151d23;
+      --surface-2: #1b252c;
+      --ink: #e6edf2;
+      --ink-soft: #a8b8c4;
+      --ink-faint: #7d8e9b;
+      --line: #27333c;
+      --accent: #4fd1c5;
+      --accent-soft: #11302f;
+      --warn: #e0b872;
+      --warn-soft: #2a2115;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1418;
+    --surface: #151d23;
+    --surface-2: #1b252c;
+    --ink: #e6edf2;
+    --ink-soft: #a8b8c4;
+    --ink-faint: #7d8e9b;
+    --line: #27333c;
+    --accent: #4fd1c5;
+    --accent-soft: #11302f;
+    --warn: #e0b872;
+    --warn-soft: #2a2115;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+  }
+  .wrap {
+    max-width: 50rem;
+    margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 3rem 5rem;
+  }
+  h1, h2, h3 { font-weight: 600; letter-spacing: -0.015em; text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(1.9rem, 5vw, 2.6rem); line-height: 1.15; }
+  h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-faint); font-weight: 600; }
+  h3 { font-size: 1.22rem; line-height: 1.3; }
+  p { margin: 0; }
+  a { color: var(--accent); }
+
+  header { display: flex; flex-direction: column; gap: 1rem; }
+  .lede { font-size: 1.1rem; color: var(--ink-soft); max-width: 36rem; }
+  .meta { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-faint); display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; }
+
+  .steps { display: grid; gap: 0.5rem; margin-block: 2.5rem; padding: 1.25rem 1.4rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  .steps ol { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.35rem; color: var(--ink-soft); }
+  .steps code { font-family: var(--mono); font-size: 0.86em; background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; }
+
+  /* The conversation: what using this actually looks like. */
+  .chat { display: grid; gap: 0.7rem; margin-block: 1rem 0; }
+  .turn { display: grid; gap: 0.35rem; min-width: 0; }
+  .who { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+  .bubble { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem 1rem; min-width: 0; }
+  .turn.you .bubble { background: var(--accent-soft); border-color: transparent; }
+  .tools { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-block: 0.15rem 0.55rem; }
+  .tool { font-family: var(--mono); font-size: 0.74rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: var(--surface-2); color: var(--ink-soft); border: 1px solid var(--line); }
+  .tool::before { content: "✓ "; color: var(--accent); }
+  .resolved { font-family: var(--mono); font-size: 0.84rem; display: grid; gap: 0.15rem; margin-block: 0.4rem; color: var(--ink-soft); }
+  .resolved b { color: var(--ink); font-weight: 600; }
+  .flag { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--warn); padding: 0.6rem 0.8rem; border-radius: 0 6px 6px 0; font-size: 0.92rem; }
+
+  .cards { display: grid; gap: 1.1rem; margin-block: 1rem 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1.3rem 1.4rem; display: grid; gap: 0.75rem; min-width: 0; }
+  .eyebrow { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .prompt { position: relative; background: var(--surface-2); border-radius: 8px; padding: 0.9rem 1rem; font-family: var(--mono); font-size: 0.87rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+  .copy { font-family: var(--sans); font-size: 0.76rem; font-weight: 600; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); border-radius: 6px; padding: 0.3rem 0.6rem; cursor: pointer; justify-self: start; }
+  .copy:hover { color: var(--accent); border-color: var(--accent); }
+  .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .note { color: var(--ink-soft); font-size: 0.95rem; }
+
+  section { margin-block: 3rem 0; display: grid; gap: 1rem; }
+  ul.plain { margin: 0; padding-left: 1.15rem; display: grid; gap: 0.5rem; color: var(--ink-soft); }
+  footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); font-size: 0.88rem; color: var(--ink-faint); display: grid; gap: 0.4rem; }
+  @media (prefers-reduced-motion: no-preference) { .copy { transition: color .15s, border-color .15s; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Ask an agent to redesign a protein</h1>
+    <p class="lede">ipro-agent is an independent implementation of IPRO, the iterative protein redesign procedure from the Maranas group. You describe the goal in plain language. The agent picks the objective, writes the integer program, runs the loop, and reports what it can and cannot stand behind.</p>
+    <p class="meta"><span>5 worked prompts</span><span>each one was run</span><span><a href="https://github.com/chowdhurylab-studio/ipro-agent">chowdhurylab-studio/ipro-agent</a></span></p>
+  </header>
+
+  <div class="steps">
+    <ol>
+      <li>Clone the repo and run <code>bash scripts/bootstrap.sh</code>, or point your MCP client at the server.</li>
+      <li>Open the folder with an agent. It loads the operating manual on its own.</li>
+      <li>Paste one of the prompts below. Nothing else to configure.</li>
+    </ol>
+  </div>
+
+  <section>
+    <h2>What it looks like</h2>
+    <div class="chat">
+      <div class="turn you">
+        <span class="who">You</span>
+        <div class="bubble">Narrow the OmpF porin pore below 4 Å. Fetch the structure yourself, it's PDB 2OMF, chain A. You may change residues 18, 20, 38 and 40. Tell me what's at those positions before you design anything.</div>
+      </div>
+      <div class="turn">
+        <span class="who">Agent</span>
+        <div class="bubble">
+          <div class="tools"><span class="tool">ipro_doctor</span><span class="tool">ipro_fetch_structure</span><span class="tool">ipro_inspect_structure</span></div>
+          <p>2OMF downloaded, chain A written out: 340 residues, A1 to A340. The four positions you named resolve to</p>
+          <div class="resolved">
+            <span>18 → <b>A18 is VAL</b></span>
+            <span>20 → <b>A20 is LEU</b></span>
+            <span>38 → <b>A38 is MET</b></span>
+            <span>40 → <b>A40 is TYR</b></span>
+          </div>
+          <p class="note">A bare residue number does not say which chain it belongs to, so I resolved them before writing anything. These match PoreDesigner's V18 L20 M38 Y40. Shall I write the spec with <span style="font-family:var(--mono);font-size:.9em">reshape_channel</span>, direction narrow?</p>
+        </div>
+      </div>
+      <div class="turn you">
+        <span class="who">You</span>
+        <div class="bubble">Yes, go.</div>
+      </div>
+      <div class="turn">
+        <span class="who">Agent</span>
+        <div class="bubble">
+          <div class="tools"><span class="tool">ipro_validate</span><span class="tool">ipro_run</span><span class="tool">ipro_status</span></div>
+          <p>Run finished. Mode <b>fixed-backbone</b>, 8 iterations, 2 accepted, no mutation kept.</p>
+          <div class="flag">The pore radius this spec reports is not a pore radius. Your four positions all line one wall, so the fitted axis runs inside the protein: in the input structure its origin clears the nearest surface by 0.30 Å, where a water needs 1.4 Å. The 1.53 Å bottleneck it prints would pass a sub-4 Å filter and mean nothing. The 25-position spec clears 2.80 Å and measures the wild-type eyelet at 8.07 Å.</div>
+          <p class="note">Energies here are a screening scale, not kcal/mol comparable to the papers. Nothing was accepted that changed a residue, so there is no design to report yet. To get a real measurement, give <span style="font-family:var(--mono);font-size:.9em">goal_options.pore_axis</span> as two atoms spanning the channel, or add positions on the opposite wall.</p>
+        </div>
+      </div>
+    </div>
+    <p class="note">The caveat is the output. A run that found nothing says so, and a number it cannot stand behind is labelled rather than printed bare.</p>
+  </section>
+
+  <section>
+    <h2>The prompts</h2>
+    <div class="cards">
+
+      <article class="card">
+        <p class="eyebrow"><span>ipro_fetch_structure</span><span>ipro_inspect_structure</span><span>ipro_validate</span><span>ipro_run</span></p>
+        <h3>Narrow a pore, starting from nothing but the protein's name</h3>
+        <div class="prompt" id="p1">Narrow the OmpF porin pore below 4 Å. Fetch the structure yourself, it's PDB 2OMF, use chain A. You may change residues 18, 20, 38 and 40. Tell me what's at those positions before you design anything.</div>
+        <button class="copy" data-for="p1">Copy prompt</button>
+        <p class="note">The whole path from a name to a design. It is also the published case: PoreDesigner's tested designs mutate exactly these four positions to tryptophan, so "did Trp come out anywhere" is a real score against the paper. Read the axis caveat above before quoting any radius.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>ipro_goals</span><span>ipro_score</span><span>ipro_run</span></p>
+        <h3>Switch substrate specificity, with the catalysis kept intact</h3>
+        <div class="prompt" id="p2">I want this thioesterase to prefer the C12 substrate over C14. Keep the catalytic geometry, don't let the design break it. I can give you both substrates as separate PDBs. Which objective should this be, and what do you need from me?</div>
+        <button class="copy" data-for="p2">Copy prompt</button>
+        <p class="note">The honest answer involves the agent asking you for things. switch_specificity needs the wanted substrate as target and the rejected one as anti_target; with one molecule it refuses rather than optimising plain affinity and calling it specificity. "Keep the catalysis" has to become an explicit distance restraint, the mechanism the ACS Catal 2017 work used. The optimizer preserves nothing on its own.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>ipro_positions</span><span>ipro_inspect_structure</span></p>
+        <h3>Find the positions yourself</h3>
+        <div class="prompt" id="p3">Here's a protein and its binding partner. I don't know which residues to design. Find the interface and propose positions, then show me the list before you write a spec.</div>
+        <button class="copy" data-for="p3">Copy prompt</button>
+        <p class="note">The proposed set is geometry, not biology. It will happily include a catalytic residue, a disulfide partner or a metal ligand, and the optimizer will mutate any of them unless you say otherwise. Anything that must survive the redesign belongs in restraints.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>ipro_doctor</span><span>ipro_validate</span><span>ipro_milp</span><span>ipro_score</span></p>
+        <h3>Check what you're about to get before spending the CPU</h3>
+        <div class="prompt" id="p4">Before we run anything: what's installed, what mode will this run in, is my spec valid, and are my constraints actually in the optimisation? Also give me the wild-type baseline.</div>
+        <button class="copy" data-for="p4">Copy prompt</button>
+        <p class="note">Four cheap answers that prevent an expensive wrong one. Without PyRosetta the loop is fixed-backbone and the energies come from a screening function. Without a MILP solver the packing is a heuristic that proves nothing about optimality. ipro_milp writes the integer program out, which is how you check that "at least half these positions must be tryptophan" is a constraint the solver honours rather than a hope.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>ipro_status</span><span>ipro://house-rules</span></p>
+        <h3>Explain the run honestly</h3>
+        <div class="prompt" id="p5">The run in runs/case1 finished. Give me the honest version: what changed, what the score means, what you can't conclude from it, and what I'd need to do to trust it.</div>
+        <button class="copy" data-for="p5">Copy prompt</button>
+        <p class="note">This one exists because the failure mode is social rather than computational. The numbers look like results and the caveats are the result. A good answer states the mode, every note, that screening energies are not publication kcal/mol, and, when nothing was accepted, that nothing was designed.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>What not to ask it</h2>
+    <ul class="plain">
+      <li><b>To fold or predict a structure.</b> It redesigns one you already have. A model is acceptable input, but say so in the report, because every energy is only as good as the coordinates.</li>
+      <li><b>For a ΔΔG or an affinity in nM.</b> These objectives reproduce the rank and sign of a change far better than its magnitude.</li>
+      <li><b>For a library of thousands of variants.</b> It produces a small ensemble, 10 by default, not a deep mutational scan.</li>
+      <li><b>For an insertion or deletion in the middle of a chain.</b> Only terminal indels are supported. An internal one needs loop closure, and it refuses with that reason rather than producing a broken backbone.</li>
+      <li><b>Anything that needs a human decision first.</b> Toxins, virulence factors and select agents; anything aimed at host range, transmissibility, immune escape or drug resistance; anything heading for synthesis.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Before you quote a number from any of these</h2>
+    <p class="note">Energies from the built-in backend are a screening scale, not kcal/mol comparable to the IPRO papers. Every run reports a <span style="font-family:var(--mono);font-size:.9em">mode</span> and a list of <span style="font-family:var(--mono);font-size:.9em">notes</span>, and both belong with any number you repeat. A run that reports <span style="font-family:var(--mono);font-size:.9em">accepted: 0</span> designed nothing. Published hit rates across this family of methods run about 24 to 43 percent, so treat every design as a hypothesis for the bench.</p>
+  </section>
+
+  <footer>
+    <p>MIT licensed. It implements a method published by the Maranas group and is not their software, not endorsed by them, and contains none of their code.</p>
+    <p><a href="https://github.com/chowdhurylab-studio/ipro-agent">Repository</a> · <a href="https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/DESIGN.md">Design notes, with every defect and its measurement</a></p>
+  </footer>
+</div>
+
+<script>
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var el = document.getElementById(btn.dataset.for);
+      var text = el.textContent;
+      var done = function () {
+        var was = btn.textContent;
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = was; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { select(el); });
+      } else {
+        select(el);
+      }
+    });
+  });
+  function select(el) {
+    var r = document.createRange();
+    r.selectNodeContents(el);
+    var s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  }
+</script>

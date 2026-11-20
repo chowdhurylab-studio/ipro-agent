@@ -658,9 +658,14 @@ class LoopSettings:
     #: Non-bonded energy cutoff (A). IPRO: 12 A vdW.
     energy_cutoff: float = 12.0
 
-    #: How many contiguous positions are re-designed per iteration. The IPRO
-    #: Suite paper describes 1-3 contiguous residues; the whole design set is
-    #: not re-chosen every iteration.
+    #: How many contiguous positions are re-designed per iteration, **and only
+    #: when the backbone does not move**. With ``perturb_backbone: true`` the
+    #: window is the design positions inside the perturbed region, as IPRO
+    #: defines it (Suite step 1; 2006 Fig. 5), and this setting is not read at
+    #: all -- the run says so when it is set to something other than the
+    #: default. Neither the Suite paper nor the released source states a 1-3
+    #: rule; it is this repo's fallback for the fixed-backbone case, where
+    #: there is no region to read a window from.
     design_per_iteration: tuple[int, int] = (1, 3)
     #: Perturb the backbone each iteration. Off by default because it costs a
     #: PyMOL rotamer re-harvest and a full energy-table rebuild per iteration,

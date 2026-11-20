@@ -235,12 +235,13 @@ def plan_restraints(
                 # Saying "0 of 1 survive" without this is baffling when the user
                 # knows the residue has many rotamers.
                 extra = (
-                    f" Note that dead-end elimination had already discarded {pruned} "
-                    f"rotamer(s) at {pos} for clashing with fixed atoms, leaving only "
-                    f"{n_rot}; if the restraint can only be met by a clashing rotamer, "
-                    "raise goal_options.max_self_energy to keep more of them, and "
-                    "treat the conflict between the restraint and the structure as "
-                    "the real finding."
+                    f" Note that the rotamer prune had already discarded "
+                    f"{pruned} rotamer(s) at {pos} for scoring far worse than "
+                    f"the best one there, leaving only {n_rot}; if the "
+                    f"restraint can only be met by one of those, raise "
+                    f"goal_options.rotamer_window to keep more of them, and "
+                    f"treat the conflict between the restraint and the "
+                    f"structure as the real finding."
                 )
             raise RestraintError(
                 f"the restraints forbid every rotamer at {pos} ({vetoed} of {n_rot} "

@@ -1,5 +1,9 @@
 # Example prompts
 
+> These five are also a page you can send someone: [`docs/index.html`](index.html),
+> with each prompt on a copy button and the caveats beside it. This file is the
+> same content in the form the repository reads.
+
 Five prompts you can paste at an agent that has this tool, from "I only know
 the protein's name" to "explain the run I just did". Each one was executed
 against this repository, and what it produced is written down, including where
