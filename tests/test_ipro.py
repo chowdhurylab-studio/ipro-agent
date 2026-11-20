@@ -6030,14 +6030,37 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
 
     dark = REPO / "docs" / "demo-chat-dark.gif"
     assert dark.is_file() and dark.stat().st_size / 1048576 < 2.0
-    for doc, img, link in (("README.md", "docs/demo-chat.gif", "docs/index.html"),
-                           ("docs/HANDOFF.md", "demo-chat.gif", "index.html")):
+    raw = "https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/main/"
+    for doc, img, link in (("README.md", f"{raw}docs/demo-chat.gif", None),
+                           ("docs/HANDOFF.md", "demo-chat.gif", "EXAMPLE_PROMPTS.md")):
         text = (REPO / doc).read_text()
         # a <picture> so GitHub serves the theme the reader is in
         assert f'src="{img}"' in text, f"{doc} must show the conversation"
         assert "prefers-color-scheme: dark" in text, f"{doc} needs both themes"
-        assert f"]({link})" in text, f"{doc} must link the prompt page"
+        if link:
+            assert f"]({link})" in text, f"{doc} must link the prompt page"
     assert "tour.gif" not in (REPO / "README.md").read_text()
+
+    # pyproject makes README.md the PyPI long description, and PyPI resolves a
+    # relative path against pypi.org -- so every image and link in it has to be
+    # absolute or the project page shows a broken image and dead links. This is
+    # the only document with that constraint; the others are read on GitHub.
+    import re
+
+    readme = (REPO / "README.md").read_text()
+    assert 'src="docs/' not in readme and 'srcset="docs/' not in readme, \
+        "README images must be absolute: PyPI renders this file"
+    rel = re.findall(r"\]\((docs/[^)]+)\)", readme)
+    assert not rel, f"README links must be absolute for PyPI: {rel}"
+    for url in re.findall(rf"{re.escape(raw)}(\S+?)[\"\)]", readme):
+        assert (REPO / url).is_file(), f"README points at {url}, which is not in the repo"
+
+    # The prompt page is HTML and GitHub Pages is deliberately off, so a link to
+    # it from the hero area shows markup. EXAMPLE_PROMPTS.md carries the same
+    # five prompts and renders.
+    assert "docs/index.html)" not in readme, \
+        "link the markdown prompts, not the raw HTML page"
+    assert "EXAMPLE_PROMPTS.md)" in readme
 
     # Tracked, not ignored: a clone that cannot see them shows a broken image.
     tracked = subprocess.run(
@@ -6852,6 +6875,24 @@ def test_server_json_matches_the_package_it_points_at():
 
     version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
     assert spec["version"] == version, (spec["version"], version)
+
+    # Six files carry this number and the release workflow only checked three,
+    # so a bump could ship with MCP clients being told the old version in
+    # serverInfo and CITATION.cff citing a release that never existed, with
+    # everything green. These are the other three.
+    import ipro_agent
+    from ipro_agent.mcp_server import SERVER_INFO
+
+    assert SERVER_INFO["version"] == version, (
+        f"serverInfo says {SERVER_INFO['version']}, pyproject says {version}: "
+        "every MCP client reads this at handshake")
+    assert ipro_agent.__version__ == version, (ipro_agent.__version__, version)
+
+    cff = (REPO / "CITATION.cff").read_text()
+    cited = re.search(r"^version:\s*(\S+)", cff, re.M).group(1).strip('"')
+    assert cited == version, (
+        f"CITATION.cff cites {cited}, pyproject says {version}: this is the "
+        "version GitHub's 'Cite this repository' button prints")
 
     pkg = spec["packages"][0]
     assert pkg["registryType"] == "pypi"

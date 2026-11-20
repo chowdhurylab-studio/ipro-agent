@@ -1,9 +1,11 @@
 import random, sys
-sys.path.insert(0, "/Users/supantha/Documents/test123/ipro-agent")
+from pathlib import Path as _Path
+_REPO = _Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO))
 from ipro_agent.structure import Structure
 from ipro_agent.perturb import choose_segment
 
-st = Structure.load("/Users/supantha/Documents/test123/ipro-agent/examples/ompf_pore/2omf_A.pdb")
+st = Structure.load(str(_REPO / "examples" / "ompf_pore" / "2omf_A.pdb"))
 res = list(st.residues("A"))
 nums = [int(r.id[1]) for r in res]
 pros = [int(r.id[1]) for r in res if r.get_resname().strip() == "PRO"]

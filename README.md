@@ -60,25 +60,31 @@ pip install ipro-agent
 Set `IPRO_REPO` to a checkout as well if you want the server to serve its own
 documents rather than tell the agent where to fetch them.
 
-**One command, if you want the example and the documents too:**
+**One command, if you want the example, the documents and the worked prompts
+too.** This one needs the repository, so clone it first:
 
 ```bash
+git clone https://github.com/chowdhurylab-studio/ipro-agent
+cd ipro-agent
 bash scripts/bootstrap.sh
 ```
 
 That creates the environment, reports what resolved, runs the test suite and the
 shipped example, and prints the exact commands and MCP config with your own
-paths filled in. Safe to re-run; deletes nothing.
+paths filled in. Safe to re-run; the only thing it deletes is its own
+`runs/bootstrap` directory, which it recreates (without that, a second run
+would append onto the first one's trajectory).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/demo-chat-dark.gif">
-  <img alt="A conversation: the agent resolves the positions against the right chain, shows the long-residue constraint inside the integer program, runs, and then refuses to stand behind the pore number" src="docs/demo-chat.gif">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/main/docs/demo-chat-dark.gif">
+  <img alt="A conversation: the agent resolves the positions against the right chain, shows the long-residue constraint inside the integer program, runs, and then refuses to stand behind the pore number" src="https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/main/docs/demo-chat.gif">
 </picture>
 
 *What using it looks like: resolve the positions, prove the constraint reached
 the solver, run, and read the refusal. Reconstructed rather than recorded, from
 real output of the shipped example. [More worked
-prompts](docs/index.html), with what each one produces.*
+prompts](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/EXAMPLE_PROMPTS.md), with what each one produces. `docs/index.html`
+is the same five as a page you can open or send.*
 
 By hand instead. The install step is not optional: rotamers come only from
 PyMOL's mutagenesis wizard, and `pymol-open-source` is conda-only, so
@@ -226,12 +232,12 @@ will not resolve. `ipro_setup` says so in its result.
 | File | Contents |
 |---|---|
 | [.claude/skills/ipro-agent/SKILL.md](.claude/skills/ipro-agent/SKILL.md) | how an agent drives this tool (auto-loaded) |
-| [docs/DESIGN.md](docs/DESIGN.md) | every capability traced to its paper and equation, and every deviation |
-| [docs/MILP.md](docs/MILP.md) | the integer program in full |
-| [docs/INSTALL.md](docs/INSTALL.md) | dependencies and what each one unlocks |
+| [docs/DESIGN.md](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/DESIGN.md) | every capability traced to its paper and equation, and every deviation |
+| [docs/MILP.md](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/MILP.md) | the integer program in full |
+| [docs/INSTALL.md](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/INSTALL.md) | dependencies and what each one unlocks |
 | [examples/ompf_pore/](examples/ompf_pore/) | worked case, with an `EXPECTED.md` of what can and cannot be compared |
-| [docs/EXAMPLE_PROMPTS.md](docs/EXAMPLE_PROMPTS.md) | five prompts to paste at an agent, and what each actually produces |
-| [docs/HANDOFF.md](docs/HANDOFF.md) | passing this to a labmate, a student or your future self |
+| [docs/EXAMPLE_PROMPTS.md](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/EXAMPLE_PROMPTS.md) | five prompts to paste at an agent, and what each actually produces |
+| [docs/HANDOFF.md](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/HANDOFF.md) | passing this to a labmate, a student or your future self |
 
 ## Dependencies
 
@@ -355,7 +361,7 @@ the licence file says so in its own words:
 |---|---|
 | **The method** | Not ours and not licensed by us. Cite the papers above for the method and this repo only for the implementation. |
 | **`refs/`** | Publisher PDFs and clones of upstream repositories, kept locally for provenance and git-ignored: they are not in this repository and are not redistributed. |
-| **Optional dependencies** | PyMOL, AutoDock Vina, Open Babel, PyRosetta and any MILP solver are separately licensed and separately installed. **PyRosetta requires its own licence**; see [`docs/INSTALL.md`](docs/INSTALL.md). |
+| **Optional dependencies** | PyMOL, AutoDock Vina, Open Babel, PyRosetta and any MILP solver are separately licensed and separately installed. **PyRosetta requires its own licence**; see [`docs/INSTALL.md`](https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/INSTALL.md). |
 
 No upstream IPRO code is copied here. That is what makes publishing this
 defensible: the upstream releases carry no `LICENSE` file at all, and the

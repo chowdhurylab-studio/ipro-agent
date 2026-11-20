@@ -15,7 +15,7 @@ authors:
 repository-code: "https://github.com/chowdhurylab-studio/ipro-agent"
 license: MIT
 version: 0.1.0
-date-released: "2026-11-18"
+date-released: "2026-11-20"
 
 abstract: >-
   IPRO as published is a suite of programs wired to specific case studies: the

@@ -375,17 +375,26 @@ but proves nothing, and `MILPSolution.solver` will say so:
 
 ## 6. Recipes
 
-Two supported ways to use it, and the recipes below cover both:
+Three supported ways to use it, and the recipes below cover all of them:
 
 1. From a clone (what the docs and the skill assume): create one of the
    environments below and run from the repo root: `python3 scripts/doctor.py`,
    `python3 -m ipro_agent ...`. Nothing needs installing.
-2. Installed (`pip install .`, or
-   `pip install git+https://github.com/chowdhurylab-studio/ipro-agent`): this
-   adds an `ipro-agent` console script and works from any directory. The two
-   scripts PyMOL runs ship inside the package, so an installed copy can
-   design. PyMOL itself is still conda-only, though, so install it with one of
-   the environments below either way.
+2. From PyPI: `pip install ipro-agent`. This is the shortest route and the one
+   the README quickstart uses.
+3. From source: `pip install .` from a clone, or
+   `pip install git+https://github.com/chowdhurylab-studio/ipro-agent` for an
+   unreleased commit.
+
+Either installed route adds two console scripts, `ipro-agent` (the CLI) and
+`ipro-agent-mcp` (the MCP server, which is what an MCP client's `command`
+should point at), and both work from any directory. The two scripts PyMOL runs
+ship inside the package, so an installed copy can design.
+
+PyMOL itself is conda-only in every case, so install it with one of the
+environments below whichever route you took. An installed copy has no
+`scripts/doctor.py`; use `python3 -m ipro_agent.doctor` instead, which is the
+same checker and takes the same flags.
 
 ### (a) Minimal: runs with every fallback engaged, no licences
 
@@ -471,10 +480,19 @@ dependencies:
 
 ## 7. Verification
 
+From a clone:
+
 ```bash
 python3 scripts/doctor.py            # human-readable
 python3 scripts/doctor.py --json     # machine-readable
 python3 scripts/doctor.py --require pymol vina milp    # exit 1 unless all present
+```
+
+From an installed copy, which has no `scripts/` directory, the same checker is
+a module:
+
+```bash
+python3 -m ipro_agent.doctor         # and --json, --require, identically
 ```
 
 Exit status is 0 if the loop can run at all (numpy present), 1 if even that is

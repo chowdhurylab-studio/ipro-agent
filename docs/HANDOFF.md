@@ -18,13 +18,14 @@ git clone https://github.com/chowdhurylab-studio/ipro-agent && cd ipro-agent && 
   <img alt="A conversation with the agent" src="demo-chat.gif">
 </picture>
 
-*What you are handing them. Point them at [the prompt page](index.html) rather
+*What you are handing them. Point them at [the prompt page](EXAMPLE_PROMPTS.md) rather
 than at a command line: the three commands exist, but nobody starts there.*
 
 `scripts/bootstrap.sh` creates the conda environment, prints what resolved,
 runs the whole test suite, runs the shipped example end to end, and finishes by
 printing the exact commands and MCP config with that machine's own paths
-filled in. It is safe to re-run and it deletes nothing. If conda is missing it
+filled in. It is safe to re-run; the only thing
+it deletes is its own `runs/bootstrap` directory. If conda is missing it
 stops and says to install Miniforge, because PyMOL is not on PyPI and there is
 no fallback for it.
 

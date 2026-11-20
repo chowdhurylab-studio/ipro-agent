@@ -1,9 +1,11 @@
 import sys, numpy as np
-sys.path.insert(0, "/Users/supantha/Documents/test123/ipro-agent")
+from pathlib import Path as _Path
+_REPO = _Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO))
 from ipro_agent.pore import ring_flatness, axis_from_lining, vdw_radii
 from ipro_agent.structure import Structure
 
-pdb = "/Users/supantha/Documents/test123/ipro-agent/examples/ompf_pore/2omf_A.pdb"
+pdb = str(_REPO / "examples" / "ompf_pore" / "2omf_A.pdb")
 st = Structure.load(pdb)
 full = [18,20,38,40,42,62,64,82,83,109,110,113,114,115,117,118,119,120,121,123,124,125,130,131,132]
 smoke = [18,20,38,40]
