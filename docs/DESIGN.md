@@ -1792,3 +1792,30 @@ without `out` still writes into the installed package tree; `ipro_setup` with
 `confirm` on a pip-installed copy launches `mamba env create -f None`; a deeply
 nested JSON line still ends the MCP session through `RecursionError`; and a
 package imported from a zip fails every tool with a raw `NotADirectoryError`.
+
+---
+
+## 7l. Four tools an MCP agent needed and did not have (2026-11-20)
+
+The server told agents to do something no tool could do, and withheld the
+product of a run.
+
+`ipro_status` returns a `reporting_rule` that says to "read the per-iteration
+reasons". `iterations.jsonl` is on disk, the house rules forbid loading it
+wholesale because it grows without limit, and an MCP client has no shell: the
+instruction could not be followed. Separately, `best/design.pdb` was reachable
+by no tool and no resource, so an agent could launch a design, quote its score
+and never be able to hand over the coordinates it had just made. The ensemble
+of alternatives was written and never offered. A run id, once lost, could not
+be recovered. A four-hour run launched by mistake could not be stopped by the
+agent that started it.
+
+| tool | what it answers |
+|---|---|
+| `ipro_result` | the design: mutations, sequence, score change, components, notes, the ensemble, and with `include_structure` the PDB text (capped at 400 KB, about 200 KB for a 340-residue chain). Says `designed_nothing` when no mutation was kept, because the structure is then the starting point |
+| `ipro_iterations` | a bounded tail of the trajectory with the reason each iteration was rejected, plus a count per reason. One reason repeating for every iteration is itself the finding |
+| `ipro_runs` | every run the server can see, with status, for a lost id |
+| `ipro_cancel` | SIGTERM to a run this server started, on this machine, refusing a pid recorded on another host. What it has written stays readable |
+
+Fifteen tools now. The count is in README, HANDOFF.md and AGENTS.md, and a
+test fails if any of them stops naming one.

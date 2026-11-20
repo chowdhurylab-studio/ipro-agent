@@ -4110,8 +4110,14 @@ def test_mcp_server_speaks_the_protocol():
         "ipro_doctor", "ipro_setup", "ipro_fetch_structure",
         "ipro_inspect_structure", "ipro_goals", "ipro_validate",
         "ipro_positions", "ipro_score", "ipro_milp", "ipro_run", "ipro_status",
+        "ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel",
     }
-    assert set(names) == expected, sorted(set(names) ^ expected)
+    # Membership, as the comment above says: set equality is what made adding
+    # a tool look like a regression, which is the thing this was rewritten to
+    # avoid once already.
+    missing = expected - set(names)
+    assert not missing, sorted(missing)
+    assert len(names) == len(set(names)), "a tool is registered twice"
     # doctor first: every other description tells you to call it before
     # anything else, and clients show the list in order.
     assert names[0] == "ipro_doctor"
@@ -6701,3 +6707,99 @@ def test_regression_optzyme_divisors_must_be_positive():
         **base, "goal_options": {"parameter": "kcat", "rt_tsa_kcal": 3.0,
                                  "rt_substrate_kcal": 90.0}})
     build_goal(ok).validate()
+
+
+def test_regression_an_mcp_agent_can_read_back_what_it_designed():
+    """The server told agents to do something no tool could do, and withheld
+    the product of a run.
+
+    `ipro_status`'s own `reporting_rule` says to "read the per-iteration
+    reasons". `iterations.jsonl` is on disk, the house rules forbid loading it
+    wholesale because it grows without limit, and an MCP client has no shell,
+    so the instruction was unfollowable. And the design itself -- the
+    coordinates in `best/design.pdb` -- was reachable by no tool and no
+    resource, so an agent could launch a run, quote its score, and never be
+    able to hand over the structure it made.
+
+    Four tools close that: ipro_result (the design, the ensemble, optionally
+    the PDB text), ipro_iterations (a bounded tail with the rejection
+    reasons), ipro_runs (for a lost id) and ipro_cancel."""
+    from ipro_agent import mcp_server as m
+
+    names = [t["name"] for t in m.TOOLS]
+    for needed in ("ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel"):
+        assert needed in names, needed
+
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (partial: schema only, needs the example and PyMOL)")
+        return
+
+    run = Path(tempfile.mkdtemp()) / "run"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "run", str(ompf / "spec_smoke.yaml"),
+         "--run-dir", str(run), "--iterations", "2", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=1800,
+    )
+    assert p.returncode == 0, p.stderr[-400:]
+
+    res = m.tool_result({"run_dir": str(run)})
+    assert res["mode"] and "notes" in res
+    assert res["structure_files"], "the coordinates must be reachable"
+    # A run that kept no mutation must say so here too, not only in status.
+    if not res["mutations"]:
+        assert res.get("designed_nothing") is True
+        assert "STARTING POINT" in res["warning"]
+
+    with_pdb = m.tool_result({"run_dir": str(run), "include_structure": True})
+    assert with_pdb["structure_pdb"].startswith(("ATOM", "REMARK", "HEADER")), \
+        with_pdb["structure_pdb"][:40]
+    assert "ATOM" in with_pdb["structure_pdb"]
+
+    it = m.tool_iterations({"run_dir": str(run), "limit": 5})
+    assert it["iterations_total"] >= 1
+    assert it["iterations"] and "reason" in it["iterations"][0]
+    assert it["reason_counts"], "the rejection reasons are the point"
+    # Bounded whatever the run length.
+    assert len(m.tool_iterations({"run_dir": str(run), "limit": 10_000})["iterations"]) <= 200
+
+    listed = m.tool_runs({})
+    assert any(r["run_dir"] == str(run) for r in listed["runs"]) or listed["searched"]
+
+    # Cancelling a finished run is a statement, not an error.
+    out = m.tool_cancel({"run_dir": str(run)})
+    assert out["stopped"] is False and "not running" in out["message"]
+
+
+def test_regression_the_new_tools_are_reachable_over_the_protocol():
+    """Registered in TOOLS is not the same as callable: the handler has to be
+    wired and the schema has to validate a realistic call."""
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "0"}}}
+    listed = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+    runs = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "ipro_runs", "arguments": {}}}
+    missing = {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+               "params": {"name": "ipro_result", "arguments": {}}}
+    payload = "\n".join(json.dumps(m) for m in (init, listed, runs, missing)) + "\n"
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.mcp_server"],
+                       input=payload, capture_output=True, text=True,
+                       cwd=REPO, timeout=900)
+    assert p.returncode == 0, p.stderr[-300:]
+    replies = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            msg = json.loads(line)
+            replies[msg.get("id")] = msg
+
+    names = [t["name"] for t in replies[2]["result"]["tools"]]
+    for needed in ("ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel"):
+        assert needed in names, (needed, names)
+
+    body = json.loads(replies[3]["result"]["content"][0]["text"])
+    assert "runs" in body and "searched" in body, body
+
+    # Without a run to point at, it refuses in words.
+    err = json.loads(replies[4]["result"]["content"][0]["text"])["error"]
+    assert "run_dir" in err and "Traceback" not in err, err

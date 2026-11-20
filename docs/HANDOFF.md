@@ -72,10 +72,11 @@ right paths; it looks like:
                                "cwd": "/path/to/ipro-agent"}}}
 ```
 
-They then get eleven tools (`ipro_doctor`, `ipro_setup`,
+They then get fifteen tools (`ipro_doctor`, `ipro_setup`,
 `ipro_fetch_structure`, `ipro_inspect_structure`, `ipro_goals`,
 `ipro_validate`, `ipro_positions`, `ipro_score`, `ipro_milp`, `ipro_run`,
-`ipro_status`), three slash commands (`/ipro-redesign`, `/ipro-check-setup`,
+`ipro_status`, `ipro_result`, `ipro_iterations`, `ipro_runs`,
+`ipro_cancel`), three slash commands (`/ipro-redesign`, `/ipro-check-setup`,
 `/ipro-report`) and the documents as resources. `ipro://skill` serves the whole
 operating manual, so a remote agent is not worse informed than one holding the
 repo.

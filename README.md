@@ -144,6 +144,10 @@ and no design can run.
 | `ipro_milp` | emit the integer program, to prove the constraints are in it |
 | `ipro_run` | launch a run **detached**, returns a run id |
 | `ipro_status` | poll it; carries the mode and the notes |
+| `ipro_result` | the design itself: mutations, sequence, ensemble, and the PDB on request |
+| `ipro_iterations` | the trajectory's tail, with the reason each iteration was rejected |
+| `ipro_runs` | every run this server can see, for a lost id |
+| `ipro_cancel` | stop a running design, keeping what it has written |
 
 `ipro_fetch_structure` and `ipro_inspect_structure` are there because a remote
 agent has no shell: without them "redesign OmpF, you may change residues 18,
@@ -157,7 +161,7 @@ context rather than on disk. `ipro_run` refuses to launch when PyMOL has not
 resolved, rather than starting a job that dies at the first rotamer harvest.
 
 It also serves the documents, so a remote agent is not worse informed than one
-that cloned the repo. Eleven tool descriptions cannot carry the operating
+that cloned the repo. Fifteen tool descriptions cannot carry the operating
 manual, so the manual is a resource instead:
 
 | Resource | |

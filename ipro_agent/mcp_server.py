@@ -41,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -601,7 +602,8 @@ def _run_id(spec: str) -> str:
     return f"{stem}_{n:03d}"
 
 
-def tool_status(args: dict) -> dict:
+def _resolve_run(args: dict) -> Path:
+    """The run directory a tool was pointed at, or a readable refusal."""
     run = args.get("run_dir") or args.get("run_id")
     if not run:
         raise ToolError("give run_dir (a path) or run_id (a directory name)")
@@ -631,6 +633,11 @@ def tool_status(args: dict) -> dict:
             f"ipro.log. Check the path -- a run that never started leaves a "
             f"launch.log, and ipro_run reports that case itself now."
         )
+    return p
+
+
+def tool_status(args: dict) -> dict:
+    p = _resolve_run(args)
     rep = _cli(["status", str(p)], timeout=120)
     # The house rule, restated where an agent will see it. `mode` and `notes`
     # come from status itself (state.RunDir.as_json).
@@ -848,6 +855,216 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def tool_result(args: dict) -> dict:
+    """The design itself: what changed, and the coordinates it changed into.
+
+    ``ipro_status`` reports progress; this reports the product. An MCP client
+    has no shell, so without it an agent can launch a design, quote its score,
+    and never be able to hand over the structure it just made.
+    """
+    run = _resolve_run(args)
+    best = run / "best" / "design.json"
+    if not best.exists():
+        raise ToolError(
+            f"{run} has no best/design.json yet. Poll ipro_status: a run that "
+            f"has not finished has not written one, and a run that failed "
+            f"reports its error there."
+        )
+    try:
+        design = json.loads(best.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"could not read {best}: {exc}")
+
+    out: dict = {
+        "run": str(run),
+        "mode": design.get("mode"),
+        "goal": design.get("goal"),
+        "goal_statement": design.get("goal_statement"),
+        "mutations": design.get("mutations", {}),
+        "mutation_string": design.get("mutation_string"),
+        "sequence": design.get("sequence"),
+        "start_score": design.get("start_score"),
+        "best_score": design.get("best_score"),
+        "components": design.get("components", {}),
+        "notes": design.get("notes", []),
+        "backend": design.get("backend"),
+    }
+    if not out["mutations"]:
+        out["designed_nothing"] = True
+        out["warning"] = (
+            "No mutation was kept, so the sequence and the structure here are "
+            "the STARTING POINT, not a redesign. Report it as 'the search "
+            "found nothing'."
+        )
+
+    ens = run / "ensemble" / "ensemble.json"
+    if ens.exists():
+        try:
+            rows = json.loads(ens.read_text(encoding="utf-8"))
+            out["ensemble"] = [
+                {k: r.get(k) for k in
+                 ("iteration", "score", "mutations", "accepted", "proven_optimal")}
+                for r in rows[:25]
+            ]
+            out["ensemble_total"] = len(rows)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    structures = sorted((run / "best").glob("*.pdb"))
+    out["structure_files"] = [str(s) for s in structures]
+    if args.get("include_structure") and structures:
+        # ~200 KB for a 340-residue chain, so it is opt-in and capped.
+        text = structures[0].read_text(encoding="utf-8", errors="replace")
+        limit = 400_000
+        out["structure_name"] = structures[0].name
+        out["structure_pdb"] = text[:limit]
+        if len(text) > limit:
+            out["structure_truncated"] = (
+                f"{len(text)} characters, truncated to {limit}. The whole file "
+                f"is at structure_files[0]."
+            )
+    return out
+
+
+def tool_iterations(args: dict) -> dict:
+    """The per-iteration record, which the reporting rule asks an agent to read.
+
+    ``ipro_status`` tells the caller to "read the per-iteration reasons", and
+    until now nothing could: ``iterations.jsonl`` is on disk, the house rules
+    forbid loading it wholesale because it grows without limit, and an MCP
+    client has no shell. This returns a bounded tail of it.
+    """
+    run = _resolve_run(args)
+    path = run / "iterations.jsonl"
+    if not path.exists():
+        raise ToolError(f"{run} has no iterations.jsonl yet")
+    try:
+        limit = int(args.get("limit", 20))
+    except (TypeError, ValueError):
+        raise ToolError("`limit` must be a whole number")
+    limit = max(1, min(limit, 200))
+    only_accepted = bool(args.get("only_accepted"))
+
+    rows: list[dict] = []
+    total = 0
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if only_accepted and not rec.get("accepted"):
+                continue
+            rows.append({
+                "iteration": rec.get("iteration"),
+                "score": rec.get("score"),
+                "accepted": rec.get("accepted"),
+                "reason": rec.get("reason"),
+                "mutations": rec.get("mutations"),
+            })
+            if len(rows) > limit:
+                rows.pop(0)
+
+    reasons: dict[str, int] = {}
+    for r in rows:
+        key = str(r.get("reason") or "").split("(")[0].strip() or "unknown"
+        reasons[key] = reasons.get(key, 0) + 1
+    return {
+        "run": str(run),
+        "iterations_total": total,
+        "returned": len(rows),
+        "only_accepted": only_accepted,
+        "reason_counts": reasons,
+        "iterations": rows,
+        "note": (
+            "The tail of the trajectory, newest last. One reason repeating for "
+            "every iteration is itself the finding: a goal filter rejecting "
+            "everything usually means the filter window or the design "
+            "positions need changing, not more iterations."
+        ),
+    }
+
+
+def tool_runs(_args: dict) -> dict:
+    """Every run this server can see, for when an id has been lost."""
+    seen: list[dict] = []
+    roots = [_writable_dir() / "runs", REPO_ROOT / "runs", Path.cwd() / "runs"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or any(x["run_dir"] == str(d) for x in seen):
+                continue
+            row = {"run_dir": str(d), "status": "unknown"}
+            state = d / "state.json"
+            if state.exists():
+                try:
+                    st = json.loads(state.read_text(encoding="utf-8"))
+                    row["status"] = st.get("status")
+                    row["mode"] = st.get("mode")
+                    row["best_score"] = st.get("best_score")
+                    row["updated"] = st.get("updated")
+                except (OSError, json.JSONDecodeError):
+                    row["status"] = "unreadable"
+            elif (d / "launch.log").exists():
+                row["status"] = "never started (see launch.log)"
+            seen.append(row)
+    return {
+        "runs": seen[:100],
+        "searched": [str(r) for r in roots],
+        "note": "Poll one with ipro_status; read its design with ipro_result.",
+    }
+
+
+def tool_cancel(args: dict) -> dict:
+    """Stop a run this server started. Nothing else is touched."""
+    run = _resolve_run(args)
+    try:
+        st = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"cannot read the run's state: {exc}")
+    pid, host = st.get("pid"), st.get("host")
+    if st.get("status") != "running":
+        return {
+            "run": str(run), "stopped": False, "status": st.get("status"),
+            "message": f"not running (status {st.get('status')!r})",
+        }
+    if not isinstance(pid, int) or pid <= 0:
+        raise ToolError(
+            "this run recorded no pid, so it cannot be stopped from here. It "
+            "is an older run, or one started another way."
+        )
+    import platform
+
+    if host and host != platform.node():
+        raise ToolError(
+            f"this run was started on {host!r} and this is "
+            f"{platform.node()!r}; a pid means nothing across machines."
+        )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {
+            "run": str(run), "stopped": False, "status": "stale",
+            "message": "the process is already gone; ipro_status reports this "
+                       "run as stale.",
+        }
+    except PermissionError as exc:
+        raise ToolError(f"not permitted to stop pid {pid}: {exc}")
+    return {
+        "run": str(run), "stopped": True, "pid": pid,
+        "message": (
+            "SIGTERM sent. The run stops after the iteration it is in and "
+            "keeps what it has written: poll ipro_status, then read "
+            "ipro_result for the best design it found."
+        ),
+    }
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "ipro_doctor",
@@ -1054,6 +1271,83 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_status,
+    },
+    {
+        "name": "ipro_result",
+        "description": (
+            "The design a run produced: the mutation string, the sequence, the "
+            "score change, the components, the notes, the ensemble of "
+            "alternatives, and -- with include_structure -- the designed PDB "
+            "itself. Report from this rather than from ipro_status alone: an "
+            "MCP client has no shell, so this is the only way to hand over the "
+            "coordinates. If no mutation was kept it says so, and the "
+            "structure is then the starting point."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+                "include_structure": {
+                    "type": "boolean",
+                    "description": "include the designed PDB as text (about "
+                                   "200 KB for a 340-residue chain); off by default",
+                },
+            },
+        },
+        "handler": tool_result,
+    },
+    {
+        "name": "ipro_iterations",
+        "description": (
+            "The tail of the trajectory: per-iteration score, whether it was "
+            "accepted, and why it was rejected. The reporting rule tells you to "
+            "read the per-iteration reasons, and this is how. Never read "
+            "iterations.jsonl directly; it grows without limit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+                "limit": {
+                    "type": "integer",
+                    "description": "how many of the most recent to return (default 20, max 200)",
+                },
+                "only_accepted": {
+                    "type": "boolean",
+                    "description": "only the iterations that were accepted",
+                },
+            },
+        },
+        "handler": tool_iterations,
+    },
+    {
+        "name": "ipro_runs",
+        "description": (
+            "Every run this server can see, with its status. For when a run id "
+            "has been lost, or to check what is already running before starting "
+            "another."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": tool_runs,
+    },
+    {
+        "name": "ipro_cancel",
+        "description": (
+            "Stop a running design. It stops after the iteration it is in and "
+            "keeps what it has written, so the best design found so far is "
+            "still readable with ipro_result. Only runs this server started, on "
+            "this machine."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+            },
+        },
+        "handler": tool_cancel,
     },
 ]
 
