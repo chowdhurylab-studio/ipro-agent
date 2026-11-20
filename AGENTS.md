@@ -1,8 +1,8 @@
-# ipro-agent — router
+# ipro-agent: router
 
 An agent opening this repo normally loads the skill by itself, from its
-`description` in `.claude/skills/ipro-agent/SKILL.md`. This file is the fallback for tools that read
-`AGENTS.md` instead, and the place the house rules live.
+`description` in `.claude/skills/ipro-agent/SKILL.md`. This file is the fallback
+for tools that read `AGENTS.md` instead, and the place the house rules live.
 
 This repo is one tool: a generalized, agent-drivable implementation of IPRO
 (Iterative Protein Redesign and Optimization).

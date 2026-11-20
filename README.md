@@ -42,16 +42,9 @@ paths filled in. Safe to re-run; deletes nothing.
 
 ![A conversation: you ask in plain language, the agent resolves the positions, runs, and reports what it cannot stand behind](docs/demo-chat.png)
 
-<<<<<<< HEAD
-*The three commands you will actually use, on the shipped OmpF example; real
-output. `inspect` comes first because a bare residue number does not say which
-chain it is in, and the run ends on its notes because they are the result as
-much as the score is.*
-=======
 *How it is actually used. The caveat in that last message is the output: the
 run found nothing, and the number it printed is labelled rather than left to be
 quoted. [More worked prompts](docs/index.html), with what each one produces.*
->>>>>>> origin/main
 
 By hand instead. The install step is not optional: rotamers come only from
 PyMOL's mutagenesis wizard, and `pymol-open-source` is conda-only, so
@@ -106,8 +99,8 @@ validation checklist to work through before reporting a design.
 
 The section above assumes an agent that has cloned this repo and can read
 `SKILL.md`. For an agent working somewhere else, or one that cannot read a repo
-at all, there is an MCP server: the tool appears as eleven typed tools instead
-of a manual to read:
+at all, there is an MCP server. It presents the tool as fifteen typed tools
+rather than a manual to read:
 
 ```bash
 pip install git+https://github.com/chowdhurylab-studio/ipro-agent
@@ -177,16 +170,16 @@ There are also three prompts, which clients show as slash commands:
 report).
 
 The server can install its own dependencies. It is pure standard library, so it
-starts on a machine with nothing installed, which is the only way it can be the
-thing that tells you nothing is installed. `ipro_doctor` names what is missing
-and `ipro_setup` reports the exact command; with `confirm=true` it runs the
-conda install itself. Measured in an empty virtualenv: the server starts,
-reports `missing_required: ['numpy', 'Bio', 'yaml']`, finds mamba, and hands
-back the command without installing anything.
+starts on a machine with nothing installed, which is the only way it can report
+that nothing is installed. `ipro_doctor` names what is missing and `ipro_setup`
+reports the exact command; with `confirm=true` it runs the conda install itself.
+Measured in an empty virtualenv: the server starts, reports
+`missing_required: ['numpy', 'Bio', 'yaml']`, finds mamba, and hands back the
+command without installing anything.
 
-One honest limit remains. It is a local server, so the environment it installs
-has to be the one the server itself runs in: after `ipro_setup` finishes, point
-your MCP config at that environment's python
+One limit remains. It is a local server, so the environment it installs has to
+be the one the server itself runs in: after `ipro_setup` finishes, point your
+MCP config at that environment's python
 (`.../envs/ipro-agent/bin/python -m ipro_agent.mcp_server`), or PyMOL still
 will not resolve. `ipro_setup` says so in its result.
 
@@ -198,7 +191,7 @@ will not resolve. `ipro_setup` says so in its result.
 | [docs/DESIGN.md](docs/DESIGN.md) | every capability traced to its paper and equation, and every deviation |
 | [docs/MILP.md](docs/MILP.md) | the integer program in full |
 | [docs/INSTALL.md](docs/INSTALL.md) | dependencies and what each one unlocks |
-| [examples/ompf_pore/](examples/ompf_pore/) | worked case, with an honest `EXPECTED.md` |
+| [examples/ompf_pore/](examples/ompf_pore/) | worked case, with an `EXPECTED.md` of what can and cannot be compared |
 | [docs/EXAMPLE_PROMPTS.md](docs/EXAMPLE_PROMPTS.md) | five prompts to paste at an agent, and what each actually produces |
 | [docs/HANDOFF.md](docs/HANDOFF.md) | passing this to a labmate, a student or your future self |
 
@@ -217,9 +210,9 @@ Genuinely optional, each resolved at run time with a documented fallback:
 
 | Tool | Used for | Without it |
 |---|---|---|
-| **PyRosetta** | backbone relaxation, scoring | loop runs `fixed-backbone`; energies come from a screening function |
-| **AutoDock Vina** | re-docking partners after mutation | input poses are kept |
-| **MILP solver** (CPLEX, Gurobi, CBC, HiGHS, GLPK) | proving the optimal packing | a heuristic that does not prove optimality |
+| PyRosetta | backbone relaxation, scoring | loop runs `fixed-backbone`; energies come from a screening function |
+| AutoDock Vina | re-docking partners after mutation | input poses are kept |
+| MILP solver (CPLEX, Gurobi, CBC, HiGHS, GLPK) | proving the optimal packing | a heuristic that does not prove optimality |
 
 `scripts/doctor.py` reports what resolved and what a run will actually use. It
 also refuses an interpreter below the floor: on Python 3.9 with every
@@ -305,12 +298,12 @@ metadata, and GitHub's "Cite this repository" button renders it.
 For the method, cite the original work. `docs/DESIGN.md` has the full list
 with DOIs; the main entries are:
 
-- Saraf, Moore, Goodey, Cao, Benkovic, Maranas. *Biophys J* **90**:4167 (2006) — IPRO.
-- Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251 (2015) — the IPRO suite.
-- Chowdhury et al. *Nat Commun* **9**:3661 (2018) — PoreDesigner.
-- Chowdhury et al. *Structure* **28**:1344 (2020) — IPRO+/−, insertions and deletions.
-- Grisewood et al. *ACS Catal* **7**:3837 (2017) — specificity redesign.
-- Grisewood et al. *PLoS ONE* **8**:e75358 (2013) — OptZyme.
+- IPRO: Saraf, Moore, Goodey, Cao, Benkovic, Maranas. *Biophys J* **90**:4167 (2006).
+- The IPRO suite: Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251 (2015).
+- PoreDesigner: Chowdhury et al. *Nat Commun* **9**:3661 (2018).
+- IPRO+/−, insertions and deletions: Chowdhury et al. *Structure* **28**:1344 (2020).
+- Specificity redesign: Grisewood et al. *ACS Catal* **7**:3837 (2017).
+- OptZyme: Grisewood et al. *PLoS ONE* **8**:e75358 (2013).
 
 ## Licence
 
@@ -326,7 +319,7 @@ the licence file says so in its own words:
 | **`refs/`** | Publisher PDFs and clones of upstream repositories, kept locally for provenance and git-ignored: they are not in this repository and are not redistributed. |
 | **Optional dependencies** | PyMOL, AutoDock Vina, Open Babel, PyRosetta and any MILP solver are separately licensed and separately installed. **PyRosetta requires its own licence**; see [`docs/INSTALL.md`](docs/INSTALL.md). |
 
-No upstream IPRO code is copied here, which is what makes publishing this
+No upstream IPRO code is copied here. That is what makes publishing this
 defensible: the upstream releases carry no `LICENSE` file at all, and the
 Maranas group's pages describe the suite as freely available to academic users.
 This is an independent reimplementation rather than a fork, written from the

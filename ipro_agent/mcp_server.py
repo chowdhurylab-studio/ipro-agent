@@ -1478,12 +1478,27 @@ def _env_file() -> "Path | None":
 
 
 def _doc_roots() -> list[Path]:
-    roots = [REPO_ROOT]
+    """Where to look for the documents this server serves as resources.
+
+    ``IPRO_REPO`` comes first because not every MCP client can set a working
+    directory for a server it launches. Claude Desktop, Claude Code and Cursor
+    take a ``cwd``; the Codex and VS Code configurations are command plus args
+    plus environment. Without a way to point at a checkout, a pip-installed
+    server serves none of the documents, and `ipro://skill` -- the operating
+    manual -- is the one an agent most needs.
+    """
+    roots: list[Path] = []
+    env = os.environ.get("IPRO_REPO")
+    if env:
+        candidate = Path(env).expanduser()
+        if candidate.is_dir():
+            roots.append(candidate)
+    roots.append(REPO_ROOT)
     try:
         cwd = Path.cwd()
     except OSError:                       # a deleted cwd is survivable
         return roots
-    if cwd != REPO_ROOT:
+    if cwd not in roots:
         roots.append(cwd)
     return roots
 

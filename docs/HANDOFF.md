@@ -27,7 +27,7 @@ no fallback for it.
 
 ---
 
-## The three ways people will actually use it
+## The three ways people use it
 
 Pick the one that matches the person, and say which you mean.
 
@@ -87,26 +87,26 @@ at the wrong one and PyMOL will not resolve and no design can run.
 
 ---
 
-## What to tell them, not just what to send
+## What to tell them when you hand it over
 
 Three things decide whether their first result means anything.
 
-The mode. Every run reports a `mode` and a list of `notes`, and both must
-travel with any number they quote. `fixed-backbone` is not the published
-protocol, and `backbone-mc` has no gradient relaxation; energies from the
-built-in backend are a screening scale, not kcal/mol comparable to the IPRO
-papers. `scripts/doctor.py` says which mode they are in before they start. This
-is a house rule in `AGENTS.md`, and it is the difference between a result and a
-misstatement.
+1. Every run reports a `mode` and a list of `notes`, and both must travel with any
+   number they quote. `fixed-backbone` is not the published protocol, and
+   `backbone-mc` has no gradient relaxation; energies from the built-in backend
+   are a screening scale, not kcal/mol comparable to the IPRO papers.
+   `scripts/doctor.py` says which mode they are in before they start. This is a
+   house rule in `AGENTS.md`, and it is the difference between a result and a
+   misstatement.
 
-Then `accepted: 0`, which means nothing was designed. The reported "best design"
-is then the starting point rather than a redesign. The run says so in its notes,
-but people read the score first.
+2. `accepted: 0` means nothing was designed. The reported "best design" is then
+   the starting point rather than a redesign. The run says so in its notes, but
+   people read the score first.
 
-And that every design is a hypothesis for the bench. Published hit rates across
-this family of methods are roughly 24–43%, and these objectives reproduce the
-rank and sign of a change far better than its magnitude. No design from this
-code has been synthesised or tested.
+3. Every design is a hypothesis for the bench. Published hit rates across this
+   family of methods are roughly 24–43%, and these objectives reproduce the rank
+   and sign of a change far better than its magnitude. No design from this code
+   has been synthesised or tested.
 
 Point them at `README.md` → "Status and honesty" and "Responsible use" before
 their first run, not after. The second of those lists the targets and goals that
@@ -114,7 +114,7 @@ need a human decision first.
 
 ---
 
-## The one thing to say about pores, so they hear it from you
+## The pore axis: say this yourself, do not leave it to the notes
 
 The channel axis is fitted through the centroid of the design positions, so it
 only follows the channel when those positions *ring* the lumen. When they do
@@ -135,8 +135,7 @@ So a pore radius is only meaningful when the run does not print that warning.
 If it does, give `goal_options.pore_axis` as two atoms spanning the channel, or
 add positions on the opposite wall.
 
-Two more worth passing on, both with the same shape: a number that looks like a
-result.
+Two more have the same shape, a number that looks like a result:
 
 - `accepted: 0` is not a design (also below).
 - An allowed residue can be unreachable. If every rotamer of it clashes with

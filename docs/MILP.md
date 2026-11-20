@@ -9,12 +9,12 @@ published equations and to the behaviour of the original source.
 | Symbol | Meaning | In the code |
 |---|---|---|
 | `i, j ∈ P` | design positions | `EnergyTables.positions` (labels like `A115`) |
-| `r ∈ R_i` | a rotamer at position `i` — fixes both the **identity** and the **conformation** | `EnergyTables.rotamers[i]`, a flat list over allowed residues × PyMOL states |
+| `r ∈ R_i` | a rotamer at position `i`, fixing both the **identity** and the **conformation** | `EnergyTables.rotamers[i]`, a flat list over allowed residues × PyMOL states |
 | `aa(i,r)` | the amino acid of rotamer `r` | `Rotamer.aa` |
-| `E_self(i,r)` | rotamer `r`'s interaction with everything held fixed — backbone, non-design side chains, target and anti-target molecules — plus optional internal strain and a reference energy | `EnergyTables.self_energy` |
+| `E_self(i,r)` | rotamer `r`'s interaction with everything held fixed (backbone, non-design side chains, target and anti-target molecules), plus optional internal strain and a reference energy | `EnergyTables.self_energy` |
 | `E_pair(i,r,j,s)` | interaction between two chosen rotamers | `EnergyTables.pair_energy` |
 
-The template's own internal energy is **deliberately excluded**: it is identical
+The template's own internal energy is deliberately excluded: it is identical
 for every assignment, so it is a constant that cannot affect the argmin.
 Absolute energies come from the loop's whole-structure scoring instead.
 
@@ -25,9 +25,9 @@ y[i,r] ∈ {0,1}        rotamer r is chosen at position i
 w[i,r,j,s] ∈ [0,1]    rotamers r at i and s at j are both chosen   (i < j)
 ```
 
-`w` is **continuous**, not binary. This is not an approximation — see
-*Why the linearization is exact* below. It is also what the original does: the
-GAMS path declares the pair variable continuous on `[0,1]`.
+`w` is continuous rather than binary. That is not an approximation; *Why the
+linearization is exact* below gives the argument. The original does the same:
+the GAMS path declares the pair variable continuous on `[0,1]`.
 
 ## The program
 
@@ -38,13 +38,13 @@ min  Σ_{i∈P} Σ_{r∈R_i} E_self(i,r) · y[i,r]
    + Σ_{i<j}  Σ_{r,s}   E_pair(i,r,j,s) · w[i,r,j,s]
 ```
 
-**Assignment (2)** — exactly one rotamer per design position
+**Assignment (2)**: exactly one rotamer per design position
 
 ```
 Σ_{r∈R_i} y[i,r] = 1                      ∀ i ∈ P
 ```
 
-**Linearization (3)** — written for both orientations of each surviving pair
+**Linearization (3)**: written for both orientations of each surviving pair
 
 ```
 Σ_{s∈R_j} w[i,r,j,s] = y[i,r]             ∀ i, r, and every j ≠ i in a kept pair
@@ -58,8 +58,9 @@ min  Σ_{i∈P} Σ_{r∈R_i} E_self(i,r) · y[i,r]
 
 ### Why the linearization is exact
 
-The product `y[i,r]·y[j,s]` is replaced by `w[i,r,j,s]` and tied down by the two
-marginalization equalities (3) — one summing over `R_j`, one over `R_i` — rather
+The paper quantifies what the linearization buys, and the argument is its
+own. The product `y[i,r]·y[j,s]` is replaced by `w[i,r,j,s]` and tied down by the two
+marginalization equalities (3), one summing over `R_j` and one over `R_i`, rather
 than by big-M or McCormick inequalities. Given (2) and binary `y`, the feasible
 set for `w` at fixed `y` is the transportation polytope between two unit
 marginals, one of which is a vertex of the simplex. Its only feasible point is
@@ -72,9 +73,9 @@ roughly 1300 rotamers this way.
 
 ## Constraints this implementation adds
 
-These are the reason the inner problem is an integer program rather than a
-simulated-annealing packer: a packer solves (1)–(2) well but cannot express any
-of them. Each is linear in `y` (or, for the energy cap, in `y` and `w`).
+A simulated-annealing packer solves (1)–(2) well but cannot express any of the
+constraints below. That is why the inner problem is an integer program. Each of
+them is linear in `y` (or, for the energy cap, in `y` and `w`).
 
 | Code | Form | Source |
 |---|---|---|
@@ -91,7 +92,7 @@ of the named identity contributes to the sum. So a sequence cannot be
 re-evaluated, while the optimizer stays free to repack any other sequence
 differently.
 
-`min_class` accepts a `fraction` instead of a `count`, rounded up — with 25
+`min_class` accepts a `fraction` instead of a `count`, rounded up: with 25
 positions, `fraction: 0.5` becomes `≥ 13`.
 
 ## Size control
@@ -100,13 +101,13 @@ Pair variables grow as `(Σ_i |R_i|)²`, so three prunings run before the progra
 is written. All three counts appear in `EnergyTables.stats` and in
 `ipro-agent milp --json`.
 
-1. **Rotamer pruning, relative to the best rotamer at each position.** A
-   rotamer more than `rotamer_window` kcal/mol worse than the best one at the
-   same position is dropped. That relative form is IPRO's published rule
+1. Rotamer pruning, relative to the best rotamer at each position. A rotamer
+   more than `rotamer_window` kcal/mol worse than the best one at the same
+   position is dropped. That relative form is IPRO's published rule
    (`ROTAMERS.py` keeps `sorted[n][i] <= sorted[n][0] + window`, window
-   40 kcal/mol): it asks which conformers are competitive *there*, which is not
-   a question an absolute threshold can answer. `max_self_energy`, if set, is
-   an additional absolute clash ceiling; it is **off by default**, because an
+   40 kcal/mol): it asks which conformers are competitive *there*, a question
+   an absolute threshold cannot answer. `max_self_energy`, if set, is an
+   additional absolute clash ceiling; it is **off by default**, because an
    absolute default of 50 kcal/mol pruned TRP, PHE and TYR out of OmpF
    position A18 and with them the published V18W answer (DESIGN.md §7d,
    defect 25).
@@ -120,10 +121,11 @@ is written. All three counts appear in `EnergyTables.stats` and in
    **+0.000** choosing r0. A true DEE criterion (Goldstein) bounds against the
    pair-energy extrema; this filter does not, so it is reported as a heuristic
    in `EnergyTables.stats`.
-2. **Position-pair pruning.** If the rotamer clouds at `i` and `j` cannot reach
-   each other — centroid separation beyond the sum of their bounding radii plus
-   the energy cutoff — the pair contributes no variables at all.
-3. **Pair-term pruning.** Individual `|E_pair| < pair_eps` are dropped.
+2. Position-pair pruning. If the centroid separation between the rotamer clouds
+   at `i` and `j` exceeds the sum of their bounding radii plus the energy
+   cutoff, they cannot reach each other and the pair contributes no variables
+   at all.
+3. Pair-term pruning. Individual `|E_pair| < pair_eps` are dropped.
 
 Repulsion is capped per atom pair by the energy backend (default 10 kcal/mol).
 Rotamer libraries routinely produce hard clashes whose raw `1/r¹²` values would
@@ -134,40 +136,40 @@ clamps objective coefficients at 10000 kcal/mol for the same reason.
 
 ### Published problem size
 
-The paper quantifies what the linearization buys. Replacing the bilinear form
-by eqs. (4) and (5) cuts the constraint count by a factor of
+Replacing the bilinear form by eqs. (4) and (5) cuts the constraint count by a
+factor of
 
 ```
    sum_{i<j} R_i R_j  /  [ (N-1) * sum_i R_i ]
 ```
 
-and it gives a worked example: a tripeptide with 21, 29 and 15 rotamers at its
-three positions has **1359 bilinear constraints** (21·29 + 21·15 + 29·15) but
-only **130 linear ones** ((N−1)·ΣR_i = 2·65) — about an order of magnitude.
-That is the only published figure for this program's size, and it is the reason
-the formulation scales to the ~1300 rotamers the released source caps at.
+The paper's worked example is a tripeptide with 21, 29 and 15 rotamers at its
+three positions: **1359 bilinear constraints** (21·29 + 21·15 + 29·15) against
+only **130 linear ones** ((N−1)·ΣR_i = 2·65), about an order of magnitude. That
+is the only published figure for this program's size, and it is the reason the
+formulation scales to the ~1300 rotamers the released source caps at.
 
 Note the quantifiers in eqs. (4) and (5): they range over **all** `r` in `R_i`
 and **all** `s` in `R_j`. A pair block that is missing some `(r,s)` therefore
-does not implement the published constraint at all — which is exactly the defect
-recorded as #1 in docs/DESIGN.md §7, and why blocks here are kept or dropped
+does not implement the published constraint at all. That is the defect recorded
+as #1 in docs/DESIGN.md §7, and the reason blocks here are kept or dropped
 whole.
 
 `RotamerMILP.to_lp()` emits CPLEX LP format with the positions, their rotamer
-counts and every constraint commented. **This file is the artifact that records
-what was actually solved** — the deliverable when a user has stated a
-constraint and wants to see it encoded. `ipro-agent milp spec.yaml -o model.lp`
-writes it without running anything.
+counts and every constraint commented. That file is the artifact recording what
+was actually solved, and the deliverable when a user has stated a constraint and
+wants to see it encoded. `ipro-agent milp spec.yaml -o model.lp` writes it
+without running anything.
 
 `solve()` tries, in order:
 
-1. **PuLP**, with whichever solver it has (CPLEX, Gurobi, CBC, HiGHS, SCIP, GLPK);
-2. **a solver binary via the LP file** — `glpsol` or `cbc`, whose solution
+1. PuLP, with whichever solver it has (CPLEX, Gurobi, CBC, HiGHS, SCIP, GLPK);
+2. a solver binary driven through the LP file, `glpsol` or `cbc`, whose solution
    formats are parsed here;
-3. **a built-in greedy heuristic** — iterated best-improvement over
-   single-position reassignments, which respects (2) by construction and checks
-   every user constraint, but **does not prove optimality**. `proven_optimal`
-   stays `False`, and the solver string says so.
+3. a built-in greedy heuristic: iterated best-improvement over single-position
+   reassignments, which respects (2) by construction and checks every user
+   constraint, but **does not prove optimality**. `proven_optimal` stays
+   `False`, and the solver string says so.
 
 Two failure modes are kept distinct, because conflating them corrupts results:
 
@@ -184,12 +186,12 @@ at every position as though the solver had chosen it.
 
 ## Verification
 
-`tests/test_ipro.py` checks the formulation against exhaustive enumeration —
-on randomized toy tables and on real PyMOL rotamers with the real energy
-function — unconstrained and with a class-cardinality constraint. Both match to
-`1e-6`. It also checks that an integer cut excludes the sequence just found,
-that an infeasible program raises rather than returning something, and that the
-LP file's objective agrees with the objective used by the accept/reject test.
+`tests/test_ipro.py` checks the formulation against exhaustive enumeration, on
+randomized toy tables and on real PyMOL rotamers with the real energy function,
+unconstrained and with a class-cardinality constraint. Both match to `1e-6`. It
+also checks that an integer cut excludes the sequence just found, that an
+infeasible program raises rather than returning something, and that the LP
+file's objective agrees with the objective used by the accept/reject test.
 
 ## Known deviations from the original
 
@@ -204,6 +206,6 @@ LP file's objective agrees with the objective used by the accept/reject test.
 ## Sources
 
 - Saraf, Moore, Goodey, Cao, Benkovic, Maranas. *Biophys J* **90**:4167–4180 (2006). The original formulation; equations 3–10 (single-structure) and 11–21 (library).
-- Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251–263 (2015). The IPRO suite. **This is the authoritative statement of the formulation above**: its eq. (1) is the objective, eq. (2) the assignment constraint, and eqs. (4) and (5) the two marginalizations — `y[i,r] = Σ_s w[i,r,j,s]` and `y[j,s] = Σ_r w[i,r,j,s]` — introduced explicitly to replace the bilinear `w = y·y` of its eq. (3). Parameters are named `EC[i,r]` (rotamer against the non-rotamer portion of the assembly, i.e. the template) and `ER[i,r][j,s]` (rotamer against rotamer).
+- Pantazes, Grisewood, Li, Gifford, Maranas. *J Comput Chem* **36**:251–263 (2015). The IPRO suite. This is the authoritative statement of the formulation above: its eq. (1) is the objective, eq. (2) the assignment constraint, and eqs. (4) and (5) the two marginalizations, `y[i,r] = Σ_s w[i,r,j,s]` and `y[j,s] = Σ_r w[i,r,j,s]`, introduced explicitly to replace the bilinear `w = y·y` of its eq. (3). Parameters are named `EC[i,r]` (rotamer against the non-rotamer portion of the assembly, i.e. the template) and `ER[i,r][j,s]` (rotamer against rotamer).
 - Chowdhury et al. *Nat Commun* **9**:3661 (2018), supplementary information. The formulation reproduced in full, CC-BY, including the ≥50%-long constraint and the no-good cut.
 - The IPRO Suite source (`ROTAMERS.py`, `GAMS.py`, `CPLEX.py`), for the variable declarations, the coefficient clamp and the cut forms.

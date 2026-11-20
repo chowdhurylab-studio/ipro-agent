@@ -230,9 +230,9 @@ assembly be scored without gating acceptance.
 
 Three things to understand before reaching for this:
 
-- Identity is shared, packing is not. That is the point: the same residue may
-  adopt different rotamers in different complexes, which is what makes the
-  sequence a genuine compromise rather than an average.
+- Identity is shared, packing is not: the same residue may adopt different
+  rotamers in different complexes, which is what makes the sequence a genuine
+  compromise rather than an average.
 - Assemblies do not express "bind A, not B". Every assembly's packing is
   minimized, because that is what the protein will do when it meets that
   partner. Selecting *against* a partner is `goal: switch_specificity` with
@@ -247,10 +247,10 @@ unscored, so the spec is rejected instead.
 
 All assemblies share one rotamer set, so a rotamer index means the same
 conformer everywhere and identity coupling is meaningful. Each assembly still
-prunes against its own partners first; the surviving sets are then unioned, so
-a rotamer that clashes with the *anti-target* is kept; that clash is the
-point of the anti-target, not a reason to discard the rotamer. The run logs
-how many rotamers ended up shared.
+prunes against its own partners first, and the surviving sets are then unioned,
+so a rotamer that clashes with the *anti-target* is kept. That clash is what
+the anti-target is for, not a reason to discard the rotamer. The run logs how
+many rotamers ended up shared.
 
 ### 2a2. Channel goals: set a size, and check the positions line the bottleneck
 
@@ -288,12 +288,12 @@ between runs of this tool; not the same quantity as a paper's.
 
 ### 2a3. Give every molecule distinct chain ids
 
-Not cosmetic. A restraint names an atom as `A10:OG` (chain, residue, atom) and
-has no way to say *which molecule*. If a partner reuses the design molecule's
-chain id, `A16:CA` is genuinely ambiguous, so the run refuses with an
-explanation rather than measuring whichever molecule happened to load first.
-The output PDB needs distinct ids too, and will rename a colliding partner
-chain (reported in `notes`).
+This is not cosmetic. A restraint names an atom as `A10:OG` (chain, residue,
+atom) and has no way to say *which molecule*. If a partner reuses the design molecule's chain id,
+`A16:CA` is genuinely ambiguous, so the run refuses with an explanation rather
+than measuring whichever molecule happened to load first. The output PDB needs
+distinct ids too, and will rename a colliding partner chain (reported in
+`notes`).
 
 If you hit this, renumber the partner's chain in its own file before running;
 do not work around it by changing the restraint.
@@ -303,8 +303,8 @@ no separator the chain defaults to A and `1115` means residue 1115.
 
 ### 2b. Add restraints when geometry must be preserved
 
-This is the capability that makes enzyme work possible: "redesign this pocket
-but keep the catalysis intact" is a restraint, not an objective. The published
+Restraints are what make enzyme work possible: "redesign this pocket but keep
+the catalysis intact" is a restraint, not an objective. The published
 thioesterase redesign held its catalytic distances to ±0.2 Å while changing
 specificity; without that, the optimizer will happily destroy the active site
 to improve a binding score.
@@ -389,9 +389,9 @@ it corresponds to. Read it back to the user when they have stated a
 constraint: it is the artifact that proves their requirement was encoded as
 they meant it.
 
-User constraints that the integer program can express (this is the reason it is
-a MILP and not a packer: a simulated-annealing packer cannot honour any of
-them):
+User constraints that the integer program can express. A simulated-annealing
+packer cannot honour any of them, which is why rotamer selection here is a MILP
+and not a packer.
 
 | User's requirement | Constraint |
 |---|---|
@@ -500,7 +500,7 @@ records what it could not do: a skipped relaxation step, a native residue that
 was not an allowed choice, a missing reference-energy table. Suppressing them
 turns a qualified result into an overclaim.
 
-## Degraded modes — check these before interpreting any number
+## Degraded modes: check these before interpreting any number
 
 The loop reports `mode` in `state.json` and in the run summary.
 

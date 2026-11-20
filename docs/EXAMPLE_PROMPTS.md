@@ -34,13 +34,12 @@ structure.
 > at those positions before you design anything.
 
 What this shows: the agent downloads 2OMF from the RCSB (274 KB), writes a
-chain-A copy, and *inspects it before writing a spec*, which is the step that
-makes "residues 18, 20, 38 and 40" mean anything. Those four resolve to V18,
-L20, M38 and Y40 of chain A, and the agent should tell you so and hand back
-spec lines you can read. That matters because a bare residue number does not
-say which chain it belongs to, and a number resolved against the wrong chain
-silently designs a different residue, a defect that shipped here once already
-(DESIGN.md §7b).
+chain-A copy, and *inspects it before writing a spec*, which is what makes
+"residues 18, 20, 38 and 40" mean anything. Those four resolve to V18, L20,
+M38 and Y40 of chain A, and the agent should tell you so and hand back spec
+lines you can read. A bare residue number does not say which chain it belongs
+to, and a number resolved against the wrong chain silently designs a different
+residue, a defect that shipped here once already (DESIGN.md §7b).
 
 It is also the published case: PoreDesigner's tested designs mutate exactly
 these positions to tryptophan (V18W L20W M38W Y40W), so "did Trp come out at
@@ -48,18 +47,18 @@ any of the four" is a real score against the paper; see
 `examples/ompf_pore/EXPECTED.md` for which comparisons are meaningful and which
 are not available at all.
 
-The caveat that matters here is not a small one. Four positions along one wall
-do not *ring* the lumen, and the channel axis is fitted through their centroid,
-so it runs inside the protein and the reported "bottleneck" is a gap beside a
-wall. Measured on the input structure: 0.30 Å of clearance where a water needs
-1.4 Å, giving a 1.53 Å reading that *passes* a sub-4 Å filter. The run now says
-this outright, "THE PORE RADIUS HERE IS NOT A PORE RADIUS", and names the fix.
-Do not read a pore radius from this prompt. For a real measurement, give
-`goal_options.pore_axis` as two atoms spanning the channel, or use all 25
-positions (`examples/ompf_pore/spec_full.yaml`, whose axis clears 2.80 Å and
-whose wild-type eyelet measures 8.07 Å). DESIGN.md §7h has the full account,
-including why the clearance has to be measured on the input structure and not
-on a candidate.
+The caveat here is not a small one. Four positions along one wall do not
+*ring* the lumen, and the channel axis is
+fitted through their centroid, so it runs inside the protein and the reported
+"bottleneck" is a gap beside a wall. Measured on the input structure: 0.30 Å of
+clearance where a water needs 1.4 Å, giving a 1.53 Å reading that *passes* a
+sub-4 Å filter. The run now says this outright, "THE PORE RADIUS HERE IS NOT A
+PORE RADIUS", and names the fix. Do not read a pore radius from this prompt.
+For a real measurement, give `goal_options.pore_axis` as two atoms spanning the
+channel, or use all 25 positions (`examples/ompf_pore/spec_full.yaml`, whose
+axis clears 2.80 Å and whose wild-type eyelet measures 8.07 Å). DESIGN.md §7h
+has the full account, including why the clearance has to be measured on the
+input structure and not on a candidate.
 
 ---
 
@@ -73,9 +72,9 @@ objective that needs two molecules and a restraint.
 > substrates as separate PDBs. Which objective should this be, and what do you
 > need from me?
 
-What this shows: the honest answer involves the agent *asking*, which is the
-point. `switch_specificity` minimises IE(target) − w·IE(anti-target), so it
-needs the wanted substrate with role `target` and the rejected one with role
+What this shows: the agent has to *ask* here before it can write a spec.
+`switch_specificity` minimises IE(target) − w·IE(anti-target), so it needs
+the wanted substrate with role `target` and the rejected one with role
 `anti_target`. With only one molecule it refuses rather than optimising plain
 affinity and calling it specificity. "Keep the catalysis" has to become an
 explicit `restraints:` entry (a `distance` between the catalytic atoms, the
@@ -106,11 +105,10 @@ partner molecule in the spec or `--near`, and it says so plainly rather than
 guessing: on a spec with no target it answers *"spec has no target molecule;
 pass --near or add one"*.
 
-Showing you the list before designing is not politeness. The proposed set is
-geometry rather than biology: it will happily include a catalytic residue, a
-disulfide partner or a metal ligand, and the optimizer will mutate any of them
-unless you say otherwise. Anything that must survive the redesign belongs in
-`restraints:`.
+Read the list before the spec is written. The proposed set is geometry rather
+than biology: it will happily include a catalytic residue, a disulfide partner
+or a metal ligand, and the optimizer will mutate any of them unless you say
+otherwise. Anything that must survive the redesign belongs in `restraints:`.
 
 ---
 
@@ -136,7 +134,7 @@ solver honours rather than a hope. `ipro_score` measures the input as supplied,
 which is also how you get `goal_options.reference_interaction` for a
 constrained run.
 
-Worth asking for explicitly: a validation pass that reports `spec is usable`
+Ask about the notes as well: a validation pass that reports `spec is usable`
 can still hide a scientific problem, such as the native residue not being an
 allowed choice at a position, which the run reports as a note rather than an
 error.
@@ -160,10 +158,10 @@ numbers look like results, and the caveats are the result.
 
 A good answer states the mode, every note, that screening energies are not
 publication kcal/mol, and, when `accepted` is 0, that nothing was designed and
-the reported "best design" is the starting point. It should also
-say what would raise confidence: reference energies set, a real MILP solver so
-optimality is proven, PyRosetta so the backbone actually relaxes, a pore axis
-given explicitly, and ultimately an experiment.
+the reported "best design" is the starting point. It should also say what would
+raise confidence: reference energies set, a real MILP solver so optimality is
+proven, PyRosetta so the backbone actually relaxes, a pore axis given
+explicitly, and ultimately an experiment.
 
 <details>
 <summary><b>Walk through prompt 1 in detail</b></summary>
@@ -190,9 +188,9 @@ Each iteration perturbs the backbone (when enabled), then solves a
 mixed-integer linear program that chooses one rotamer per position. That is the
 reason your constraints are honoured exactly rather than approximately: "at
 least half these positions must be long residues" is a linear constraint, and a
-simulated-annealing packer cannot promise it.
-The chosen design is then accepted or rejected on energy by a Metropolis test
-at IPRO's published temperature. `docs/MILP.md` has the formulation.
+simulated-annealing packer cannot promise it. The chosen design is then
+accepted or rejected on energy by a Metropolis test at IPRO's published
+temperature. `docs/MILP.md` has the formulation.
 
 **Explore the result**
 
