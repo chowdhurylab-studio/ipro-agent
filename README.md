@@ -42,11 +42,15 @@ That creates the environment, reports what resolved, runs the test suite and the
 shipped example, and prints the exact commands and MCP config with your own
 paths filled in. Safe to re-run; deletes nothing.
 
-![A conversation: you ask in plain language, the agent resolves the positions, runs, and reports what it cannot stand behind](docs/demo-chat.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/demo-chat-dark.gif">
+  <img alt="A conversation: the agent resolves the positions against the right chain, shows the long-residue constraint inside the integer program, runs, and then refuses to stand behind the pore number" src="docs/demo-chat.gif">
+</picture>
 
-*How it is actually used. The caveat in that last message is the output: the
-run found nothing, and the number it printed is labelled rather than left to be
-quoted. [More worked prompts](docs/index.html), with what each one produces.*
+*What using it looks like: resolve the positions, prove the constraint reached
+the solver, run, and read the refusal. Reconstructed rather than recorded, from
+real output of the shipped example. [More worked
+prompts](docs/index.html), with what each one produces.*
 
 By hand instead. The install step is not optional: rotamers come only from
 PyMOL's mutagenesis wizard, and `pymol-open-source` is conda-only, so

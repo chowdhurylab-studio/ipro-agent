@@ -6028,10 +6028,14 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
     assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     assert gif.read_bytes()[:6] in (b"GIF87a", b"GIF89a")
 
+    dark = REPO / "docs" / "demo-chat-dark.gif"
+    assert dark.is_file() and dark.stat().st_size / 1048576 < 2.0
     for doc, img, link in (("README.md", "docs/demo-chat.gif", "docs/index.html"),
                            ("docs/HANDOFF.md", "demo-chat.gif", "index.html")):
         text = (REPO / doc).read_text()
-        assert f"]({img})" in text, f"{doc} must show the conversation"
+        # a <picture> so GitHub serves the theme the reader is in
+        assert f'src="{img}"' in text, f"{doc} must show the conversation"
+        assert "prefers-color-scheme: dark" in text, f"{doc} needs both themes"
         assert f"]({link})" in text, f"{doc} must link the prompt page"
     assert "tour.gif" not in (REPO / "README.md").read_text()
 
@@ -6042,6 +6046,9 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
         capture_output=True, text=True, cwd=REPO).stdout.split()
     assert sorted(tracked) == ["docs/demo-chat.gif", "docs/demo-chat.png",
                                "docs/index.html"], tracked
+    assert subprocess.run(["git", "ls-files", "docs/demo-chat-dark.gif"],
+                          capture_output=True, text=True,
+                          cwd=REPO).stdout.strip() == "docs/demo-chat-dark.gif"
 
     # The page must carry the config block for each client family, or "how do
     # I add this" has no answer on the one page built to answer it.

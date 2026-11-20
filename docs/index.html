@@ -93,6 +93,8 @@
   .tool::before { content: "✓ "; color: var(--accent); }
   .resolved { font-family: var(--mono); font-size: 0.84rem; display: grid; gap: 0.15rem; margin-block: 0.4rem; color: var(--ink-soft); }
   .resolved b { color: var(--ink); font-weight: 600; }
+  .lp { font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; background: var(--surface-2); border-radius: 6px; padding: 0.7rem 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-soft); margin-block: 0.5rem; }
+  .bubble code { font-family: var(--mono); font-size: 0.86em; background: var(--surface-2); padding: 0.1em 0.3em; border-radius: 4px; }
   .flag { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--warn); padding: 0.6rem 0.8rem; border-radius: 0 6px 6px 0; font-size: 0.92rem; }
 
   .cards { display: grid; gap: 1.1rem; margin-block: 1rem 0; }
@@ -149,12 +151,27 @@
       </div>
       <div class="turn you">
         <span class="who">You</span>
-        <div class="bubble">Yes, go.</div>
+        <div class="bubble">Yes. And show me the long-residue constraint is really in the solver, not just in the prose.</div>
       </div>
       <div class="turn">
         <span class="who">Agent</span>
         <div class="bubble">
-          <div class="tools"><span class="tool">ipro_validate</span><span class="tool">ipro_run</span><span class="tool">ipro_status</span></div>
+          <div class="tools"><span class="tool">ipro_validate</span><span class="tool">ipro_milp</span></div>
+          <p>Spec is usable. Four positions, nine residues each: a design space of <b>6561 sequences</b>. Here is PoreDesigner's constraint 4 as the solver receives it, from <code>model.lp</code> lines 1415 to 1418:</p>
+          <div class="lp">\ (6) min_class: &gt;= 2 positions from {F,M,W,Y}
+ long_residue_fraction: +1 y_0_9 +1 y_0_10 +1 y_0_11 +1 y_0_12 +1 y_0_13
+     +1 y_1_12 … +1 y_2_11 … +1 y_3_20 +1 y_3_21 +1 y_3_22 &gt;= 2</div>
+          <p class="note">Half the designed positions must take a long residue, and it is a linear constraint the solver honours exactly rather than a preference. A simulated-annealing packer could not promise that.</p>
+        </div>
+      </div>
+      <div class="turn you">
+        <span class="who">You</span>
+        <div class="bubble">Good. Run it.</div>
+      </div>
+      <div class="turn">
+        <span class="who">Agent</span>
+        <div class="bubble">
+          <div class="tools"><span class="tool">ipro_run</span><span class="tool">ipro_status</span></div>
           <p>Run finished. Mode <b>fixed-backbone</b>, 8 iterations, 2 accepted, no mutation kept.</p>
           <div class="flag">The pore radius this spec reports is not a pore radius. Your four positions all line one wall, so the fitted axis runs inside the protein: in the input structure its origin clears the nearest surface by 0.30 Å, where a water needs 1.4 Å. The 1.53 Å bottleneck it prints would pass a sub-4 Å filter and mean nothing. The 25-position spec clears 2.80 Å and measures the wild-type eyelet at 8.07 Å.</div>
           <p class="note">Energies here are a screening scale, not kcal/mol comparable to the papers. Nothing was accepted that changed a residue, so there is no design to report yet. To get a real measurement, give <span style="font-family:var(--mono);font-size:.9em">goal_options.pore_axis</span> as two atoms spanning the channel, or add positions on the opposite wall.</p>
@@ -162,6 +179,7 @@
       </div>
     </div>
     <p class="note">The caveat is the output. A run that found nothing says so, and a number the tool cannot stand behind is labelled rather than printed bare.</p>
+    <p class="note" style="font-size:0.88rem">Reconstructed, not recorded: every value above is real, taken from runs of the shipped example (the residue identities, the 6561 sequences, the LP lines, the 0.30 Å clearance, the 1.53 Å reading), and the exchange around them was assembled to fit on one screen.</p>
   </section>
 
   <section>

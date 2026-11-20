@@ -13,7 +13,10 @@ https://github.com/chowdhurylab-studio/ipro-agent
 git clone https://github.com/chowdhurylab-studio/ipro-agent && cd ipro-agent && bash scripts/bootstrap.sh
 ```
 
-![A conversation with the agent](demo-chat.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="demo-chat-dark.gif">
+  <img alt="A conversation with the agent" src="demo-chat.gif">
+</picture>
 
 *What you are handing them. Point them at [the prompt page](index.html) rather
 than at a command line: the three commands exist, but nobody starts there.*
