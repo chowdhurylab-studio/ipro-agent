@@ -6216,3 +6216,113 @@ def test_regression_the_derived_window_works_with_several_assemblies():
         residues = [40, 41]
 
     assert loop._choose_window(ordered, _Elsewhere()), "must fall back, not empty"
+
+
+def test_regression_an_explicit_pore_axis_is_a_unit_vector():
+    """`goal_options.pore_axis` is the remedy every document names for a
+    fitted axis that misses the lumen, and giving it silently deleted the
+    entire pore measurement.
+
+    `_pore_axis` returned the raw difference between the two atoms on that
+    branch. `_measure_geometry` builds the default window by projecting onto
+    it, so with |direction| = 17.43 A for the repo's own example pair
+    (["A18:CA", "A119:CA"]) the window came out seventeen times too large and
+    landed hundreds of angstroms off the molecule: `pore_profile` returned zero
+    slices, `_measure_geometry` returned {}, `ReshapeChannel.filter_reject`
+    read None for `min_pore_diameter` and passed everything, and
+    `_axis_clearance` was never reached. PoreDesigner's published sub-4 A
+    filter was off, with no note, on exactly the input the docs recommend.
+
+    The fitted branch always returned a unit vector, which is why it never
+    showed up."""
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (skipped: needs the ompf example and PyMOL)")
+        return
+    from ipro_agent.loop import IPROLoop
+
+    spec = DesignSpec.load(ompf / "spec_smoke.yaml")
+    spec.goal_options["pore_axis"] = ["A18:CA", "A119:CA"]
+    spec.goal_options["pore_diameter_min"] = 2.0
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run",
+                    backend=resolve("builtin"))
+    cb = loop.build_combined()
+    _origin, direction, _flat = loop._pore_axis()
+    assert abs(float(np.linalg.norm(direction)) - 1.0) < 1e-9, direction
+
+    atoms = loop._design_atoms(
+        loop._rotamers_for(cb.tables, loop._native_choice(cb.tables)),
+        loop._assemblies[0].name,
+    )
+    geo = loop._measure_geometry(atoms)
+    assert geo, "an explicit axis must still produce a measurement"
+    assert "min_pore_diameter" in geo and geo["min_pore_diameter"] > 0, geo
+    # And the filter it feeds is live again.
+    from ipro_agent.goals import ScoreContext
+
+    assert loop.goal.filter_reject(
+        ScoreContext(geometry={"min_pore_diameter": 0.4})
+    ), "a blocked pore must be rejected when a floor is set"
+
+    # Two atoms at one point have no direction, and that is an error.
+    spec.goal_options["pore_axis"] = ["A18:CA", "A18:CA"]
+    loop2 = IPROLoop(spec, Path(tempfile.mkdtemp()) / "run2",
+                     backend=resolve("builtin"))
+    loop2.prepare()
+    try:
+        loop2._pore_axis()
+    except ValueError as exc:
+        assert "same place" in str(exc), exc
+    else:
+        raise AssertionError("a zero-length axis must be refused")
+
+
+def test_regression_the_delivered_structure_is_the_one_that_was_scored():
+    """`_write_design` rebuilt the output through PyMOL from the unrelaxed
+    input plus the chosen rotamers, so the file the user opens was not the
+    structure any reported number belongs to. Measured on the shipped smoke
+    spec: `best/design.json` reported `min_pore_radius` 1.999994 beside a
+    `design.pdb` that measures 0.760, and in `full` mode the relaxed structure
+    that produced every reported energy existed only under `logs/relax`.
+
+    The scored atoms are now written directly. They already carry the chosen
+    rotamer at each design position, which is what made them the candidate, so
+    the guarantee the PyMOL rebuild existed for is met by construction."""
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (skipped: needs the ompf example and PyMOL)")
+        return
+    import json as _json
+
+    from ipro_agent.loop import IPROLoop, _atoms_of
+    from ipro_agent.structure import Structure
+
+    run = Path(tempfile.mkdtemp()) / "run"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "run", str(ompf / "spec_smoke.yaml"),
+         "--run-dir", str(run), "--iterations", "2", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=1800,
+    )
+    assert p.returncode == 0, p.stderr[-400:]
+    reported = _json.loads((run / "best" / "design.json").read_text())
+    radius = (reported.get("components") or {}).get("min_pore_radius")
+    design = run / "best" / "design.pdb"
+    if radius is None or not design.exists():
+        print("    (partial: no geometry or no structure written)")
+        return
+
+    spec = DesignSpec.load(ompf / "spec_smoke.yaml")
+    loop = IPROLoop(spec, Path(tempfile.mkdtemp()) / "probe",
+                    backend=resolve("builtin"))
+    loop.prepare()
+    measured = loop._measure_geometry(
+        _atoms_of(Structure.load(design), set())
+    ).get("min_pore_radius")
+    assert measured is not None, "the delivered file must be measurable"
+    assert abs(measured - radius) < 0.05, (
+        f"design.json reports {radius} and design.pdb measures {measured}: "
+        f"the delivered structure is not the one that was scored"
+    )
+
+    src = (REPO / "ipro_agent" / "loop.py").read_text()
+    assert "self._scored_atoms[a.name] = design_all" in src

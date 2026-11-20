@@ -304,6 +304,8 @@ class IPROLoop:
         #: so the run cannot report "3 of 2 iteration(s)".
         self._baseline_relaxed = 0
         self._moved_this_iteration = False
+        #: Per assembly, the atoms the last scoring actually measured.
+        self._scored_atoms: dict[str, AtomSet] = {}
         #: Latched once, before the baseline is scored: either the whole run
         #: is on the relaxed basis or none of it is. See _relaxed_design_atoms.
         self._relax_disabled = False
@@ -531,6 +533,14 @@ class IPROLoop:
                 )
                 if relaxed is not None:
                     design_all = relaxed
+            # The atoms that are about to be measured. _write_design emits
+            # THESE, because the delivered structure must be the one the
+            # reported numbers belong to: rebuilt through PyMOL from the
+            # unrelaxed input, the PDB beside best/design.json measured a
+            # 1.521 A bottleneck where the JSON said 1.999994, and the
+            # relaxed structure that produced every reported energy existed
+            # only under logs/relax.
+            self._scored_atoms[a.name] = design_all
             ctx = ScoreContext()
             partners = self.spec.assembly_molecules(a)
             for m in partners:
@@ -635,7 +645,25 @@ class IPROLoop:
                     raise ValueError(f"pore_axis: {ref} is not in the design molecule")
                 pts.append(_np.asarray(match[0].coord, dtype=float))
             direction = pts[1] - pts[0]
-            return (pts[0] + pts[1]) / 2.0, direction, 0.0
+            length = float(_np.linalg.norm(direction))
+            if length < 1e-9:
+                raise ValueError(
+                    "goal_options.pore_axis names two atoms at the same place, "
+                    "so there is no direction to measure along"
+                )
+            # NORMALISED. Returned raw, this silently deleted the entire pore
+            # measurement on exactly the input the docs recommend as the
+            # remedy for a bad fitted axis. `_measure_geometry` builds the
+            # default window by projecting onto this vector, so with
+            # |direction| = 17.43 A for the repo's own example pair
+            # (["A18:CA", "A119:CA"]) the window came out 17x too large and
+            # landed hundreds of angstroms off the molecule: pore_profile
+            # returned zero slices, _measure_geometry returned {}, and
+            # PoreDesigner's published sub-4 A filter read None and passed
+            # everything. Silently -- the only note path is the exception
+            # handler around this function, and nothing raised. The fitted
+            # branch below returns a unit vector, which is why it never showed.
+            return (pts[0] + pts[1]) / 2.0, direction / length, 0.0
 
         cas = []
         for p in spec.positions:
@@ -975,6 +1003,29 @@ class IPROLoop:
         work = self.run.path / "logs" / "structure_build"
         work.mkdir(parents=True, exist_ok=True)
         design_only = work / "design_only.pdb"
+
+        # Prefer the atoms that were scored. They already carry the chosen
+        # rotamer at each design position -- that is what made them the
+        # candidate -- and, in `full` mode, the relaxation that produced every
+        # reported energy. Rebuilding through PyMOL from the unrelaxed input
+        # instead delivered a structure that was not the one measured:
+        # best/design.json said min_pore_radius 1.999994 beside a design.pdb
+        # that measures 0.760.
+        scored = self._scored_atoms.get(assembly)
+        if scored is not None and len(scored):
+            try:
+                write_atomset_pdb(scored, design_only)
+                built = Structure.load(design_only)
+                return self._complex_from(path, built, assembly, header)
+            except Exception as exc:
+                if "scored_write" not in self._once:
+                    self._once.add("scored_write")
+                    self.notes.append(
+                        f"could not write the scored coordinates directly "
+                        f"({type(exc).__name__}: {exc}); falling back to "
+                        f"rebuilding the design through PyMOL, which may not be "
+                        f"the structure the reported energies belong to"
+                    )
         try:
             from .mutate import apply_design
 
@@ -1007,6 +1058,14 @@ class IPROLoop:
             return None
 
         built = Structure.load(design_only)
+        return self._complex_from(path, built, assembly, header)
+
+    def _complex_from(self, path, built, assembly: str, header):
+        """Write ``built`` plus this assembly's partners, at their poses."""
+        from pathlib import Path as _Path
+
+        from .output import write_complex
+
         a = next(x for x in self._assemblies if x.name == assembly)
         partners = {
             m.name: self._partners[m.name]
