@@ -6877,3 +6877,53 @@ def test_server_json_matches_the_package_it_points_at():
     assert len(spec.get("title", "")) <= 100, len(spec.get("title", ""))
 
     assert (REPO / "docs" / "RELEASING.md").is_file()
+
+
+def test_regression_the_readme_quickstart_matches_what_pip_alone_can_do():
+    """The README now tells a stranger that `pip install ipro-agent` plus one
+    config line is enough to start, and that on a bare install the agent can
+    still read a structure and check a spec while scoring and the integer
+    program refuse.
+
+    That is a claim about behaviour on a machine this suite does not run on,
+    so it is measured rather than asserted: PyMOL discovery is forced to find
+    nothing, and each subcommand is run. If someone later moves a PyMOL call
+    into `validate`, or makes `milp` fail with a different message, the README
+    becomes a lie and this fails first."""
+    readme = (REPO / "README.md").read_text()
+    assert "pip install ipro-agent" in readme
+    assert '"command": "ipro-agent-mcp"' in readme
+    assert "pymol-open-source" in readme
+
+    # A machine with no PyMOL anywhere: no importable module, no binary on the
+    # path, no conda environment to discover.
+    blind = (
+        "import sys, shutil\n"
+        "import ipro_agent.rotamers as rot, ipro_agent.doctor as doc\n"
+        "rot.find_pymol_python = lambda: None\n"
+        "doc.find_conda_envs = lambda: []\n"
+        "_w = shutil.which\n"
+        "shutil.which = lambda n, *a, **k: None if n == 'pymol' else _w(n, *a, **k)\n"
+        "from ipro_agent.cli import main\n"
+        "sys.exit(main(sys.argv[1:]))\n"
+    )
+    spec = str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml")
+    pdb = str(REPO / "examples" / "ompf_pore" / "2omf_A.pdb")
+
+    def run(*argv):
+        return subprocess.run([sys.executable, "-c", blind, *argv],
+                              capture_output=True, text=True, cwd=REPO)
+
+    for argv in (("validate", spec, "--json"),
+                 ("inspect", pdb, "--json"),
+                 ("goals", "--json")):
+        p = run(*argv)
+        assert p.returncode == 0, f"{argv[0]} must work without PyMOL: {p.stderr[:300]}"
+        json.loads(p.stdout)
+
+    for sub in ("score", "milp"):
+        p = run(sub, spec, "--json")
+        assert p.returncode != 0, f"{sub} cannot succeed without PyMOL"
+        said = (p.stdout + p.stderr).lower()
+        assert "no pymol available" in said, f"{sub} must say why: {said[:300]}"
+        assert "pymol-open-source" in said, f"{sub} must say how to fix it"

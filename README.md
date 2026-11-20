@@ -32,7 +32,35 @@ ensemble of the best designs.
 
 ## Quick start
 
-One command, if you just want it working:
+**Two lines, if you want to drive it from an agent.** Install it, then point
+your MCP client at it:
+
+```bash
+pip install ipro-agent
+```
+
+```json
+{"mcpServers": {"ipro-agent": {"command": "ipro-agent-mcp"}}}
+```
+
+Then ask your agent to run `ipro_doctor`, which reports what resolved. On a
+bare pip install it reports PyMOL missing: `ipro_validate`,
+`ipro_inspect_structure` and `ipro_goals` still work, so the agent can read a
+structure and check a spec, while `ipro_score` and `ipro_milp` refuse in those
+words rather than guessing. PyMOL is the one dependency pip cannot supply, so
+for a design install it from conda-forge and point `command` at that
+environment's `ipro-agent-mcp`:
+
+```bash
+conda create -n ipro-agent -c conda-forge pymol-open-source python=3.12
+conda activate ipro-agent
+pip install ipro-agent
+```
+
+Set `IPRO_REPO` to a checkout as well if you want the server to serve its own
+documents rather than tell the agent where to fetch them.
+
+**One command, if you want the example and the documents too:**
 
 ```bash
 bash scripts/bootstrap.sh
