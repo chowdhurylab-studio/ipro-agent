@@ -140,7 +140,12 @@ jobs:
           assert set(replies) == {1, 2, 3}, sorted(replies)
 
           tools = [t["name"] for t in replies[2]["result"]["tools"]]
-          assert len(tools) == 11, tools
+          # Membership, not a count: this job exists to prove the server
+          # starts and serves its tools with nothing installed, and an exact
+          # count turns adding a tool into a CI failure.
+          assert {"ipro_doctor", "ipro_setup", "ipro_run", "ipro_status",
+                  "ipro_result"} <= set(tools), tools
+          assert len(tools) == len(set(tools)), tools
           doctor = json.loads(replies[3]["result"]["content"][0]["text"])
           missing = set(doctor.get("missing_required") or [])
           assert {"numpy", "Bio", "yaml"} <= missing, doctor
