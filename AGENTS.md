@@ -1,24 +1,24 @@
-# ipro-agent — router
+# ipro-agent: router
 
 An agent opening this repo normally loads the skill by itself, from its
-`description` in `.claude/skills/ipro-agent/SKILL.md`. This file is the fallback for tools that read
-`AGENTS.md` instead, and the place the house rules live.
+`description` in `.claude/skills/ipro-agent/SKILL.md`. This file is the fallback
+for tools that read `AGENTS.md` instead, and the place the house rules live.
 
 This repo is one tool: a generalized, agent-drivable implementation of IPRO
 (Iterative Protein Redesign and Optimization).
 
-- **Redesigning a protein toward a stated goal** — changing specificity,
-  reshaping a channel or pore, improving interface affinity, tuning catalytic
-  activity, inserting or deleting residues, or producing a mutant sequence from
-  a structure: **read `.claude/skills/ipro-agent/SKILL.md` first.** It covers choosing the goal, writing
-  the spec, encoding the user's position/residue constraints into the MILP,
-  running the loop, and the degraded modes that change how a result must be
-  reported.
+- **Redesigning a protein toward a stated goal**, whether that is changing
+  specificity, reshaping a channel or pore, improving interface affinity,
+  tuning catalytic activity, inserting or deleting residues, or producing a
+  mutant sequence from a structure: read `.claude/skills/ipro-agent/SKILL.md`
+  first. It covers choosing the goal, writing the spec, encoding the user's
+  position/residue constraints into the MILP, running the loop, and the
+  degraded modes that change how a result must be reported.
 
 - **Before anything else**, run `python3 scripts/doctor.py --require pymol`
   (equivalently `python3 -m ipro_agent.doctor --require pymol`).
-  PyMOL has no fallback — rotamers come only from its mutagenesis wizard — so
-  without it `run` cannot produce a design, and `--require pymol` makes that a
+  PyMOL has no fallback, since rotamers come only from its mutagenesis wizard,
+  so without it `run` cannot produce a design; `--require pymol` makes that a
   non-zero exit instead of something to discover mid-run. The protocol also
   degrades in documented ways when PyRosetta, AutoDock Vina or a MILP solver is
   absent, and the mode must be stated when reporting a design.
@@ -32,12 +32,12 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
 
 - **Handing this to someone else**: `docs/HANDOFF.md`.
 
-- **Worked requests, end to end**: `docs/EXAMPLE_PROMPTS.md` -- five real
+- **Worked requests, end to end**: `docs/EXAMPLE_PROMPTS.md`, five real
   prompts with what each produces and what must not be concluded from it.
 
 - **Driving this from another agent, without cloning it**: there is an MCP
   server (`python3 -m ipro_agent.mcp_server`, or the `ipro-agent-mcp` console
-  script) exposing eleven typed tools. See README.md, "Use it from another agent
+  script) exposing fifteen typed tools. See README.md, "Use it from another agent
   (MCP)". If you are reading this file you have the repo, so prefer the skill:
   it carries the degraded modes and the reporting rules that tool schemas
   cannot.
@@ -57,9 +57,9 @@ This repo is one tool: a generalized, agent-drivable implementation of IPRO
   adding positions each change the scientific question: report the change, or
   ask first.
 - Some targets and goals need a human decision before anything runs, not after
-  the result arrives — see README.md, "Responsible use".
+  the result arrives; see README.md, "Responsible use".
 - `iterations.jsonl` grows without limit; read progress with
   `python3 -m ipro_agent status <run-dir>`, never by loading the file.
 - This is an independent reimplementation: no upstream IPRO code is copied.
-  Cite the original papers for the
-  method, this repo only for the implementation.
+  Cite the original papers for the method, and this repo only for the
+  implementation.

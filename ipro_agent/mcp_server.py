@@ -36,9 +36,12 @@ requirement. Protocol: MCP `tools/list` + `tools/call`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -153,6 +156,66 @@ def _resolve_spec(spec: str, keep: list[Path]) -> str:
     return str(tmp)
 
 
+@contextlib.contextmanager
+def _spec_scratch():
+    """Hold the temp files an inline spec needs, and delete them afterwards.
+
+    Inline specs were written to ``tempfile.mkdtemp()`` and never removed. The
+    list they were collected into was called ``keep`` and nothing ever read it.
+    Measured by driving the server from the official MCP Python SDK under a GUI
+    client's environment, where there is no ``TMPDIR`` and ``gettempdir()`` is
+    therefore the shared ``/tmp``: five ``ipro_validate`` calls with an inline
+    spec took ``/tmp/ipro_mcp_spec_*`` from 7 directories to 12, one per call,
+    each holding a 0o644 ``spec.yaml``. All five of those calls *failed*, which
+    is the part that matters -- an agent iterating on a spec it cannot get right
+    leaks fastest, and the spec's text is the user's unpublished design problem
+    sitting in a world-readable directory.
+
+    Only the synchronous tools can use this: ``ipro_run``'s child reads the
+    spec after the call returns, so it moves the file into the run directory
+    instead (see ``tool_run``).
+    """
+    keep: list[Path] = []
+    try:
+        yield keep
+    finally:
+        for path in keep:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+
+def _client_path(value: Any, what: str, must_exist: bool = False) -> str:
+    """Resolve a path the *client* gave against the *client's* directory.
+
+    A relative path meant two different things depending on which tool received
+    it. ``_resolve_spec`` resolved against ``Path.cwd()`` (the server's working
+    directory, which an MCP config sets to the client's checkout), while
+    ``tool_inspect`` and ``tool_fetch`` handed the string straight to ``_cli``,
+    whose child runs with ``cwd=REPO_ROOT``. Measured with the server started
+    from ``cwd=/``, as Claude Desktop starts one when its config omits ``cwd``:
+    ``ipro_validate {"spec": "examples/ompf_pore/spec_smoke.yaml"}`` refused
+    with "looked for /examples/ompf_pore/spec_smoke.yaml", while
+    ``ipro_inspect_structure {"structure": "examples/ompf_pore/2omf_A.pdb"}``
+    *succeeded* and reported 340 residues -- answering about a file inside this
+    repository that the client had never named. A wrong structure that reports
+    cleanly is the failure mode section 7 is about: every position, native
+    residue and energy downstream of it belongs to the wrong molecule.
+    """
+    text = str(value).strip()
+    if not text:
+        raise ToolError(f"`{what}` is empty")
+    p = Path(text).expanduser()
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
+    if must_exist and not p.exists():
+        raise ToolError(
+            f"{what} not found: {text}\n"
+            f"(looked for {p}; the server's working directory is {Path.cwd()})\n"
+            "Pass an absolute path, or set the server's `cwd` to the directory "
+            "those relative paths belong to."
+        )
+    return str(p)
+
+
 def _writable_dir(preferred: "Path | None" = None) -> Path:
     """A directory this process may actually write to.
 
@@ -184,6 +247,16 @@ def _writable_dir(preferred: "Path | None" = None) -> Path:
 
 class ToolError(RuntimeError):
     """A tool failed in a way the agent should read, not a crash."""
+
+
+def _given(value: Any) -> bool:
+    """Was this argument actually supplied?
+
+    ``None`` is not a value: a client that sends ``{"structure": null}`` has
+    given nothing, and ``str(None)`` is the four-character string "None",
+    which every truthiness test in sight would accept.
+    """
+    return value is not None and str(value).strip() != ""
 
 
 # ---------------------------------------------------------------------------
@@ -320,85 +393,73 @@ def tool_goals(_: dict) -> dict:
 
 
 def tool_validate(args: dict) -> dict:
-    keep: list[Path] = []
-    return _cli(["validate", _resolve_spec(args["spec"], keep)])
+    with _spec_scratch() as keep:
+        return _cli(["validate", _resolve_spec(args["spec"], keep)])
 
 
 def tool_positions(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["positions", _resolve_spec(args["spec"], keep)]
-    if args.get("near"):
-        cmd += ["--near", str(args["near"])]
-    if args.get("cutoff") is not None:
-        cmd += ["--cutoff", str(args["cutoff"])]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["positions", _resolve_spec(args["spec"], keep)]
+        if args.get("near"):
+            cmd += ["--near", str(args["near"])]
+        if args.get("cutoff") is not None:
+            cmd += ["--cutoff", str(args["cutoff"])]
+        return _cli(cmd)
 
 
 def tool_score(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["score", _resolve_spec(args["spec"], keep)]
-    # `score` writes a small run directory for its log. Defaulted under
-    # REPO_ROOT, which is site-packages in a pip-installed copy, that wrote
-    # into the installed package tree -- and failed outright on a read-only
-    # install, with a PermissionError traceback chopped mid-line.
-    cmd += ["--run-dir", str(_writable_dir(args.get("run_dir")) / "score")]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["score", _resolve_spec(args["spec"], keep)]
+        # `score` writes a small run directory for its log. Defaulted under
+        # REPO_ROOT, which is site-packages in a pip-installed copy, that wrote
+        # into the installed package tree -- and failed outright on a read-only
+        # install, with a PermissionError traceback chopped mid-line.
+        cmd += ["--run-dir", str(_writable_dir(args.get("run_dir")) / "score")]
+        return _cli(cmd)
 
 
 def tool_milp(args: dict) -> dict:
-    keep: list[Path] = []
-    cmd = ["milp", _resolve_spec(args["spec"], keep)]
-    out = args.get("out")
-    if out:
-        # Absolute, because the child runs with cwd=REPO_ROOT: a relative
-        # `out` landed inside the installed package and the reported path was
-        # relative, so the agent could not find the file it had just asked for.
-        q = Path(str(out)).expanduser()
-        if not q.is_absolute():
-            q = _writable_dir() / q.name
-        cmd += ["-o", str(q)]
-    return _cli(cmd)
+    with _spec_scratch() as keep:
+        cmd = ["milp", _resolve_spec(args["spec"], keep)]
+        out = args.get("out")
+        if out:
+            # Absolute, because the child runs with cwd=REPO_ROOT: a relative
+            # `out` landed inside the installed package and the reported path
+            # was relative, so the agent could not find the file it had just
+            # asked for. An output rather than an input, so it goes to a
+            # directory this process is known to be able to write to, not to
+            # wherever the client happens to be standing.
+            q = Path(str(out)).expanduser()
+            if not q.is_absolute():
+                q = _writable_dir() / q.name
+            cmd += ["-o", str(q)]
+        return _cli(cmd)
 
 
 def tool_run(args: dict) -> dict:
-    """Launch a design run detached and return its id immediately."""
-    rep = _doctor()
-    if not rep.get("can_run"):
-        raise ToolError(
-            "required packages are missing: "
-            f"{', '.join(rep.get('missing_required', [])) or 'unknown'}. "
-            "Install with `conda env create -f environment.yml`."
-        )
-    if not rep.get("can_design"):
-        # Refused rather than launched. A run without PyMOL dies at the first
-        # rotamer harvest, minutes in, having written a run directory that
-        # looks like a started job.
-        raise ToolError(
-            "cannot design: PyMOL did not resolve, and it has no fallback -- "
-            "rotamers come only from its mutagenesis wizard. `conda env create "
-            "-f environment.yml` installs it. Use ipro_score or ipro_validate "
-            "to work without it."
-        )
+    """Launch a design run detached and return its id immediately.
 
-    keep: list[Path] = []
-    spec = _resolve_spec(args["spec"], keep)
-    run_dir = Path(args.get("run_dir") or (_writable_dir() / "runs" / _run_id(spec)))
-    run_dir = run_dir.expanduser()
-    if not run_dir.is_absolute():
-        run_dir = (Path.cwd() / run_dir).resolve()
-    if run_dir.exists() and any(run_dir.iterdir()):
-        raise ToolError(
-            f"run directory is not empty: {run_dir}\n"
-            "Pass a fresh run_dir, or poll the existing one with ipro_status."
-        )
-    run_dir.mkdir(parents=True, exist_ok=True)
+    The order of the checks is deliberate, and it is not the order this had.
+    ``_doctor()`` used to be the very first act, so on a machine without PyMOL
+    the can_design gate fired ahead of both the argument coercion and the
+    non-empty-run_dir check: a typo in ``iterations`` was answered with
+    "cannot design: PyMOL did not resolve", which is true and useless. Two of
+    the three failures in this repo's first CI run were exactly that. It also
+    spent a one-to-five-second doctor probe before telling a caller their
+    argument was malformed.
 
-    cmd = [sys.executable, "-m", "ipro_agent", "run", spec, "--run-dir", str(run_dir)]
-    # Coerced, not stringified. The schema says `iterations` is an integer, but
-    # nothing enforced it: a JSON float -- which a model will happily emit for
-    # an integer field -- became `--iterations 8.0`, argparse exited 2 within
-    # milliseconds, and the reply was still `launched: true` with a pid that
-    # was already gone. ipro_status then answered "pending" forever.
+    So: coerce the arguments, resolve the spec, work out the run directory and
+    refuse a used one -- all free -- and only then probe the environment.
+    Nothing is created on disk until every refusal has had its chance.
+    """
+    # 1. Arguments, which cost nothing to check and are what a model gets
+    #    wrong. Coerced, not stringified: the schema says `iterations` is an
+    #    integer, but nothing enforced it, so a JSON float -- which a model
+    #    will happily emit for an integer field -- became `--iterations 8.0`,
+    #    argparse exited 2 within milliseconds, and the reply was still
+    #    `launched: true` with a pid that was already gone. ipro_status then
+    #    answered "pending" for ever.
+    flags: list[str] = []
     for flag, key, cast in (("--iterations", "iterations", int),
                             ("--seed", "seed", int),
                             ("--max-minutes", "max_minutes", float)):
@@ -416,7 +477,67 @@ def tool_run(args: dict) -> dict:
                 f"`{key}` must be a {'whole number' if cast is int else 'number'}; "
                 f"got {type(raw).__name__} {raw!r}. Nothing was launched."
             )
-        cmd += [flag, str(value)]
+        flags += [flag, str(value)]
+
+    # 2. The spec, and the run directory it implies.
+    keep: list[Path] = []
+    spec = _resolve_spec(args["spec"], keep)
+    try:
+        run_dir = Path(args.get("run_dir") or (_writable_dir() / "runs" / _run_id(spec)))
+        run_dir = run_dir.expanduser()
+        if not run_dir.is_absolute():
+            run_dir = (Path.cwd() / run_dir).resolve()
+        if run_dir.exists() and any(run_dir.iterdir()):
+            raise ToolError(
+                f"run directory is not empty: {run_dir}\n"
+                "Pass a fresh run_dir, or poll the existing one with ipro_status."
+            )
+
+        # 3. Only now, the environment.
+        rep = _doctor()
+        if not rep.get("can_run"):
+            raise ToolError(
+                "required packages are missing: "
+                f"{', '.join(rep.get('missing_required', [])) or 'unknown'}. "
+                "Install with `conda env create -f environment.yml`."
+            )
+        if not rep.get("can_design"):
+            # Refused rather than launched. A run without PyMOL dies at the
+            # first rotamer harvest, minutes in, having written a run directory
+            # that looks like a started job.
+            raise ToolError(
+                "cannot design: PyMOL did not resolve, and it has no fallback "
+                "-- rotamers come only from its mutagenesis wizard. `conda env "
+                "create -f environment.yml` installs it. Use ipro_validate or "
+                "ipro_positions to work without it."
+            )
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        # A refusal here -- a bad argument, a used run directory, an
+        # unwritable one, a missing backend -- must not leave the inline spec
+        # behind in /tmp either.
+        for path in keep:
+            shutil.rmtree(path.parent, ignore_errors=True)
+        raise
+
+    # An inline spec moves into the run directory rather than staying in a temp
+    # directory nobody owns. The child outlives this call, so the file cannot
+    # simply be deleted on the way out as it is for the synchronous tools
+    # (`_spec_scratch`); keeping it beside the run it produced also means the
+    # run records the spec that made it, which an inline spec otherwise leaves
+    # nowhere. `run` only refuses a directory that already holds state.json,
+    # iterations.jsonl, best or ensemble, so a spec.yaml here is not mistaken
+    # for a previous run -- launch.log has been written here all along.
+    if keep:
+        landed = run_dir / "spec.yaml"
+        shutil.move(str(keep[0]), str(landed))
+        shutil.rmtree(keep[0].parent, ignore_errors=True)
+        keep.clear()
+        spec = str(landed)
+
+    cmd = [sys.executable, "-m", "ipro_agent", "run", spec,
+           "--run-dir", str(run_dir)] + flags
 
     log = run_dir / "launch.log"
     with open(log, "wb") as fh:
@@ -481,7 +602,8 @@ def _run_id(spec: str) -> str:
     return f"{stem}_{n:03d}"
 
 
-def tool_status(args: dict) -> dict:
+def _resolve_run(args: dict) -> Path:
+    """The run directory a tool was pointed at, or a readable refusal."""
     run = args.get("run_dir") or args.get("run_id")
     if not run:
         raise ToolError("give run_dir (a path) or run_id (a directory name)")
@@ -511,6 +633,11 @@ def tool_status(args: dict) -> dict:
             f"ipro.log. Check the path -- a run that never started leaves a "
             f"launch.log, and ipro_run reports that case itself now."
         )
+    return p
+
+
+def tool_status(args: dict) -> dict:
+    p = _resolve_run(args)
     rep = _cli(["status", str(p)], timeout=120)
     # The house rule, restated where an agent will see it. `mode` and `notes`
     # come from status itself (state.RunDir.as_json).
@@ -537,7 +664,7 @@ def tool_inspect(args: dict) -> dict:
     agent guesses, and a guess here designs a different residue without
     anything noticing (docs/DESIGN.md section 7b, defect 14).
     """
-    cmd = ["inspect", str(args["structure"])]
+    cmd = ["inspect", _client_path(args["structure"], "structure", must_exist=True)]
     for ch in args.get("chains") or []:
         cmd += ["--chain", str(ch)]
     if args.get("positions"):
@@ -557,7 +684,12 @@ def tool_fetch(args: dict) -> dict:
     """
     cmd = ["fetch", str(args["pdb_id"])]
     if args.get("out"):
-        cmd += ["-o", str(args["out"])]
+        # The same one policy as `structure`: where the client is standing,
+        # not where this package happens to live. A relative `out` used to be
+        # resolved by the child against REPO_ROOT, so a download the agent
+        # asked for "here" landed in the repository (or in site-packages) and
+        # the path it was told to use next did not exist.
+        cmd += ["-o", _client_path(args["out"], "out")]
     for ch in args.get("chains") or []:
         cmd += ["--chain", str(ch)]
     if args.get("force"):
@@ -692,9 +824,16 @@ def _mcp_config_for_new_env(manager: str) -> dict:
                      candidates[0])
     return {
         "note": (
-            "Put this in the client's MCP config and restart it. `cwd` matters: "
-            "it is how the server finds the documents it serves as resources "
-            "(ipro://skill and the rest), which do not ship inside the package."
+            "Put this in the client's MCP config and restart it. `cwd` matters "
+            "for two reasons, both measured: in a pip-installed copy it is how "
+            "the server finds the documents it serves as resources (ipro://skill "
+            "and the rest), which do not ship inside the package -- started "
+            "from elsewhere, an installed copy lists all 8 and serves none; and "
+            "a relative path in any later call (`spec`, `structure`) is "
+            "resolved against it. Run from a clone rather than an install, "
+            "`-m ipro_agent.mcp_server` additionally needs `cwd` to be that "
+            "clone, or the module cannot be imported at all and the client "
+            "sees only a server that disconnected."
         ),
         "python": str(predicted),
         "config": {
@@ -714,6 +853,216 @@ def _which(name: str) -> str | None:
     import shutil
 
     return shutil.which(name)
+
+
+def tool_result(args: dict) -> dict:
+    """The design itself: what changed, and the coordinates it changed into.
+
+    ``ipro_status`` reports progress; this reports the product. An MCP client
+    has no shell, so without it an agent can launch a design, quote its score,
+    and never be able to hand over the structure it just made.
+    """
+    run = _resolve_run(args)
+    best = run / "best" / "design.json"
+    if not best.exists():
+        raise ToolError(
+            f"{run} has no best/design.json yet. Poll ipro_status: a run that "
+            f"has not finished has not written one, and a run that failed "
+            f"reports its error there."
+        )
+    try:
+        design = json.loads(best.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"could not read {best}: {exc}")
+
+    out: dict = {
+        "run": str(run),
+        "mode": design.get("mode"),
+        "goal": design.get("goal"),
+        "goal_statement": design.get("goal_statement"),
+        "mutations": design.get("mutations", {}),
+        "mutation_string": design.get("mutation_string"),
+        "sequence": design.get("sequence"),
+        "start_score": design.get("start_score"),
+        "best_score": design.get("best_score"),
+        "components": design.get("components", {}),
+        "notes": design.get("notes", []),
+        "backend": design.get("backend"),
+    }
+    if not out["mutations"]:
+        out["designed_nothing"] = True
+        out["warning"] = (
+            "No mutation was kept, so the sequence and the structure here are "
+            "the STARTING POINT, not a redesign. Report it as 'the search "
+            "found nothing'."
+        )
+
+    ens = run / "ensemble" / "ensemble.json"
+    if ens.exists():
+        try:
+            rows = json.loads(ens.read_text(encoding="utf-8"))
+            out["ensemble"] = [
+                {k: r.get(k) for k in
+                 ("iteration", "score", "mutations", "accepted", "proven_optimal")}
+                for r in rows[:25]
+            ]
+            out["ensemble_total"] = len(rows)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    structures = sorted((run / "best").glob("*.pdb"))
+    out["structure_files"] = [str(s) for s in structures]
+    if args.get("include_structure") and structures:
+        # ~200 KB for a 340-residue chain, so it is opt-in and capped.
+        text = structures[0].read_text(encoding="utf-8", errors="replace")
+        limit = 400_000
+        out["structure_name"] = structures[0].name
+        out["structure_pdb"] = text[:limit]
+        if len(text) > limit:
+            out["structure_truncated"] = (
+                f"{len(text)} characters, truncated to {limit}. The whole file "
+                f"is at structure_files[0]."
+            )
+    return out
+
+
+def tool_iterations(args: dict) -> dict:
+    """The per-iteration record, which the reporting rule asks an agent to read.
+
+    ``ipro_status`` tells the caller to "read the per-iteration reasons", and
+    until now nothing could: ``iterations.jsonl`` is on disk, the house rules
+    forbid loading it wholesale because it grows without limit, and an MCP
+    client has no shell. This returns a bounded tail of it.
+    """
+    run = _resolve_run(args)
+    path = run / "iterations.jsonl"
+    if not path.exists():
+        raise ToolError(f"{run} has no iterations.jsonl yet")
+    try:
+        limit = int(args.get("limit", 20))
+    except (TypeError, ValueError):
+        raise ToolError("`limit` must be a whole number")
+    limit = max(1, min(limit, 200))
+    only_accepted = bool(args.get("only_accepted"))
+
+    rows: list[dict] = []
+    total = 0
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if only_accepted and not rec.get("accepted"):
+                continue
+            rows.append({
+                "iteration": rec.get("iteration"),
+                "score": rec.get("score"),
+                "accepted": rec.get("accepted"),
+                "reason": rec.get("reason"),
+                "mutations": rec.get("mutations"),
+            })
+            if len(rows) > limit:
+                rows.pop(0)
+
+    reasons: dict[str, int] = {}
+    for r in rows:
+        key = str(r.get("reason") or "").split("(")[0].strip() or "unknown"
+        reasons[key] = reasons.get(key, 0) + 1
+    return {
+        "run": str(run),
+        "iterations_total": total,
+        "returned": len(rows),
+        "only_accepted": only_accepted,
+        "reason_counts": reasons,
+        "iterations": rows,
+        "note": (
+            "The tail of the trajectory, newest last. One reason repeating for "
+            "every iteration is itself the finding: a goal filter rejecting "
+            "everything usually means the filter window or the design "
+            "positions need changing, not more iterations."
+        ),
+    }
+
+
+def tool_runs(_args: dict) -> dict:
+    """Every run this server can see, for when an id has been lost."""
+    seen: list[dict] = []
+    roots = [_writable_dir() / "runs", REPO_ROOT / "runs", Path.cwd() / "runs"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or any(x["run_dir"] == str(d) for x in seen):
+                continue
+            row = {"run_dir": str(d), "status": "unknown"}
+            state = d / "state.json"
+            if state.exists():
+                try:
+                    st = json.loads(state.read_text(encoding="utf-8"))
+                    row["status"] = st.get("status")
+                    row["mode"] = st.get("mode")
+                    row["best_score"] = st.get("best_score")
+                    row["updated"] = st.get("updated")
+                except (OSError, json.JSONDecodeError):
+                    row["status"] = "unreadable"
+            elif (d / "launch.log").exists():
+                row["status"] = "never started (see launch.log)"
+            seen.append(row)
+    return {
+        "runs": seen[:100],
+        "searched": [str(r) for r in roots],
+        "note": "Poll one with ipro_status; read its design with ipro_result.",
+    }
+
+
+def tool_cancel(args: dict) -> dict:
+    """Stop a run this server started. Nothing else is touched."""
+    run = _resolve_run(args)
+    try:
+        st = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"cannot read the run's state: {exc}")
+    pid, host = st.get("pid"), st.get("host")
+    if st.get("status") != "running":
+        return {
+            "run": str(run), "stopped": False, "status": st.get("status"),
+            "message": f"not running (status {st.get('status')!r})",
+        }
+    if not isinstance(pid, int) or pid <= 0:
+        raise ToolError(
+            "this run recorded no pid, so it cannot be stopped from here. It "
+            "is an older run, or one started another way."
+        )
+    import platform
+
+    if host and host != platform.node():
+        raise ToolError(
+            f"this run was started on {host!r} and this is "
+            f"{platform.node()!r}; a pid means nothing across machines."
+        )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {
+            "run": str(run), "stopped": False, "status": "stale",
+            "message": "the process is already gone; ipro_status reports this "
+                       "run as stale.",
+        }
+    except PermissionError as exc:
+        raise ToolError(f"not permitted to stop pid {pid}: {exc}")
+    return {
+        "run": str(run), "stopped": True, "pid": pid,
+        "message": (
+            "SIGTERM sent. The run stops after the iteration it is in and "
+            "keeps what it has written: poll ipro_status, then read "
+            "ipro_result for the best design it found."
+        ),
+    }
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -923,6 +1272,83 @@ TOOLS: list[dict[str, Any]] = [
         },
         "handler": tool_status,
     },
+    {
+        "name": "ipro_result",
+        "description": (
+            "The design a run produced: the mutation string, the sequence, the "
+            "score change, the components, the notes, the ensemble of "
+            "alternatives, and -- with include_structure -- the designed PDB "
+            "itself. Report from this rather than from ipro_status alone: an "
+            "MCP client has no shell, so this is the only way to hand over the "
+            "coordinates. If no mutation was kept it says so, and the "
+            "structure is then the starting point."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+                "include_structure": {
+                    "type": "boolean",
+                    "description": "include the designed PDB as text (about "
+                                   "200 KB for a 340-residue chain); off by default",
+                },
+            },
+        },
+        "handler": tool_result,
+    },
+    {
+        "name": "ipro_iterations",
+        "description": (
+            "The tail of the trajectory: per-iteration score, whether it was "
+            "accepted, and why it was rejected. The reporting rule tells you to "
+            "read the per-iteration reasons, and this is how. Never read "
+            "iterations.jsonl directly; it grows without limit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+                "limit": {
+                    "type": "integer",
+                    "description": "how many of the most recent to return (default 20, max 200)",
+                },
+                "only_accepted": {
+                    "type": "boolean",
+                    "description": "only the iterations that were accepted",
+                },
+            },
+        },
+        "handler": tool_iterations,
+    },
+    {
+        "name": "ipro_runs",
+        "description": (
+            "Every run this server can see, with its status. For when a run id "
+            "has been lost, or to check what is already running before starting "
+            "another."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": tool_runs,
+    },
+    {
+        "name": "ipro_cancel",
+        "description": (
+            "Stop a running design. It stops after the iteration it is in and "
+            "keeps what it has written, so the best design found so far is "
+            "still readable with ipro_result. Only runs this server started, on "
+            "this machine."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_dir": {"type": "string", "description": "the run directory"},
+                "run_id": {"type": "string", "description": "or the id ipro_run returned"},
+            },
+        },
+        "handler": tool_cancel,
+    },
 ]
 
 _BY_NAME = {t["name"]: t for t in TOOLS}
@@ -932,7 +1358,7 @@ _BY_NAME = {t["name"]: t for t in TOOLS}
 # Resources: the documents, so a remote agent is not worse informed
 # ---------------------------------------------------------------------------
 #
-# Eight tool descriptions cannot carry the operating manual -- the degraded
+# Eleven tool descriptions cannot carry the operating manual -- the degraded
 # modes, the reporting rules, the validation checklist. An agent that clones the
 # repo reads SKILL.md and gets all of it; an agent on the other end of this
 # server used to get none of it. Exposing the documents as resources closes that
@@ -1052,12 +1478,27 @@ def _env_file() -> "Path | None":
 
 
 def _doc_roots() -> list[Path]:
-    roots = [REPO_ROOT]
+    """Where to look for the documents this server serves as resources.
+
+    ``IPRO_REPO`` comes first because not every MCP client can set a working
+    directory for a server it launches. Claude Desktop, Claude Code and Cursor
+    take a ``cwd``; the Codex and VS Code configurations are command plus args
+    plus environment. Without a way to point at a checkout, a pip-installed
+    server serves none of the documents, and `ipro://skill` -- the operating
+    manual -- is the one an agent most needs.
+    """
+    roots: list[Path] = []
+    env = os.environ.get("IPRO_REPO")
+    if env:
+        candidate = Path(env).expanduser()
+        if candidate.is_dir():
+            roots.append(candidate)
+    roots.append(REPO_ROOT)
     try:
         cwd = Path.cwd()
     except OSError:                       # a deleted cwd is survivable
         return roots
-    if cwd != REPO_ROOT:
+    if cwd not in roots:
         roots.append(cwd)
     return roots
 
@@ -1161,11 +1602,39 @@ PROMPTS: list[dict[str, Any]] = [
 ]
 
 _PROMPT_NAMES = {p["name"] for p in PROMPTS}
+_PROMPT_BY_NAME = {p["name"]: p for p in PROMPTS}
 
 
 def _prompt_get(name: str, args: dict) -> dict:
-    if name not in _PROMPT_NAMES:
+    prompt = _PROMPT_BY_NAME.get(name)
+    if prompt is None:
         raise ToolError(f"unknown prompt {name!r}; have {sorted(_PROMPT_NAMES)}")
+
+    # `required: true` was decorative, the same way the tool schemas were before
+    # section 7h. Measured by driving the server from the official MCP Python
+    # SDK and from the MCP Inspector CLI: `prompts/get ipro-redesign` with no
+    # arguments at all returned a complete 2167-character instruction, whose
+    # step 3 told the model to fetch "(structure)" from the RCSB and whose step
+    # 6 told it to put "(goal)" in `goal_statement` "in my own words". A client
+    # that surfaces prompts as slash commands without collecting their
+    # arguments -- which the spec allows, because the server is supposed to
+    # refuse -- therefore starts a design against a placeholder, and the first
+    # thing this repo's own manual insists on is that a position or a goal must
+    # never be invented on the user's behalf.
+    missing = [
+        a["name"] for a in (prompt.get("arguments") or [])
+        if a.get("required") and not _given(args.get(a["name"]))
+    ]
+    if missing:
+        detail = "; ".join(
+            f"{a['name']}: {a.get('description', '')}".strip(": ")
+            for a in (prompt.get("arguments") or []) if a["name"] in missing
+        )
+        raise ToolError(
+            f"prompt {name!r} needs "
+            f"{', '.join(repr(m) for m in missing)}, which "
+            f"{'was' if len(missing) == 1 else 'were'} not given. {detail}"
+        )
 
     if name == "ipro-check-setup":
         text = (

@@ -160,7 +160,7 @@
         </div>
       </div>
     </div>
-    <p class="note">The caveat is the output. A run that found nothing says so, and a number it cannot stand behind is labelled rather than printed bare.</p>
+    <p class="note">The caveat is the output. A run that found nothing says so, and a number the tool cannot stand behind is labelled rather than printed bare.</p>
   </section>
 
   <section>
@@ -180,7 +180,7 @@
         <h3>Switch substrate specificity, with the catalysis kept intact</h3>
         <div class="prompt" id="p2">I want this thioesterase to prefer the C12 substrate over C14. Keep the catalytic geometry, don't let the design break it. I can give you both substrates as separate PDBs. Which objective should this be, and what do you need from me?</div>
         <button class="copy" data-for="p2">Copy prompt</button>
-        <p class="note">The honest answer involves the agent asking you for things. switch_specificity needs the wanted substrate as target and the rejected one as anti_target; with one molecule it refuses rather than optimising plain affinity and calling it specificity. "Keep the catalysis" has to become an explicit distance restraint, the mechanism the ACS Catal 2017 work used. The optimizer preserves nothing on its own.</p>
+        <p class="note">A correct answer here starts with questions back to you. switch_specificity needs the wanted substrate as target and the rejected one as anti_target; with one molecule it refuses rather than optimising plain affinity and calling it specificity. "Keep the catalysis" has to become an explicit distance restraint, the mechanism the ACS Catal 2017 work used. The optimizer preserves nothing on its own.</p>
       </article>
 
       <article class="card">
@@ -201,7 +201,7 @@
 
       <article class="card">
         <p class="eyebrow"><span>ipro_status</span><span>ipro://house-rules</span></p>
-        <h3>Explain the run honestly</h3>
+        <h3>Explain what a finished run does and does not show</h3>
         <div class="prompt" id="p5">The run in runs/case1 finished. Give me the honest version: what changed, what the score means, what you can't conclude from it, and what I'd need to do to trust it.</div>
         <button class="copy" data-for="p5">Copy prompt</button>
         <p class="note">This one exists because the failure mode is social rather than computational. The numbers look like results and the caveats are the result. A good answer states the mode, every note, that screening energies are not publication kcal/mol, and, when nothing was accepted, that nothing was designed.</p>

@@ -4110,8 +4110,14 @@ def test_mcp_server_speaks_the_protocol():
         "ipro_doctor", "ipro_setup", "ipro_fetch_structure",
         "ipro_inspect_structure", "ipro_goals", "ipro_validate",
         "ipro_positions", "ipro_score", "ipro_milp", "ipro_run", "ipro_status",
+        "ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel",
     }
-    assert set(names) == expected, sorted(set(names) ^ expected)
+    # Membership, as the comment above says: set equality is what made adding
+    # a tool look like a regression, which is the thing this was rewritten to
+    # avoid once already.
+    missing = expected - set(names)
+    assert not missing, sorted(missing)
+    assert len(names) == len(set(names)), "a tool is registered twice"
     # doctor first: every other description tells you to call it before
     # anything else, and clients show the list in order.
     assert names[0] == "ipro_doctor"
@@ -6026,22 +6032,290 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
         assert f"]({link})" in text, f"{doc} must link the prompt page"
     assert "tour.gif" not in (REPO / "README.md").read_text()
 
-    tracked = subprocess.run(["git", "ls-files", "docs/demo-chat.png", "docs/index.html"],
-                             capture_output=True, text=True, cwd=REPO).stdout.split()
+    # Tracked, not ignored: a clone that cannot see them shows a broken image.
+    tracked = subprocess.run(
+        ["git", "ls-files", "docs/demo-chat.png", "docs/index.html"],
+        capture_output=True, text=True, cwd=REPO).stdout.split()
     assert sorted(tracked) == ["docs/demo-chat.png", "docs/index.html"], tracked
 
     # The page quotes the prompts, so it must not drift from the document they
-    # live in: every prompt on the page is in EXAMPLE_PROMPTS.md.
+    # live in, and the caveats must travel with them.
     html = page.read_text()
     for fragment in ("Narrow the OmpF porin pore below 4",
                      "prefer the C12 substrate over C14",
                      "Find the interface and propose positions",
                      "what mode will this run in",
-                     "Give me the honest version"):
+                     "Give me the honest version",
+                     "screening scale", "accepted: 0", "not a pore radius"):
         assert fragment in html, fragment
-    # And the caveats travel with them.
-    for must in ("screening scale", "accepted: 0", "not a pore radius"):
-        assert must in html, must
+
+
+# ---------------------------------------------------------------------------
+# Driving the MCP server with real clients (docs/DESIGN.md section 7i)
+# ---------------------------------------------------------------------------
+
+
+def _mcp_at(messages: list[dict], cwd, env_extra: dict | None = None) -> dict[int, dict]:
+    """Drive the server from a working directory that is NOT the repo.
+
+    Every other MCP test here starts the server with `cwd=REPO`, which is the
+    one case in which the path and import questions below cannot arise.
+    """
+    env = dict(os.environ, PYTHONPATH=str(REPO))
+    env.update(env_extra or {})
+    payload = "\n".join(json.dumps(m) for m in messages) + "\n"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent.mcp_server"],
+        input=payload, capture_output=True, text=True,
+        cwd=str(cwd), env=env, timeout=900,
+    )
+    assert p.returncode == 0, (p.returncode, p.stderr[-600:])
+    out: dict[int, dict] = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            msg = json.loads(line)
+            if msg.get("id") is not None:
+                out[msg["id"]] = msg
+    return out
+
+
+def test_regression_mcp_prompts_refuse_missing_required_arguments():
+    """A prompt's `required: true` was decorative, as the tool schemas were
+    before section 7h.
+
+    Measured with the official MCP Python SDK (2.3.0) and the MCP Inspector
+    CLI, the first real clients this server has had: `prompts/get
+    ipro-redesign` with no arguments at all returned a complete
+    2167-character design instruction and rc=0 from both. Step 3 of it told
+    the model to fetch "(structure)" from the RCSB, and step 6 to put "(goal)"
+    in `goal_statement` "in my own words" -- the two things the operating
+    manual says must never be invented on the user's behalf. A client is
+    allowed to surface a prompt without collecting its arguments, because the
+    server is the thing that is supposed to refuse."""
+    replies = _mcp([
+        _INIT,
+        {"jsonrpc": "2.0", "id": 2, "method": "prompts/get",
+         "params": {"name": "ipro-redesign", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+         "params": {"name": "ipro-redesign",
+                    "arguments": {"structure": "/tmp/p.pdb", "goal": "prefer C12"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "prompts/get",
+         "params": {"name": "ipro-redesign",
+                    "arguments": {"structure": None, "goal": "prefer C12"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "prompts/get",
+         "params": {"name": "ipro-report", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+         "params": {"name": "ipro-check-setup", "arguments": {}}},
+    ])
+    assert "error" in replies[2], replies[2]
+    for word in ("structure", "goal"):
+        assert word in replies[2]["error"]["message"], replies[2]
+
+    text = replies[3]["result"]["messages"][0]["content"]["text"]
+    assert "/tmp/p.pdb" in text and "prefer C12" in text
+    assert "(structure)" not in text and "(goal)" not in text, text[:200]
+
+    # An explicit null is not an argument: `str(None)` is the four-character
+    # word "None", which every truthiness test in sight would have accepted.
+    assert "error" in replies[4], replies[4]
+    assert "error" in replies[5], replies[5]
+    # ipro-check-setup declares no arguments, so it must still answer.
+    assert "result" in replies[6], replies[6]
+
+
+def test_regression_mcp_resolves_a_relative_path_against_the_client():
+    """One relative path meant two different directories depending on the tool.
+
+    `_resolve_spec` resolved against `Path.cwd()` -- the directory an MCP
+    config gives the server -- while `tool_inspect` and `tool_fetch` handed
+    the string to a child running with `cwd=REPO_ROOT`. Measured with the
+    server started from `/`, as Claude Desktop starts one whose config omits
+    `cwd`: `ipro_validate {"spec": "examples/ompf_pore/spec_smoke.yaml"}`
+    refused with "looked for /examples/ompf_pore/spec_smoke.yaml", while
+    `ipro_inspect_structure {"structure": "examples/ompf_pore/2omf_A.pdb"}`
+    SUCCEEDED and reported 340 residues -- answering about a file inside this
+    repository that the client had never named. Every position, native residue
+    and energy downstream of that answer belongs to the wrong molecule, and
+    nothing in the reply says so."""
+    ompf = REPO / "examples" / "ompf_pore" / "2omf_A.pdb"
+    if not ompf.exists():
+        print("    (skipped: no example structure)")
+        return
+    elsewhere = Path(tempfile.mkdtemp())
+    shutil.copy2(ompf, elsewhere / "mine.pdb")
+
+    replies = _mcp_at([
+        _INIT,
+        _call(2, "ipro_inspect_structure",
+              {"structure": "examples/ompf_pore/2omf_A.pdb", "positions": ["18"]}),
+        _call(3, "ipro_inspect_structure",
+              {"structure": "mine.pdb", "positions": ["18"]}),
+        _call(4, "ipro_validate", {"spec": "examples/ompf_pore/spec_smoke.yaml"}),
+    ], cwd=elsewhere)
+
+    is_error, body = _body(replies[2])
+    assert is_error, f"a path that exists only in the repo must not resolve: {body}"
+    assert "not found" in body.get("error", ""), body
+    assert str(elsewhere) in body["error"], body      # and it says where it looked
+
+    is_error, body = _body(replies[3])
+    assert not is_error, body
+    assert body["positions"][0]["native"] == "VAL", body
+
+    # The spec tool already resolved against the client; the two now agree.
+    is_error, body = _body(replies[4])
+    assert is_error and "not found" in body.get("error", ""), body
+
+
+def test_regression_mcp_inline_specs_do_not_leak_temp_directories():
+    """An inline spec wrote a temp directory that nothing ever removed.
+
+    The list they were collected into was called `keep`, and no caller read
+    it. Measured under a GUI client's environment, which has no `TMPDIR`, so
+    `tempfile.gettempdir()` is the shared `/tmp`: five `ipro_validate` calls
+    with an inline spec took `/tmp/ipro_mcp_spec_*` from 7 directories to 12,
+    one per call, each holding a 0o644 `spec.yaml`. All five of those calls
+    returned isError, which is the half that matters -- an agent iterating on
+    a spec it cannot get right leaks fastest, and the leaked text is the
+    user's unpublished design problem in a world-readable directory."""
+    scratch = Path(tempfile.mkdtemp())
+    inline = ("goal: reshape_channel\n"
+              "goal_statement: inline leak probe\n"
+              "molecules: []\n")
+    messages = [_INIT] + [_call(i + 2, "ipro_validate", {"spec": inline})
+                          for i in range(3)]
+    replies = _mcp_at(messages, cwd=REPO, env_extra={"TMPDIR": str(scratch)})
+    assert all(_body(replies[i])[0] for i in (2, 3, 4)), "this spec is invalid"
+    left = sorted(scratch.glob("ipro_mcp_spec_*"))
+    assert not left, f"{len(left)} temp directories left behind: {left[:3]}"
+
+    # `ipro_run` cannot delete the file on the way out -- its child reads the
+    # spec after the call has returned -- so the spec moves into the run
+    # directory, where it also records what the run was asked to do.
+    from ipro_agent import mcp_server as m
+
+    g = m.tool_run.__globals__
+    keep_doctor, keep_tmp = g["_doctor"], tempfile.tempdir
+    run_dir = scratch / "run"
+    launched = None
+    try:
+        tempfile.tempdir = str(scratch)
+        g["_doctor"] = lambda: {"can_run": True, "can_design": True,
+                                "missing_required": [], "resolved": {},
+                                "degraded": []}
+        try:
+            launched = m.tool_run({"spec": inline, "run_dir": str(run_dir)})
+        except m.ToolError:
+            pass          # the CLI refuses this spec, which is the fast path
+    finally:
+        g["_doctor"], tempfile.tempdir = keep_doctor, keep_tmp
+    if launched and launched.get("pid"):
+        try:
+            os.kill(int(launched["pid"]), 15)
+        except OSError:
+            pass
+    assert (run_dir / "spec.yaml").is_file(), "the run must hold the spec that made it"
+    assert not sorted(scratch.glob("ipro_mcp_spec_*")), "and leave no temp dir"
+
+
+def test_regression_cheap_checks_run_before_the_doctor_probe():
+    """This repo's first CI run failed three tests, and two shared one cause
+    that was not in the tests. ``tool_run`` called ``_doctor()`` as its very
+    first act, so on a runner with no PyMOL the can_design gate fired ahead of
+    both the argument coercion and the non-empty-run_dir check: a caller who
+    passed ``iterations: 8.5`` was told "cannot design: PyMOL did not resolve",
+    which is true and useless, and so was a caller pointing at a directory that
+    already held a run.
+
+    It also spent a one-to-five-second doctor probe before answering a
+    malformed argument. Measured with _doctor stubbed to can_design False:
+    bad iterations -> "`iterations` must be a whole number", used run_dir ->
+    "run directory is not empty", and only an otherwise-valid call reaches
+    "cannot design". No directory is created by any of the refusals."""
+    from ipro_agent import mcp_server as m
+
+    spec = str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml")
+    tmp = Path(tempfile.mkdtemp())
+    used = tmp / "used"
+    used.mkdir()
+    (used / "state.json").write_text("{}")
+    fresh = tmp / "fresh"
+
+    g = m.tool_run.__globals__
+    keep = g["_doctor"]
+    try:
+        g["_doctor"] = lambda: {"can_run": True, "can_design": False,
+                                "missing_required": [], "degraded": ["pymol"],
+                                "resolved": {}}
+        for kwargs, expected in (
+            ({"spec": spec, "iterations": 8.5}, "iterations"),
+            ({"spec": spec, "seed": "lucky"}, "seed"),
+            ({"spec": spec, "run_dir": str(used)}, "not empty"),
+            ({"spec": spec, "run_dir": str(fresh)}, "cannot design"),
+        ):
+            try:
+                m.tool_run(kwargs)
+            except m.ToolError as exc:
+                assert expected in str(exc), (kwargs, str(exc)[:120])
+            else:
+                raise AssertionError(f"{kwargs} must be refused")
+        assert not fresh.exists(), (
+            "a refused launch must not leave a run directory behind"
+        )
+    finally:
+        g["_doctor"] = keep
+
+
+def test_regression_a_missing_backend_is_a_refusal_not_a_traceback():
+    """``milp`` and ``score`` both build rotamer tables, so both need PyMOL,
+    and on a machine without it both died with a bare ``RotamerError``
+    traceback -- the third of the three CI failures. ``cli.main()`` caught
+    SpecError and StructureError but not this.
+
+    The README was wrong about it too: it listed ``validate``, ``positions``,
+    ``milp``, ``score`` and ``goals`` as working without PyMOL. Measured with
+    PyMOL undiscoverable: validate and goals exit 0, positions works, and milp
+    and score refuse -- so two of the five named were false."""
+    import ipro_agent.cli as cli
+    from ipro_agent.rotamers import RotamerError
+
+    src = (REPO / "ipro_agent" / "cli.py").read_text()
+    assert "except RotamerError as exc:" in src, (
+        "main() must give a missing backend the same contract as a bad spec"
+    )
+
+    # Through a real process, with PyMOL hidden the way CI hides it.
+    harness = Path(tempfile.mkdtemp()) / "nopymol.py"
+    harness.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "import ipro_agent.rotamers as R\n"
+        "R.find_pymol_python = lambda: None\n"
+        "import ipro_agent.cli as cli\n"
+        "sys.exit(cli.main(sys.argv[1:]))\n"
+    )
+    spec = str(REPO / "examples" / "ompf_pore" / "spec_smoke.yaml")
+    out = Path(tempfile.mkdtemp())
+    for argv, needs_pymol in (
+        (["goals"], False),
+        (["validate", spec], False),
+        (["milp", spec, "-o", str(out / "m.lp")], True),
+        (["score", spec, "--run-dir", str(out / "s")], True),
+    ):
+        p = subprocess.run([sys.executable, str(harness), *argv],
+                           capture_output=True, text=True, cwd=REPO, timeout=900)
+        both = p.stdout + p.stderr
+        assert "Traceback" not in both, (argv[0], both[-300:])
+        if needs_pymol:
+            assert p.returncode == 2, (argv[0], p.returncode)
+            assert "backend missing" in p.stderr, (argv[0], p.stderr[-200:])
+        else:
+            assert p.returncode == 0, (argv[0], p.returncode, both[-200:])
+
+    # And the README must not claim otherwise.
+    readme = (REPO / "README.md").read_text()
+    assert "`validate`, `positions`, `milp`, `score` and `goals` work" not in readme
+    assert "`milp`, `score` and `run`" in readme
 
 
 def test_regression_relaxation_is_superposed_back_into_the_frame_it_was_scored_in():
@@ -6433,3 +6707,146 @@ def test_regression_optzyme_divisors_must_be_positive():
         **base, "goal_options": {"parameter": "kcat", "rt_tsa_kcal": 3.0,
                                  "rt_substrate_kcal": 90.0}})
     build_goal(ok).validate()
+
+
+def test_regression_an_mcp_agent_can_read_back_what_it_designed():
+    """The server told agents to do something no tool could do, and withheld
+    the product of a run.
+
+    `ipro_status`'s own `reporting_rule` says to "read the per-iteration
+    reasons". `iterations.jsonl` is on disk, the house rules forbid loading it
+    wholesale because it grows without limit, and an MCP client has no shell,
+    so the instruction was unfollowable. And the design itself -- the
+    coordinates in `best/design.pdb` -- was reachable by no tool and no
+    resource, so an agent could launch a run, quote its score, and never be
+    able to hand over the structure it made.
+
+    Four tools close that: ipro_result (the design, the ensemble, optionally
+    the PDB text), ipro_iterations (a bounded tail with the rejection
+    reasons), ipro_runs (for a lost id) and ipro_cancel."""
+    from ipro_agent import mcp_server as m
+
+    names = [t["name"] for t in m.TOOLS]
+    for needed in ("ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel"):
+        assert needed in names, needed
+
+    ompf = REPO / "examples" / "ompf_pore"
+    if not (ompf / "2omf_A.pdb").exists() or not _have_pymol():
+        print("    (partial: schema only, needs the example and PyMOL)")
+        return
+
+    run = Path(tempfile.mkdtemp()) / "run"
+    p = subprocess.run(
+        [sys.executable, "-m", "ipro_agent", "run", str(ompf / "spec_smoke.yaml"),
+         "--run-dir", str(run), "--iterations", "2", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=1800,
+    )
+    assert p.returncode == 0, p.stderr[-400:]
+
+    res = m.tool_result({"run_dir": str(run)})
+    assert res["mode"] and "notes" in res
+    assert res["structure_files"], "the coordinates must be reachable"
+    # A run that kept no mutation must say so here too, not only in status.
+    if not res["mutations"]:
+        assert res.get("designed_nothing") is True
+        assert "STARTING POINT" in res["warning"]
+
+    with_pdb = m.tool_result({"run_dir": str(run), "include_structure": True})
+    assert with_pdb["structure_pdb"].startswith(("ATOM", "REMARK", "HEADER")), \
+        with_pdb["structure_pdb"][:40]
+    assert "ATOM" in with_pdb["structure_pdb"]
+
+    it = m.tool_iterations({"run_dir": str(run), "limit": 5})
+    assert it["iterations_total"] >= 1
+    assert it["iterations"] and "reason" in it["iterations"][0]
+    assert it["reason_counts"], "the rejection reasons are the point"
+    # Bounded whatever the run length.
+    assert len(m.tool_iterations({"run_dir": str(run), "limit": 10_000})["iterations"]) <= 200
+
+    listed = m.tool_runs({})
+    assert any(r["run_dir"] == str(run) for r in listed["runs"]) or listed["searched"]
+
+    # Cancelling a finished run is a statement, not an error.
+    out = m.tool_cancel({"run_dir": str(run)})
+    assert out["stopped"] is False and "not running" in out["message"]
+
+
+def test_regression_the_new_tools_are_reachable_over_the_protocol():
+    """Registered in TOOLS is not the same as callable: the handler has to be
+    wired and the schema has to validate a realistic call."""
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "0"}}}
+    listed = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+    runs = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "ipro_runs", "arguments": {}}}
+    missing = {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+               "params": {"name": "ipro_result", "arguments": {}}}
+    payload = "\n".join(json.dumps(m) for m in (init, listed, runs, missing)) + "\n"
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.mcp_server"],
+                       input=payload, capture_output=True, text=True,
+                       cwd=REPO, timeout=900)
+    assert p.returncode == 0, p.stderr[-300:]
+    replies = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            msg = json.loads(line)
+            replies[msg.get("id")] = msg
+
+    names = [t["name"] for t in replies[2]["result"]["tools"]]
+    for needed in ("ipro_result", "ipro_iterations", "ipro_runs", "ipro_cancel"):
+        assert needed in names, (needed, names)
+
+    body = json.loads(replies[3]["result"]["content"][0]["text"])
+    assert "runs" in body and "searched" in body, body
+
+    # Without a run to point at, it refuses in words.
+    err = json.loads(replies[4]["result"]["content"][0]["text"])["error"]
+    assert "run_dir" in err and "Traceback" not in err, err
+
+
+def test_server_json_matches_the_package_it_points_at():
+    """`server.json` is what the MCP Registry stores, and three things in it
+    have to agree with the package or the publish is rejected: the name's
+    namespace, the PyPI identifier, and the version.
+
+    The ownership check is the easiest to break by accident. The registry
+    proves you own the PyPI package by finding `mcp-name: <server name>` in the
+    project description, which is the README; a README edit that drops the
+    marker makes a release unregisterable, and nothing else would notice."""
+    import re
+
+    spec = json.loads((REPO / "server.json").read_text())
+    pyproject = (REPO / "pyproject.toml").read_text()
+    readme = (REPO / "README.md").read_text()
+
+    name = spec["name"]
+    assert name == "io.github.chowdhurylab-studio/ipro-agent", name
+    assert f"mcp-name: {name}" in readme, (
+        "the README must carry the ownership marker, or the registry cannot "
+        "verify the PyPI package"
+    )
+    # The marker needs a boundary after it; glued to a full stop it does not match.
+    line = next(l for l in readme.splitlines() if "mcp-name:" in l)
+    assert re.search(rf"mcp-name:\s*{re.escape(name)}(\s|-->|$)", line), line
+
+    version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+    assert spec["version"] == version, (spec["version"], version)
+
+    pkg = spec["packages"][0]
+    assert pkg["registryType"] == "pypi"
+    assert pkg["registryBaseUrl"] == "https://pypi.org", pkg["registryBaseUrl"]
+    assert pkg["version"] == version, (pkg["version"], version)
+    assert pkg["transport"]["type"] == "stdio"
+
+    pypi_name = re.search(r'^name = "([^"]+)"', pyproject, re.M).group(1)
+    assert pkg["identifier"] == pypi_name, (pkg["identifier"], pypi_name)
+
+    # Every environment variable it advertises is one the server reads.
+    src = (REPO / "ipro_agent" / "mcp_server.py").read_text()
+    for env in pkg.get("environmentVariables", []):
+        assert env["name"] in src or env["name"] in (
+            REPO / "ipro_agent" / "rotamers.py").read_text(), env["name"]
+        assert env["isSecret"] is False, "this server takes no secrets"
+
+    assert (REPO / "docs" / "RELEASING.md").is_file()

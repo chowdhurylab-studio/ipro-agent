@@ -108,10 +108,29 @@ cat <<NEXT
       open the repo with the agent and ask in plain language -- it loads
       .claude/skills/ipro-agent/SKILL.md by itself.
 
-  Use it from an AI agent, anywhere (MCP). Add to your client's MCP config:
+  Use it from an AI agent, anywhere (MCP). The server has no registry id: what
+  you send someone is this block, and "ipro-agent" is just the name they will
+  see. Claude Desktop, Claude Code and Cursor take it as written:
+
       {"mcpServers": {"ipro-agent": {"command": "$ENV_PY",
                                      "args": ["-m", "ipro_agent.mcp_server"],
-                                     "cwd": "$REPO"}}}
+                                     "env": {"IPRO_REPO": "$REPO"}}}}
+
+  Codex (~/.codex/config.toml) wants the same three fields in TOML:
+
+      [mcp_servers.ipro-agent]
+      command = "$ENV_PY"
+      args = ["-m", "ipro_agent.mcp_server"]
+      env = { IPRO_REPO = "$REPO" }
+
+  VS Code / Copilot: the same JSON in a workspace .mcp.json, or in
+  .vscode/mcp.json under "servers" instead of "mcpServers", with
+  "type": "stdio" added.
+
+  IPRO_REPO is what lets the server hand the agent its own operating manual
+  (ipro://skill) and the other documents. Without it a pip-installed server
+  still runs designs but serves no documents, and tells the agent where to
+  fetch them instead.
 
   Read before trusting a number:
       README.md               "Status and honesty" and "Responsible use"
