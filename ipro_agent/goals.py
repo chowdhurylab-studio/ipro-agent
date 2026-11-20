@@ -676,8 +676,21 @@ class ImproveCatalysis(Goal):
 
     def validate(self) -> None:
         self._require_targets(1)
-        self._check_numeric_options("temperature_k", "rt_tsa_kcal",
-                                    "rt_substrate_kcal")
+        self._check_numeric_options("temperature_k")
+        # Positive, not merely numeric. These are divisors in Eq 18: zero
+        # raises mid-run, and a negative silently INVERTS that term, so a
+        # design that binds the transition state worse scores better.
+        for name, default in (("rt_tsa_kcal", self.RT_TSA_KCAL),
+                              ("rt_substrate_kcal", self.RT_SUBSTRATE_KCAL)):
+            if self.options.get(name) is not None:
+                value = self._number(name, default)
+                if value is None or value <= 0:
+                    raise SpecError(
+                        f"goal_options.{name} is {self.options[name]!r}; it is "
+                        f"a divisor in OptZyme's Eq 18 and must be positive. A "
+                        f"negative value inverts that term, so a worse "
+                        f"transition-state interaction would score better."
+                    )
         p = self.parameter
         if p not in ("km", "kcat", "kcat_over_km"):
             raise SpecError(

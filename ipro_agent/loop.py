@@ -446,6 +446,16 @@ class IPROLoop:
         # both shipped examples annotate them "[paper]" -- believes the
         # flanking residues and the 4.5 A shell are being repacked, and they
         # are not: the MILP's variables are exactly the design positions.
+        if (spec.loop.perturb_backbone
+                and tuple(spec.loop.design_per_iteration) != (1, 3)):
+            self.notes.append(
+                f"loop.design_per_iteration is set to "
+                f"{tuple(spec.loop.design_per_iteration)}, and it is not read "
+                f"while the backbone is perturbed: the window is the design "
+                f"positions inside the perturbed region, which is how IPRO "
+                f"defines it. The setting applies only with "
+                f"perturb_backbone: false."
+            )
         for name, default in (("perturbation_flank", 5), ("neighbour_cutoff", 4.5)):
             if getattr(spec.loop, name, default) != default:
                 self.notes.append(
@@ -905,7 +915,14 @@ class IPROLoop:
         fails -- in which case the caller scores the unrelaxed candidate,
         exactly as before, and the run says so once.
         """
-        if not self.backend.can_relax or not len(design_all):
+        if self.mode != "full" or not self.backend.can_relax or not len(design_all):
+            # `fixed-backbone` says, in the run's own note, that the backbone
+            # never moves. It was relaxing anyway when the backend could:
+            # measured on the unmodified smoke spec with the PyRosetta
+            # backend, the start's relaxed output differed from its input by a
+            # mean of 15.7 A CA while the loop's own state never moved, so the
+            # only structure that moved was the one being scored -- beside a
+            # note promising the opposite.
             return None
         if self._relax_disabled:
             # The run is on the unrelaxed basis and must stay there.
@@ -2131,9 +2148,13 @@ class IPROLoop:
         # relaxation ran; if every attempt failed, say "backbone-mc".
         if self.mode == "full":
             if self._post_relaxed:
+                per_iter = max(1, len(self._assemblies))
+                ran_on = self._post_relaxed // per_iter
                 self.notes.append(
                     f"backbone relaxation ran after the sequence choice on "
-                    f"{self._post_relaxed} of {n_done} iteration(s)"
+                    f"{ran_on} of {n_done} iteration(s)"
+                    + (f" ({self._post_relaxed} relaxations, one per assembly)"
+                       if per_iter > 1 else "")
                     + (f", failing on {self._post_relax_failed}"
                        if self._post_relax_failed else "")
                     + (" (the starting point was relaxed the same way, so the "

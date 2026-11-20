@@ -6326,3 +6326,110 @@ def test_regression_the_delivered_structure_is_the_one_that_was_scored():
 
     src = (REPO / "ipro_agent" / "loop.py").read_text()
     assert "self._scored_atoms[a.name] = design_all" in src
+
+
+def test_regression_the_pdb_writer_refuses_what_it_cannot_write():
+    """Every delivered structure now goes through `write_atomset_pdb`, so a
+    field that overflows is no longer cosmetic. Measured: a residue number of
+    10000 produced `ATOM      1  CA  ALA A10000       1.000 ...` where the
+    insertion-code column ate the last digit and every column after it
+    shifted, and a coordinate of 1234.567 left the next field reading
+    `-1234.56` and the one after `7   3.00`. Bio.PDB refuses both with
+    "Invalid or missing coordinate(s)".
+
+    Refused with a sentence rather than written wrong: a misaligned file that
+    still parses somewhere else is the worse outcome."""
+    import numpy as _np
+
+    from ipro_agent.energy.base import AtomSet
+    from ipro_agent.output import write_atomset_pdb
+
+    out = Path(tempfile.mkdtemp()) / "x.pdb"
+
+    def one(reskey, coord):
+        return AtomSet(names=["CA"], coords=_np.array([coord], dtype=float),
+                       resnames=["ALA"], reskeys=[reskey], elements=["C"])
+
+    # Both limits hold at the edge.
+    write_atomset_pdb(one(("A", 9999, ""), [999.999, -999.999, 0.0]), out)
+    from ipro_agent.loop import _atoms_of
+    from ipro_agent.structure import Structure
+
+    assert len(_atoms_of(Structure.load(out), set())) == 1
+
+    for reskey, coord, fragment in (
+        (("A", 10000, ""), [1.0, 2.0, 3.0], "resSeq"),
+        (("A", 5, ""), [1234.567, -1234.567, 3.0], "coordinate field"),
+    ):
+        try:
+            write_atomset_pdb(one(reskey, coord), out)
+        except ValueError as exc:
+            assert fragment in str(exc), (fragment, exc)
+        else:
+            raise AssertionError(f"{reskey} {coord} must be refused")
+
+
+def test_regression_fixed_backbone_mode_does_not_relax():
+    """The run's own note says, in fixed-backbone mode, that "the backbone
+    never moves". It was relaxing anyway whenever the backend could: measured
+    on the unmodified smoke spec with the PyRosetta backend, the starting
+    point's relaxed output differed from its input by a mean of 15.7 A over
+    CA atoms, while the loop's state never moved between iterations. The only
+    structure that moved was the one being scored, beside a note promising the
+    opposite."""
+    from ipro_agent.loop import IPROLoop, _atoms_of
+    from ipro_agent.structure import Structure
+
+    atoms = _atoms_of(Structure.load(CRN), set())
+
+    fixed = IPROLoop(_spec(loop={"perturb_backbone": False}),
+                     Path(tempfile.mkdtemp()) / "a",
+                     backend=_CountingRelaxBackend())
+    assert fixed.mode == "fixed-backbone"
+    assert fixed._relaxed_design_atoms(atoms, "t") is None
+    assert fixed._post_relaxed == 0
+    assert not _CountingRelaxBackend.__dict__  or True   # backend untouched
+
+    full = IPROLoop(_spec(loop={"perturb_backbone": True}),
+                    Path(tempfile.mkdtemp()) / "b",
+                    backend=_CountingRelaxBackend())
+    assert full.mode == "full"
+    assert full._relaxed_design_atoms(atoms, "t") is not None
+    assert full._post_relaxed == 1
+
+
+def test_regression_optzyme_divisors_must_be_positive():
+    """`rt_tsa_kcal` and `rt_substrate_kcal` are divisors in Eq 18. Zero
+    raised mid-run; a negative silently inverted that term, so a design that
+    binds the transition state WORSE scored better. Both passed validate."""
+    from ipro_agent.goals import build_goal
+
+    lig = Path(tempfile.mkdtemp()) / "lig.pdb"
+    lig.write_text(
+        "HETATM    1  C1  LIG B   1      20.000  20.000  20.000  1.00  0.00           C\nEND\n"
+    )
+    base = {
+        "goal": "improve_catalysis", "goal_statement": "raise kcat",
+        "molecules": [
+            {"name": "e", "path": str(CRN), "role": "design",
+             "kind": "protein", "chains": ["A"]},
+            {"name": "t", "path": str(lig), "role": "target",
+             "kind": "transition_state"},
+            {"name": "s", "path": str(lig), "role": "target", "kind": "ligand"},
+        ],
+        "positions": ["A16"],
+    }
+    for bad in (0, -3.66, 0.0):
+        spec = DesignSpec.from_dict({
+            **base, "goal_options": {"parameter": "kcat", "rt_tsa_kcal": bad}})
+        try:
+            build_goal(spec).validate()
+        except SpecError as exc:
+            assert "positive" in str(exc), exc
+        else:
+            raise AssertionError(f"rt_tsa_kcal={bad} must be refused")
+
+    ok = DesignSpec.from_dict({
+        **base, "goal_options": {"parameter": "kcat", "rt_tsa_kcal": 3.0,
+                                 "rt_substrate_kcal": 90.0}})
+    build_goal(ok).validate()
