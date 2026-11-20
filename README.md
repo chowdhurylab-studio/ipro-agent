@@ -42,7 +42,7 @@ That creates the environment, reports what resolved, runs the test suite and the
 shipped example, and prints the exact commands and MCP config with your own
 paths filled in. Safe to re-run; deletes nothing.
 
-![A conversation: you ask in plain language, the agent resolves the positions, runs, and reports what it cannot stand behind](docs/demo-chat.png)
+![A conversation: you ask in plain language, the agent resolves the positions, runs, and reports what it cannot stand behind](docs/demo-chat.gif)
 
 *How it is actually used. The caveat in that last message is the output: the
 run found nothing, and the number it printed is labelled rather than left to be

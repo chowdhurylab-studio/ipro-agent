@@ -103,6 +103,7 @@
   .copy:hover { color: var(--accent); border-color: var(--accent); }
   .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .note { color: var(--ink-soft); font-size: 0.95rem; }
+  .note code, .steps code { font-family: var(--mono); font-size: 0.86em; background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; }
 
   section { margin-block: 3rem 0; display: grid; gap: 1rem; }
   ul.plain { margin: 0; padding-left: 1.15rem; display: grid; gap: 0.5rem; color: var(--ink-soft); }
@@ -161,6 +162,59 @@
       </div>
     </div>
     <p class="note">The caveat is the output. A run that found nothing says so, and a number the tool cannot stand behind is labelled rather than printed bare.</p>
+  </section>
+
+  <section>
+    <h2>Add it to your agent</h2>
+    <p class="note">One command sets it up, and prints these blocks with your own
+    paths already filled in. There is nothing to sign up for and no server to
+    reach: it runs on your machine.</p>
+    <div class="prompt" id="m0">git clone https://github.com/chowdhurylab-studio/ipro-agent &amp;&amp; cd ipro-agent &amp;&amp; bash scripts/bootstrap.sh</div>
+    <button class="copy" data-for="m0">Copy command</button>
+
+    <div class="cards">
+      <article class="card">
+        <p class="eyebrow"><span>Claude Code</span><span>Claude Desktop</span><span>Cursor</span></p>
+        <div class="prompt" id="m1">{"mcpServers": {"ipro-agent": {
+  "command": "/path/to/envs/ipro-agent/bin/python",
+  "args": ["-m", "ipro_agent.mcp_server"],
+  "env": {"IPRO_REPO": "/path/to/ipro-agent"}
+}}}</div>
+        <button class="copy" data-for="m1">Copy</button>
+        <p class="note">Claude Code also works with no config at all: open the
+        folder and ask. It loads the operating manual by itself.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>Codex</span><span>~/.codex/config.toml</span></p>
+        <div class="prompt" id="m2">[mcp_servers.ipro-agent]
+command = "/path/to/envs/ipro-agent/bin/python"
+args = ["-m", "ipro_agent.mcp_server"]
+env = { IPRO_REPO = "/path/to/ipro-agent" }</div>
+        <button class="copy" data-for="m2">Copy</button>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow"><span>VS Code</span><span>GitHub Copilot</span></p>
+        <div class="prompt" id="m3">{"servers": {"ipro-agent": {
+  "type": "stdio",
+  "command": "/path/to/envs/ipro-agent/bin/python",
+  "args": ["-m", "ipro_agent.mcp_server"],
+  "env": {"IPRO_REPO": "/path/to/ipro-agent"}
+}}}</div>
+        <button class="copy" data-for="m3">Copy</button>
+        <p class="note">In <code>.vscode/mcp.json</code>. A workspace
+        <code>.mcp.json</code> takes the <code>mcpServers</code> spelling above
+        instead.</p>
+      </article>
+    </div>
+
+    <p class="note">Two things decide whether it works. <code>command</code>
+    must be the environment's python, because the server only sees what its own
+    interpreter can import, and pointing it at the wrong one means PyMOL never
+    resolves and no design can run. <code>IPRO_REPO</code> is what lets the
+    server hand your agent its own operating manual; without it the agent gets
+    the tools but has to be told where the documentation lives.</p>
   </section>
 
   <section>

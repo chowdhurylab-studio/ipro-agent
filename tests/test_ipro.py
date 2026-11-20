@@ -6020,13 +6020,16 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
     drives this from a terminal: the product is a conversation, so the picture
     is of a conversation."""
     png = REPO / "docs" / "demo-chat.png"
+    gif = REPO / "docs" / "demo-chat.gif"
     page = REPO / "docs" / "index.html"
-    assert png.is_file() and page.is_file()
-    assert png.stat().st_size / 1048576 < 2.0, "too big to ship in a clone"
+    assert png.is_file() and gif.is_file() and page.is_file()
+    for f in (png, gif):
+        assert f.stat().st_size / 1048576 < 2.0, f"{f.name} is too big to ship"
     assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert gif.read_bytes()[:6] in (b"GIF87a", b"GIF89a")
 
-    for doc, img, link in (("README.md", "docs/demo-chat.png", "docs/index.html"),
-                           ("docs/HANDOFF.md", "demo-chat.png", "index.html")):
+    for doc, img, link in (("README.md", "docs/demo-chat.gif", "docs/index.html"),
+                           ("docs/HANDOFF.md", "demo-chat.gif", "index.html")):
         text = (REPO / doc).read_text()
         assert f"]({img})" in text, f"{doc} must show the conversation"
         assert f"]({link})" in text, f"{doc} must link the prompt page"
@@ -6034,9 +6037,19 @@ def test_the_demo_image_and_prompt_page_ship_with_the_repo():
 
     # Tracked, not ignored: a clone that cannot see them shows a broken image.
     tracked = subprocess.run(
-        ["git", "ls-files", "docs/demo-chat.png", "docs/index.html"],
+        ["git", "ls-files", "docs/demo-chat.png", "docs/demo-chat.gif",
+         "docs/index.html"],
         capture_output=True, text=True, cwd=REPO).stdout.split()
-    assert sorted(tracked) == ["docs/demo-chat.png", "docs/index.html"], tracked
+    assert sorted(tracked) == ["docs/demo-chat.gif", "docs/demo-chat.png",
+                               "docs/index.html"], tracked
+
+    # The page must carry the config block for each client family, or "how do
+    # I add this" has no answer on the one page built to answer it.
+    html = page.read_text()
+    for needed in ('"mcpServers"', "[mcp_servers.ipro-agent]", '"servers"',
+                   "IPRO_REPO", "ipro_agent.mcp_server",
+                   "bash scripts/bootstrap.sh"):
+        assert needed in html, needed
 
     # The page quotes the prompts, so it must not drift from the document they
     # live in, and the caveats must travel with them.
