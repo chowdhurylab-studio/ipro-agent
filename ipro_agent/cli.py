@@ -249,9 +249,18 @@ def cmd_positions(args) -> int:
 def cmd_milp(args) -> int:
     spec = _load(args.spec)
     from .energy import resolve as resolve_energy
+    from .goals import build_goal
     from .milp import RotamerMILP, build_tables
     from .rotamers import build_template, harvest
     from .structure import Structure
+
+    # The goal before the harvest, because a spec error is true whatever is
+    # installed and a missing backend is not. Measured on CI (no PyMOL): a
+    # spec naming a goal that does not exist was answered "backend missing: no
+    # PyMOL available", which sends the reader to install something that would
+    # not have helped. `validate` had always reported the goal correctly, so
+    # the two commands disagreed about the same file.
+    build_goal(spec).validate()
 
     dm = spec.design_molecule
     design = Structure.load(dm.path, dm.chains or None)
@@ -314,7 +323,12 @@ def cmd_score(args) -> int:
     interaction energy near zero usually means the partners are not in contact.
     """
     spec = _load(args.spec)
+    from .goals import build_goal
     from .loop import IPROLoop
+
+    # As in cmd_milp: the goal is checked before anything that needs a backend,
+    # so a bad spec is reported as a bad spec on every machine.
+    build_goal(spec).validate()
 
     loop = IPROLoop(spec, args.run_dir or "runs/_score")
     loop.prepare()
