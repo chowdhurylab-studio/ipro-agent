@@ -46,8 +46,11 @@ jobs:
       matrix:
         # 3.10 is the floor the package declares and doctor.py enforces; 3.13
         # is the newest the suite has been run on. Both ends were run before
-        # this file existed, each in a clean virtualenv with glpsol on PATH:
-        # 195 passed, 0 failed on both. The failures this catches are at the
+        # this file existed, each in a clean virtualenv with glpsol on PATH,
+        # green on both. The count is deliberately not written here: this repo
+        # adds a regression test per defect, so any number put in a comment is
+        # wrong by the next fix, and this one sat fifteen short. The run's own
+        # summary is the measurement. The failures this catches are at the
         # ends rather than in the middle.
         python-version: ["3.10", "3.13"]
     steps:

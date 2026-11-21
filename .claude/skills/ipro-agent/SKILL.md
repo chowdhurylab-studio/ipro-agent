@@ -51,6 +51,25 @@ Spend your effort on 1–3 and on reading the result honestly.
 
 ## Workflow
 
+**If you reached this file through the MCP server rather than a checkout**, you
+have no `scripts/` directory: it is not in the wheel. Every command below has
+an equivalent, and the tools are the better form of them because they return
+JSON rather than text you have to parse.
+
+| Below | From an installed copy | As an MCP tool |
+|---|---|---|
+| `python3 scripts/doctor.py` | `python3 -m ipro_agent.doctor` | `ipro_doctor` |
+| `python3 -m ipro_agent validate <spec>` | same | `ipro_validate` |
+| `python3 -m ipro_agent inspect <pdb>` | same | `ipro_inspect_structure` |
+| `python3 -m ipro_agent positions <spec>` | same | `ipro_positions` |
+| `python3 -m ipro_agent score <spec>` | same | `ipro_score` |
+| `python3 -m ipro_agent milp <spec>` | same | `ipro_milp` |
+| `python3 -m ipro_agent run <spec>` | same | `ipro_run`, then `ipro_status` |
+
+`ipro_run` launches detached and returns a run id, because a real run is
+minutes to days and no request can hold that open. Poll `ipro_status`; read the
+result with `ipro_result`.
+
 Run `python3 scripts/doctor.py` once at the start. It reports which backends
 resolved and what the run will actually use. Read its output before promising
 the user anything, because the protocol degrades in a specific, documented way

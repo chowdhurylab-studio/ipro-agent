@@ -7428,3 +7428,74 @@ def test_regression_dropped_identities_are_rechecked_after_the_backbone_moves():
     # and the note stays once-per-run however many iterations rebuild
     note = src[src.index("def _note_dropped_identities"):]
     assert "_once" in note[:1200], "the note must not repeat every iteration"
+
+
+def test_regression_deep_nesting_does_not_end_the_mcp_session():
+    """§7h states the invariant outright: one error reply each, never the
+    session. Five malformed shapes were fixed to honour it; this one was
+    missed, because `json.loads` recurses per nesting level and therefore
+    raises RecursionError rather than a JSONDecodeError, which escaped the
+    clause already there and ended the process.
+
+    The depth is probed rather than hardcoded. The sweep that found this
+    reported 100,000 levels as the trigger; on the interpreter here 100,000
+    parses fine and the server answers it as a JSON-RPC batch, and the real
+    threshold is nearer 500,000. It depends on the interpreter and its
+    recursion limit, so a fixed number would test nothing on the next one."""
+    depth = None
+    for candidate in (100_000, 500_000, 1_000_000):
+        try:
+            json.loads("[" * candidate + "]" * candidate)
+        except RecursionError:
+            depth = candidate
+            break
+        except Exception:
+            continue
+    if depth is None:
+        print("    (skipped: json.loads does not recurse far enough here)")
+        return
+
+    payload = (
+        "[" * depth + "]" * depth + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18",
+                               "capabilities": {},
+                               "clientInfo": {"name": "t", "version": "0"}}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                    "params": {}}) + "\n"
+    )
+    p = subprocess.run([sys.executable, "-m", "ipro_agent.mcp_server"],
+                       input=payload, capture_output=True, text=True, cwd=REPO,
+                       timeout=300)
+    assert p.returncode == 0, (
+        f"depth {depth} ended the session: exit {p.returncode}, "
+        f"{p.stderr[-400:]}")
+    replies = [json.loads(l) for l in p.stdout.splitlines()
+               if l.strip().startswith(("{", "["))]
+    ids = [r.get("id") for r in replies if isinstance(r, dict)]
+    assert 2 in ids, f"the session must survive the bad line; got ids {ids}"
+    listed = next(r for r in replies if isinstance(r, dict) and r.get("id") == 2)
+    assert listed["result"]["tools"], "tools/list must still answer"
+
+    # The invariant is one error reply EACH, not merely survival: the bad line
+    # gets its own -32700 and the two good ones are answered normally.
+    bad = [r for r in replies
+           if isinstance(r, dict) and r.get("error", {}).get("code") == -32700]
+    assert len(bad) == 1, [r.get("error") for r in replies if isinstance(r, dict)]
+
+
+def test_regression_the_document_fallback_urls_match_this_build():
+    """A server with no checkout hands the agent a raw GitHub URL instead of
+    the document, and `ipro_setup` tells a pip-installed copy to curl
+    `environment.yml` from the same base. That base tracked `main`, so an
+    installed 0.1.0 was served whatever `main` says today -- a manual
+    describing behaviour its code does not have, and an install recipe that
+    can drift from the installed version. It is pinned to this build's tag."""
+    from ipro_agent.mcp_server import RAW_BASE, SERVER_INFO
+
+    version = SERVER_INFO["version"]
+    assert f"/v{version}/" in RAW_BASE, RAW_BASE
+    assert "/main/" not in RAW_BASE, (
+        "the fallback must not track main, or a released copy is handed "
+        "unreleased documents")
+    assert RAW_BASE.endswith("/"), RAW_BASE

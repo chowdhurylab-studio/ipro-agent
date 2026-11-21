@@ -1524,7 +1524,20 @@ def _doc_roots() -> list[Path]:
 
 
 #: Canonical location of each document, for a copy that has neither.
-RAW_BASE = "https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/main/"
+#: Where a server with no checkout tells the agent to fetch a document, and
+#: where `tool_setup` tells a pip-installed copy to curl `environment.yml`.
+#:
+#: Pinned to this build's own tag rather than to `main`. It tracked `main`,
+#: so an installed 0.1.0 was handed whatever `main` said today -- a manual
+#: describing behaviour its code does not have, and, at `tool_setup`, an
+#: `SERVER_INFO['version']` is bumped in the same commit the release is tagged
+#: from (docs/RELEASING.md) and a test pins it to pyproject, so the tag exists
+#: for every published version; the one window where it does not is between a
+#: maintainer's bump and their tag, on an unreleased tree.
+RAW_BASE = (
+    "https://raw.githubusercontent.com/chowdhurylab-studio/ipro-agent/"
+    f"v{SERVER_INFO['version']}/"
+)
 
 
 def _resolve_doc(rel: str) -> Path | None:
@@ -1963,7 +1976,18 @@ def serve(stdin=None, stdout=None) -> int:
             continue
         try:
             message = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError belongs here with JSONDecodeError: json.loads
+            # recurses per nesting level, so a deeply nested array raises it
+            # rather than a decode error, and it escaped this clause and ended
+            # the process -- breaking the invariant §7h states outright, one
+            # error reply each and never the session. Measured against the
+            # real server over stdio: 2,000 levels replied cleanly and the
+            # next tools/list was answered; 100,000 levels gave one reply,
+            # exit 1, and the queued tools/list was never answered. The
+            # threshold is high enough that this is hostile or buggy input
+            # rather than normal traffic, which is why it was the last one
+            # found, not why it should stay.
             stdout.write(json.dumps(_err(None, -32700, "parse error")) + "\n")
             stdout.flush()
             continue

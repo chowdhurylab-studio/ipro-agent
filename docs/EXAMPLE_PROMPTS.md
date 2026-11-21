@@ -1,8 +1,10 @@
 # Example prompts
 
-> These five are also a page you can send someone: [`docs/index.html`](index.html),
-> with each prompt on a copy button and the caveats beside it. This file is the
-> same content in the form the repository reads.
+> These five are also a page you can send someone: `docs/index.html`, with each
+> prompt on a copy button and the caveats beside it. Open it from a clone --
+> GitHub Pages is off for this repository, so a github.com link to it serves
+> the markup rather than the page. This file is the same content in the form
+> the repository reads, and the one to link.
 
 Five prompts you can paste at an agent that has this tool, from "I only know
 the protein's name" to "explain the run I just did". Each one was executed
