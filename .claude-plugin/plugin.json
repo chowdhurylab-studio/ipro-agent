@@ -2,12 +2,23 @@
   "name": "ipro-agent",
   "displayName": "IPRO protein redesign",
   "description": "Redesign a protein toward a stated goal by the IPRO procedure, with rotamer selection as a MILP. Designing needs PyMOL from conda.",
-  "author": { "name": "Supantha Dey" },
+  "author": {
+    "name": "Supantha Dey"
+  },
   "homepage": "https://github.com/chowdhurylab-studio/ipro-agent",
   "repository": "https://github.com/chowdhurylab-studio/ipro-agent",
   "license": "MIT",
-  "keywords": ["protein-design", "protein-engineering", "IPRO", "rotamer", "MILP", "computational-biology"],
-  "skills": ["./.claude/skills/"],
+  "keywords": [
+    "protein-design",
+    "protein-engineering",
+    "IPRO",
+    "rotamer",
+    "MILP",
+    "computational-biology"
+  ],
+  "skills": [
+    "./.claude/skills/"
+  ],
   "mcpServers": "./plugin-mcp.json",
   "userConfig": {
     "python_path": {
@@ -16,5 +27,9 @@
       "description": "Usually <conda>/envs/ipro-agent/bin/python. The server only sees what its own interpreter can import, and rotamers come only from PyMOL's mutagenesis wizard, so the wrong interpreter means no design can run. Create the environment with: conda create -n ipro-agent -c conda-forge pymol-open-source python=3.12 && conda activate ipro-agent && pip install ipro-agent",
       "required": true
     }
-  }
+  },
+  "icon": "./icon.png",
+  "documentationUrl": "https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/INSTALL.md",
+  "supportUrl": "https://github.com/chowdhurylab-studio/ipro-agent/issues",
+  "privacyPolicyUrl": "https://github.com/chowdhurylab-studio/ipro-agent/blob/main/PRIVACY.md"
 }

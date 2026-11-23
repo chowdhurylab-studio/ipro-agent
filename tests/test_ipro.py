@@ -7555,13 +7555,55 @@ def test_the_plugin_and_the_desktop_bundle_are_well_formed():
     # interpreter is asked for, and IPRO_REPO comes from the plugin root,
     # which for a marketplace install IS a checkout of this repository.
     server = servers["ipro"]
-    assert server["command"] == "${user_config.python_path}", server
     assert "python_path" in plugin["userConfig"], plugin["userConfig"]
     assert plugin["userConfig"]["python_path"]["required"] is True
     assert server["env"]["IPRO_REPO"] == "${CLAUDE_PLUGIN_ROOT}", server
     # Every ${user_config.X} must be declared, or the entry is dropped at load.
     for ref in re.findall(r"\$\{user_config\.(\w+)\}", json.dumps(servers)):
         assert ref in plugin["userConfig"], ref
+
+    # The directory's pre-submission check BLOCKS an MCP `command` holding any
+    # variable but ${CLAUDE_PLUGIN_ROOT}. This used to be
+    # ${user_config.python_path} directly, which reads naturally and would
+    # have been refused outright. The interpreter now arrives through `env`,
+    # where a user_config reference is the documented pattern, and the command
+    # is a fixed path to a launcher inside the plugin.
+    cmd = server["command"]
+    assert cmd.startswith("${CLAUDE_PLUGIN_ROOT}/"), cmd
+    others = [v for v in re.findall(r"\$\{([^}]+)\}", cmd)
+              if v != "CLAUDE_PLUGIN_ROOT"]
+    assert not others, f"{others} in an MCP command blocks directory submission"
+    for bad in ("$(", "`", "*", " -c "):
+        assert bad not in cmd, (bad, cmd)
+    launcher = REPO / cmd.replace("${CLAUDE_PLUGIN_ROOT}/", "")
+    assert launcher.is_file(), launcher
+    assert os.access(launcher, os.X_OK), f"{launcher} must be executable"
+    assert "IPRO_PYTHON" in server["env"], server["env"]
+
+    # Listing fields, read by the directory portal and ignored by Claude Code.
+    for field in ("icon", "documentationUrl", "supportUrl", "privacyPolicyUrl"):
+        assert field in plugin, f"the directory listing needs {field}"
+    icon = REPO / plugin["icon"][2:]
+    assert icon.is_file() and icon.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", icon
+    assert icon.stat().st_size < 512 * 1024, icon.stat().st_size
+    assert (REPO / "PRIVACY.md").is_file(), plugin["privacyPolicyUrl"]
+    for field in ("documentationUrl", "privacyPolicyUrl"):
+        tail = plugin[field].split("/blob/main/", 1)[1]
+        assert (REPO / tail).is_file(), f"{field} points at {tail}, which is missing"
+
+    # A README of at least 40 words, not counting code blocks, or the
+    # directory blocks the submission.
+    readme = re.sub(r"```.*?```", "", (REPO / "README.md").read_text(), flags=re.S)
+    assert len(readme.split()) >= 40, len(readme.split())
+    assert "license" in plugin or (REPO / "LICENSE").is_file()
+
+    # Files the directory scanner refuses outright.
+    tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                             cwd=REPO).stdout.split()
+    junk = [f for f in tracked
+            if Path(f).name in (".DS_Store", "Thumbs.db", "desktop.ini")
+            or f.startswith("__MACOSX")]
+    assert not junk, junk
 
     # This file must NOT be called .mcp.json: at a repo root that is also a
     # project MCP config, where ${user_config.*} does not resolve, so anyone
