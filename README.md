@@ -32,6 +32,23 @@ ensemble of the best designs.
 
 ## Quick start
 
+**The short way: let your agent install it.** Paste this into Claude Code,
+Claude Desktop, Cursor, Codex or Copilot:
+
+> Set up ipro-agent for me from
+> https://github.com/chowdhurylab-studio/ipro-agent — read its README, create
+> the conda environment it needs (PyMOL is conda-only, so pip alone will not
+> do), install the package into that environment, and add the MCP server to
+> whichever config file this client uses.
+
+This works everywhere because the part that differs between clients — which
+file the server goes in, and what the key is called — is the part the agent
+works out for itself. It is also the honest demonstration: a tool built to be
+driven by an agent should be installable by one.
+
+The rest of this section is the same thing by hand, if you would rather do it
+yourself or the agent gets stuck.
+
 This is **not** in Anthropic's plugin directory, so searching the in-app
 plugin browser will not find it. Every route below names this repository once.
 Pick the row for what you already have.
