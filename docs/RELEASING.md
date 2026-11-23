@@ -99,6 +99,34 @@ sent, which is the fastest way to see which field disagrees.
 - Create a GitHub Release for the tag. The workflow does not, so without this
   the Releases page is empty for a package that is live.
 
+## The plugin listing, if it is submitted to the directory
+
+The Claude plugin directory follows one branch or tag and treats every new
+commit there as a version to scan. This repository is pushed to far more often
+than a listing should change, so the directory follows the **`plugin-release`**
+tag rather than `main`.
+
+That tag is a moving pointer, not a release marker. To update the listing:
+
+```bash
+git tag -f plugin-release <commit> && git push -f origin plugin-release
+```
+
+then open the plugin in the developer portal and select **Check for new
+commits**.
+
+It is deliberately not `v0.1.0`. Version tags here mark what was published to
+PyPI and the MCP registry, and the `.mcpb` on each GitHub Release hangs off
+one; a tag that moves cannot also be the record of what shipped. `v0.1.0` also
+predates the plugin, so following it would fail validation with "Submit a
+folder that contains .claude-plugin/plugin.json".
+
+Expect the first scan to be **held for a reviewer** rather than to pass
+outright. Two findings are structural: the MCP server starts through
+`scripts/mcp_launch.sh`, which expands `$IPRO_PYTHON`, and a validator that
+follows shell scripts flags that; and `tests/test_ipro.py` is over the 256 KiB
+per-file limit. A hold is not a rejection.
+
 ## If the workflow cannot be used
 
 The manual route still works and needs credentials, which is the reason to
