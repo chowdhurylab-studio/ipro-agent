@@ -32,31 +32,33 @@ ensemble of the best designs.
 
 ## Quick start
 
-**One command, in Claude Code.** The plugin brings the tools and the operating
-manual together and asks only for your interpreter:
+This is **not** in Anthropic's plugin directory, so searching the in-app
+plugin browser will not find it. Every route below names this repository once.
+Pick the row for what you already have.
 
-```
-/plugin install ipro-agent --marketplace chowdhurylab-studio/ipro-agent
-```
+**Claude Desktop.** Download `ipro-agent.mcpb` from the
+[latest release](https://github.com/chowdhurylab-studio/ipro-agent/releases/latest)
+and double-click it, or drag it onto the app. No command, no marketplace.
 
-That adds the marketplace and installs in one step, on Claude Code v2.1.275 or
-later. On an older one, or from a shell, it is two:
+**Claude Code, from a terminal.** Two commands:
 
 ```bash
 claude plugin marketplace add chowdhurylab-studio/ipro-agent
 claude plugin install ipro-agent@chowdhurylab
 ```
 
-This is not in Anthropic's plugin directory, so searching the in-app plugin
-browser will not find it. The marketplace is this repository, which is why one
-of the commands above has to name it.
+**Claude Code inside the desktop app**, which has no `claude` command: open
+Settings, then Plugins, then **Add** and **Add marketplace**, and give it
+`chowdhurylab-studio/ipro-agent`. Install `ipro-agent` from it afterwards. The
+in-session `/plugin install ... --marketplace ...` form is documented for
+Claude Code v2.1.275 and later, but it did nothing in the desktop app when we
+tried it, so the menu is the route to trust there.
 
-**In Claude Desktop**, download `ipro-agent.mcpb` from the
-[latest release](https://github.com/chowdhurylab-studio/ipro-agent/releases/latest)
-and double-click it, or drag it onto the app.
+**Anything else** -- Cursor, Codex, VS Code with Copilot -- takes a config
+block instead; see the two lines further down.
 
-Either way you still need PyMOL first, because neither can install it: it is
-conda-only and the conda line is below.
+Whichever you pick, you need PyMOL first, because none of them can install it:
+it is conda-only and the conda line is below.
 
 **Two lines, if your client takes a config block instead.** Install it, then
 point your MCP client at it:
