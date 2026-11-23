@@ -1,0 +1,32 @@
+{
+  "manifest_version": "0.3",
+  "name": "ipro-agent",
+  "display_name": "IPRO protein redesign",
+  "version": "0.1.0",
+  "description": "Redesign a protein toward a stated goal by the IPRO procedure, with rotamer selection as a MILP.",
+  "long_description": "An independent, agent-drivable reimplementation of the published IPRO procedure (Iterative Protein Redesign and Optimization). Fifteen tools: read a structure, resolve design positions, build the rotamer-selection integer program, and run the loop. Everything runs on your machine.\n\nThis bundle does NOT install PyMOL. Rotamers come only from PyMOL's mutagenesis wizard and pymol-open-source is conda-only, so point this at an interpreter that already has it:\n\n  conda create -n ipro-agent -c conda-forge pymol-open-source python=3.12\n  conda activate ipro-agent\n  pip install ipro-agent\n\nWithout PyMOL the server still reads structures and checks specs, and refuses to score or build the program rather than guessing.",
+  "author": { "name": "Supantha Dey", "url": "https://github.com/chowdhurylab-studio" },
+  "homepage": "https://github.com/chowdhurylab-studio/ipro-agent",
+  "documentation": "https://github.com/chowdhurylab-studio/ipro-agent/blob/main/docs/INSTALL.md",
+  "support": "https://github.com/chowdhurylab-studio/ipro-agent/issues",
+  "license": "MIT",
+  "keywords": ["protein-design", "protein-engineering", "IPRO", "rotamer", "MILP", "computational-biology"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "${user_config.python_path}",
+      "args": ["${__dirname}/server/main.py"],
+      "env": { "IPRO_REPO": "${__dirname}/repo" }
+    }
+  },
+  "user_config": {
+    "python_path": {
+      "type": "file",
+      "title": "Python interpreter that can import pymol",
+      "description": "Usually <conda>/envs/ipro-agent/bin/python, with ipro-agent pip-installed into it. The server only sees what its own interpreter can import, so the wrong one means no design can run.",
+      "required": true
+    }
+  },
+  "compatibility": { "platforms": ["darwin", "linux", "win32"] }
+}

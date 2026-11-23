@@ -7499,3 +7499,112 @@ def test_regression_the_document_fallback_urls_match_this_build():
         "the fallback must not track main, or a released copy is handed "
         "unreleased documents")
     assert RAW_BASE.endswith("/"), RAW_BASE
+
+
+def test_the_plugin_and_the_desktop_bundle_are_well_formed():
+    """Two ways to install this without editing JSON by hand: a Claude Code
+    plugin and a Claude Desktop .mcpb. Neither has a validator on this machine
+    (`claude plugin validate` needs the CLI), so the checks that matter are
+    here, written against the published schemas.
+
+    The one that would bite silently: both manifests carry a version, which
+    makes eight places that have to agree, and the release workflow checks
+    three of them."""
+    import re
+
+    plugin = json.loads((REPO / ".claude-plugin" / "plugin.json").read_text())
+    market = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text())
+    mcpb = json.loads((REPO / "mcpb" / "manifest.json").read_text())
+    servers = json.loads((REPO / "plugin-mcp.json").read_text())["mcpServers"]
+
+    version = re.search(r'^version = "([^"]+)"',
+                        (REPO / "pyproject.toml").read_text(), re.M).group(1)
+    assert plugin["version"] == version, (plugin["version"], version)
+    assert mcpb["version"] == version, (mcpb["version"], version)
+
+    # Plugin names are namespaced and a reserved-looking one is refused.
+    assert plugin["name"] == "ipro-agent"
+    for bad in ("claude", "anthropic", "anthropics"):
+        assert bad not in plugin["name"], plugin["name"]
+        assert bad not in market["name"], market["name"]
+
+    # Component paths must start with ./ and must exist.
+    for key in ("skills", "mcpServers"):
+        for path in ([plugin[key]] if isinstance(plugin[key], str) else plugin[key]):
+            assert path.startswith("./"), (key, path)
+            assert (REPO / path[2:]).exists(), (key, path)
+
+    # The skill really is where the manifest points, in <name>/SKILL.md form.
+    assert (REPO / ".claude" / "skills" / "ipro-agent" / "SKILL.md").is_file()
+
+    # The server has to be reachable without the user typing a path: the
+    # interpreter is asked for, and IPRO_REPO comes from the plugin root,
+    # which for a marketplace install IS a checkout of this repository.
+    server = servers["ipro"]
+    assert server["command"] == "${user_config.python_path}", server
+    assert "python_path" in plugin["userConfig"], plugin["userConfig"]
+    assert plugin["userConfig"]["python_path"]["required"] is True
+    assert server["env"]["IPRO_REPO"] == "${CLAUDE_PLUGIN_ROOT}", server
+    # Every ${user_config.X} must be declared, or the entry is dropped at load.
+    for ref in re.findall(r"\$\{user_config\.(\w+)\}", json.dumps(servers)):
+        assert ref in plugin["userConfig"], ref
+
+    # This file must NOT be called .mcp.json: at a repo root that is also a
+    # project MCP config, where ${user_config.*} does not resolve, so anyone
+    # opening the repo in Claude Code would be offered a broken server.
+    assert not (REPO / ".mcp.json").exists(), \
+        "name it plugin-mcp.json and point the manifest at it"
+
+    # The marketplace entry points at the repository root.
+    entry = next(p for p in market["plugins"] if p["name"] == "ipro-agent")
+    assert entry["source"] == ".", entry["source"]
+    assert market["owner"]["name"]
+
+    # MCPB: required top-level fields, and the same no-typed-path rule.
+    for field in ("manifest_version", "name", "version", "description",
+                  "author", "server"):
+        assert field in mcpb, field
+    assert mcpb["server"]["type"] in ("node", "python", "binary", "uv")
+    assert (REPO / "mcpb" / mcpb["server"]["entry_point"]).is_file()
+    for ref in re.findall(r"\$\{user_config\.(\w+)\}",
+                          json.dumps(mcpb["server"]["mcp_config"])):
+        assert ref in mcpb["user_config"], ref
+
+
+def test_the_desktop_bundle_builds_and_carries_its_documents():
+    """The .mcpb bundles no Python dependencies -- PyMOL is conda-only and
+    native, so a vendored pip half would import cleanly and still produce no
+    rotamer -- but it does bundle the documents the server offers as
+    resources, which ship with the repository rather than the wheel.
+
+    So the thing to check is that every document the server names is in the
+    zip at the path IPRO_REPO expects. The builder reads that list out of
+    mcp_server.py, and this asserts the two agree."""
+    import re
+    import zipfile
+
+    sys.path.insert(0, str(REPO / "scripts"))
+    try:
+        import build_mcpb
+    finally:
+        sys.path.pop(0)
+
+    offered = re.findall(r'"path": "([^"]+)"',
+                         (REPO / "ipro_agent" / "mcp_server.py").read_text())
+    offered = list(dict.fromkeys(offered))
+    assert build_mcpb.documents() == offered, "the builder's list must be the server's"
+    assert offered, "the server must offer documents"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "ipro-agent.mcpb"
+        n = build_mcpb.build(out)
+        assert n == len(offered), (n, len(offered))
+        names = set(zipfile.ZipFile(out).namelist())
+        assert "manifest.json" in names
+        assert "server/main.py" in names
+        for rel in offered:
+            assert f"repo/{rel}" in names, f"{rel} is offered but not bundled"
+        # Small enough to hand someone, and no Python dependencies in it.
+        assert out.stat().st_size < 2 * 1048576, out.stat().st_size
+        assert not any(x.startswith("server/lib/") for x in names), \
+            "this bundle deliberately vendors nothing"

@@ -32,8 +32,23 @@ ensemble of the best designs.
 
 ## Quick start
 
-**Two lines, if you want to drive it from an agent.** Install it, then point
-your MCP client at it:
+**One command, in Claude Code.** The plugin brings the tools and the operating
+manual together and asks only for your interpreter:
+
+```
+/plugin marketplace add chowdhurylab-studio/ipro-agent
+/plugin install ipro-agent@chowdhurylab
+```
+
+**In Claude Desktop**, download `ipro-agent.mcpb` from the
+[latest release](https://github.com/chowdhurylab-studio/ipro-agent/releases/latest)
+and double-click it, or drag it onto the app.
+
+Either way you still need PyMOL first, because neither can install it: it is
+conda-only and the conda line is below.
+
+**Two lines, if your client takes a config block instead.** Install it, then
+point your MCP client at it:
 
 ```bash
 pip install ipro-agent

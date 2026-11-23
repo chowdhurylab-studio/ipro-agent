@@ -1,0 +1,14 @@
+{
+  "name": "chowdhurylab",
+  "description": "Research tools from the Chowdhury Lab at Iowa State University.",
+  "owner": { "name": "Chowdhury Lab", "url": "https://github.com/chowdhurylab-studio" },
+  "plugins": [
+    {
+      "name": "ipro-agent",
+      "source": ".",
+      "description": "Protein redesign by IPRO: rotamer selection as a MILP, driven from chat. Fifteen tools, runs locally, nothing to sign up for. Designing needs PyMOL from conda.",
+      "category": "science",
+      "tags": ["protein-design", "structural-biology", "optimization"]
+    }
+  ]
+}

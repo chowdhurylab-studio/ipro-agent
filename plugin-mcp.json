@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ipro": {
+      "command": "${user_config.python_path}",
+      "args": ["-m", "ipro_agent.mcp_server"],
+      "env": { "IPRO_REPO": "${CLAUDE_PLUGIN_ROOT}" }
+    }
+  }
+}

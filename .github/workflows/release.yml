@@ -110,6 +110,35 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  bundle:
+    # The Claude Desktop extension. The README points people at the latest
+    # release to download it, so building it by hand after tagging would be a
+    # step that gets forgotten and a link that 404s.
+    needs: pypi
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # to attach the file to the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: build it
+        run: python3 scripts/build_mcpb.py dist/ipro-agent.mcpb
+
+      - name: attach it to the release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/ipro-agent.mcpb --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name'
+
   registry:
     needs: pypi
     runs-on: ubuntu-latest

@@ -386,6 +386,22 @@ Three supported ways to use it, and the recipes below cover all of them:
    `pip install git+https://github.com/chowdhurylab-studio/ipro-agent` for an
    unreleased commit.
 
+A client can also install it for you, which is the shortest path of all and
+still needs the conda environment below:
+
+- **Claude Code**: `/plugin marketplace add chowdhurylab-studio/ipro-agent`
+  then `/plugin install ipro-agent@chowdhurylab`. The plugin carries the skill
+  and the MCP server, and asks only for the interpreter. Because a
+  marketplace install fetches this repository, `IPRO_REPO` points at the
+  plugin's own copy and the documents are served without a separate clone.
+- **Claude Desktop**: download `ipro-agent.mcpb` from the latest release and
+  double-click it. It bundles the eight documents the server offers as
+  resources, so it needs no checkout either. Build it yourself with
+  `python3 scripts/build_mcpb.py`.
+
+Neither installs PyMOL, and neither installs the Python package: point both at
+an environment where `pip install ipro-agent` has already run.
+
 Either installed route adds two console scripts, `ipro-agent` (the CLI) and
 `ipro-agent-mcp` (the MCP server, which is what an MCP client's `command`
 should point at), and both work from any directory. The two scripts PyMOL runs
