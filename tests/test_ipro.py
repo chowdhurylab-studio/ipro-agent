@@ -7519,8 +7519,22 @@ def test_the_plugin_and_the_desktop_bundle_are_well_formed():
 
     version = re.search(r'^version = "([^"]+)"',
                         (REPO / "pyproject.toml").read_text(), re.M).group(1)
-    assert plugin["version"] == version, (plugin["version"], version)
     assert mcpb["version"] == version, (mcpb["version"], version)
+
+    # The plugin deliberately carries NO version, and this is the opposite of
+    # the rule everywhere else in this repo. Its marketplace entry's source is
+    # the repository root, so it installs from whatever main holds; and a
+    # `version` that does not change on every push makes `claude plugin
+    # update` a no-op -- it reports "already at the latest version" and leaves
+    # the user on the copy they first installed. This repo pushes to main far
+    # more often than it tags, so pinning the plugin to the package version
+    # would have frozen every existing install at the first release. With the
+    # field absent, Claude Code versions the plugin by commit SHA and an
+    # update follows main. The .mcpb keeps its version: it is built per
+    # release and attached to that release, so it should say which one.
+    assert "version" not in plugin, (
+        "a plugin installed from a git marketplace must not pin a version it "
+        "does not bump on every push, or users never receive an update")
 
     # Plugin names are namespaced and a reserved-looking one is refused.
     assert plugin["name"] == "ipro-agent"

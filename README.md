@@ -36,9 +36,20 @@ ensemble of the best designs.
 manual together and asks only for your interpreter:
 
 ```
-/plugin marketplace add chowdhurylab-studio/ipro-agent
-/plugin install ipro-agent@chowdhurylab
+/plugin install ipro-agent --marketplace chowdhurylab-studio/ipro-agent
 ```
+
+That adds the marketplace and installs in one step, on Claude Code v2.1.275 or
+later. On an older one, or from a shell, it is two:
+
+```bash
+claude plugin marketplace add chowdhurylab-studio/ipro-agent
+claude plugin install ipro-agent@chowdhurylab
+```
+
+This is not in Anthropic's plugin directory, so searching the in-app plugin
+browser will not find it. The marketplace is this repository, which is why one
+of the commands above has to name it.
 
 **In Claude Desktop**, download `ipro-agent.mcpb` from the
 [latest release](https://github.com/chowdhurylab-studio/ipro-agent/releases/latest)

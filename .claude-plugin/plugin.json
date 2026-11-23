@@ -1,7 +1,6 @@
 {
   "name": "ipro-agent",
   "displayName": "IPRO protein redesign",
-  "version": "0.1.0",
   "description": "Redesign a protein toward a stated goal by the IPRO procedure, with rotamer selection as a MILP. Designing needs PyMOL from conda.",
   "author": { "name": "Supantha Dey" },
   "homepage": "https://github.com/chowdhurylab-studio/ipro-agent",

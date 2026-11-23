@@ -389,8 +389,10 @@ Three supported ways to use it, and the recipes below cover all of them:
 A client can also install it for you, which is the shortest path of all and
 still needs the conda environment below:
 
-- **Claude Code**: `/plugin marketplace add chowdhurylab-studio/ipro-agent`
-  then `/plugin install ipro-agent@chowdhurylab`. The plugin carries the skill
+- **Claude Code**: `/plugin install ipro-agent --marketplace chowdhurylab-studio/ipro-agent`
+  in a session, which adds the marketplace and installs in one step. It is not
+  in Anthropic's plugin directory, so the in-app plugin browser will not find
+  it by name. The plugin carries the skill
   and the MCP server, and asks only for the interpreter. Because a
   marketplace install fetches this repository, `IPRO_REPO` points at the
   plugin's own copy and the documents are served without a separate clone.
